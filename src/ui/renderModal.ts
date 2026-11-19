@@ -1,6 +1,6 @@
 import { CellBuffer, type Rect } from '../core/buffer.ts';
 import { padLeftWidth, padRightWidth, truncateWidth, wrapByWidth } from '../core/width.ts';
-import { getFilteredLogs } from '../state/store.ts';
+import { getFilteredLogs, sortRoutesForDisplay } from '../state/store.ts';
 import { THEME, lerpColor, resolveColorKey } from '../theme.ts';
 import type { AppState } from '../types.ts';
 
@@ -433,10 +433,12 @@ function renderDecisionModal(buf: CellBuffer, rect: Rect, state: AppState): void
   );
   cy++;
 
-  for (const route of state.routes) {
+  // 4개 라우트 전체(delegate_swarm 포함) 표시 — 공간 부족 시에만 forcedSplit/split 우선 노출
+  for (const route of sortRoutesForDisplay(state.routes)) {
     if (cy >= rect.y + rect.h - 3) break;
-    const isSplit = route.p < 0.7;
-    const color = isSplit ? THEME.orange : THEME.green;
+    const isSplit = route.forcedSplit === true || route.p < 0.7;
+    const color =
+      route.forcedSplit === true ? THEME.trafficRed : isSplit ? THEME.orange : THEME.green;
     const track = isSplit ? THEME.bgOrangeTrack : THEME.bgGreenTrack;
 
     buf.writeText(ix, cy, padRightWidth(route.name, 20), color, THEME.bgModal, true);
@@ -444,11 +446,31 @@ function renderDecisionModal(buf: CellBuffer, rect: Rect, state: AppState): void
     buf.writeText(
       ix + 52,
       cy,
-      `p=${route.p.toFixed(2)}  ${isSplit ? 'split → Argon' : 'sharp → 코드 실행'}`,
+      route.forcedSplit === true
+        ? `p=${route.p.toFixed(2)}  SPLIT! → 강제 split`
+        : `p=${route.p.toFixed(2)}  ${isSplit ? 'split → Argon' : 'sharp → 코드 실행'}`,
       color,
       THEME.bgModal,
       true,
       iw - 52
+    );
+    cy++;
+
+    // 상세 줄: 근거(실측/사전) · 표본 n · 연속 오류 · 강제 분기 사유
+    const basisText =
+      route.basis === 'measured' ? '실측' : route.basis === 'prior' ? '사전' : '—';
+    let detail = `근거: ${basisText} · 표본 n=${route.samples ?? 0} · 연속 오류 ${route.consecutiveErrors ?? 0}회`;
+    if (route.forcedSplit === true) {
+      detail += ' · 강제 분기: 2연속 오류 강제 split';
+    }
+    buf.writeText(
+      ix + 2,
+      cy,
+      detail,
+      route.forcedSplit === true ? THEME.trafficRed : THEME.fgSoft,
+      THEME.bgModal,
+      false,
+      iw - 2
     );
     cy += 2;
   }

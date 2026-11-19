@@ -54,9 +54,19 @@ export function applyStreamEvent(state: AppState, ev: StreamEvent): void {
       let split = 0;
       state.routes = ev.routes.map((r) => {
         const clamped = Math.max(0, Math.min(1, r.p));
-        if (clamped >= 0.7) sharp++;
-        else split++;
-        return { name: r.name, p: clamped, targetHint: r.targetHint };
+        // N7: 2연속 오류 강제 split(forcedSplit)은 p 값과 무관하게 split으로 집계
+        if (r.forcedSplit === true || clamped < 0.7) split++;
+        else sharp++;
+        return {
+          name: r.name,
+          p: clamped,
+          targetHint: r.targetHint,
+          id: r.id,
+          basis: r.basis,
+          samples: r.samples,
+          consecutiveErrors: r.consecutiveErrors,
+          forcedSplit: r.forcedSplit,
+        };
       });
       state.sharpCount = sharp;
       state.splitCount = split;

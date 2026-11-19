@@ -1,0 +1,43 @@
+{
+  "$comment": "roster.json 예시 — 역할↔모델 바인딩을 코드 수정 없이 교체한다. 사용법: 이 파일을 ~/.config/herdr-quad/roster.json (로컬 전체 기본) 또는 <repo>/.herdr/roster.json (프로젝트 오버라이드)으로 복사한 뒤 구독/쿼터 상황에 맞게 bin·provider·model·dailyTurnBudgets를 편집. 우선순위: --roster 플래그 > HERDR_ROSTER_PATH > <repo>/.herdr/roster.json > ~/.config/herdr-quad/roster.json > 내장 기본값. 미지정 필드는 내장 quota-saver 값을 상속한다(부분 오버라이드 허용). bin은 포터블한 명령 이름(예: 'pi')을 권장하며, 절대경로가 필요할 때만 명시한다 — 실행 파일 해석 순서는 bin > 환경변수(PI_BIN/HERDR_PI_BIN·DEVIN_BIN·AGY_BIN·CLAUDE_BIN) > PATH > 관례적 설치 위치(~/.bun/bin/pi, ~/.local/bin/agy).",
+  "defaultProfile": "quota-saver",
+  "profiles": {
+    "quota-saver": {
+      "description": "기본 프로필 — agy 상시 0, Lead/Verifier는 pi, Carbon(advisor)은 온디맨드 1회성",
+      "dailyTurnBudgets": { "agy": 20 },
+      "roles": {
+        "lead":     { "cli": "pi", "provider": "opencodex", "model": "glm-zcode/glm-5.3", "thinking": "max" },
+        "explore":  { "cli": "pi", "provider": "opencodex", "model": "command-code/deepseek-deepseek-v4.1-flash", "thinking": "medium", "readonly": true },
+        "coder":    { "cli": "devin", "permissionMode": "auto" },
+        "verifier": { "cli": "pi", "provider": "opencodex", "model": "command-code/deepseek-deepseek-v4.1-flash", "thinking": "max", "readonly": true },
+        "advisor":  { "cli": "agy", "model": "gemini-4-hydrogen-xhigh", "readonly": true, "onDemand": true, "quotaBucket": "agy" }
+      }
+    },
+    "agy-quad": {
+      "description": "선택 프로필 — Argon(lead)/Carbon(advisor)/Neon(verifier) agy 3세션 상시, 일일 agy 예산 초과 시 quota-saver로 자동 강등",
+      "fallbackProfile": "quota-saver",
+      "dailyTurnBudgets": { "agy": 20 },
+      "roles": {
+        "lead":     { "cli": "agy", "model": "gemini-4-argon-high", "permissionMode": "auto" },
+        "explore":  { "cli": "pi", "provider": "opencodex", "model": "command-code/deepseek-deepseek-v4.1-flash", "thinking": "medium", "readonly": true },
+        "coder":    { "cli": "devin", "permissionMode": "auto" },
+        "verifier": { "cli": "agy", "model": "gemini-4-neon-high", "readonly": true },
+        "advisor":  { "cli": "agy", "model": "gemini-4-carbon-high", "readonly": true }
+      }
+    },
+    "devin-lead": {
+      "description": "예시 — 리드를 Devin으로 교체 (나머지 슬롯은 quota-saver 상속)",
+      "roles": {
+        "lead": { "cli": "devin", "permissionMode": "auto" }
+      }
+    },
+    "claude-hybrid": {
+      "description": "예시 — 리드·검증을 Claude로, 탐색을 pi 저가 모델로 교체",
+      "roles": {
+        "lead":     { "cli": "claude", "model": "claude-sonnet-4-6", "permissionMode": "auto" },
+        "explore":  { "cli": "pi", "provider": "opencodex", "model": "openai-codex/gpt-5.6-luna", "thinking": "high", "readonly": true },
+        "verifier": { "cli": "claude", "model": "claude-opus-4-8", "permissionMode": "plan", "readonly": true }
+      }
+    }
+  }
+}

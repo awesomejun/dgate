@@ -1,0 +1,22 @@
+{
+  "dg-guard": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "node hooks/dg-hook.ts --guard", "timeout": 3 }
+        ]
+      }
+    ]
+  },
+  "dg-collect": {
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "node hooks/dg-hook.ts --collect", "timeout": 3 }
+        ]
+      }
+    ]
+  }
+}

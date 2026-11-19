@@ -6,12 +6,12 @@ import type { AppState, QuadRole } from '../types.ts';
 
 export const QUAD_SOCKET_PATH = path.join(
   os.tmpdir(),
-  `herdr-gemini-quad-${process.env.USER || 'user01'}.sock`
+  `herdr-gemini-quad-${process.env.USER || 'anon'}.sock`
 );
 
 export const QUAD_STATE_FILE = path.join(
   os.tmpdir(),
-  `herdr-gemini-quad-${process.env.USER || 'user01'}.json`
+  `herdr-gemini-quad-${process.env.USER || 'anon'}.json`
 );
 
 export interface QuadMessage {
@@ -27,6 +27,9 @@ export class QuadBusServer {
   private server: net.Server | null = null;
   private clients: Set<net.Socket> = new Set();
   private onActionCallback?: (msg: QuadMessage) => void;
+  // 선행 버그 #4 수정: 80ms 비원자적 writeFileSync 경합 → 250ms 쓰로틀 + dirty 체크 + 원자적 교체
+  private lastWrittenJson: string | null = null;
+  private lastFileWriteMs = 0;
 
   constructor(onAction?: (msg: QuadMessage) => void) {
     this.onActionCallback = onAction;
@@ -98,9 +101,18 @@ export class QuadBusServer {
       }
     }
     // 상태 파일에도 저장하여 신규 실행 프로세스가 바로 복원할 수 있도록 함
+    // 선행 버그 #4 수정: 동일 페이로드 스킵 + 250ms 쓰로틀 + tmp→rename 원자적 교체
     if (msg.type === 'state' && msg.state) {
       try {
-        fs.writeFileSync(QUAD_STATE_FILE, JSON.stringify(msg.state), 'utf8');
+        const serialized = JSON.stringify(msg.state);
+        const now = Date.now();
+        if (serialized !== this.lastWrittenJson && now - this.lastFileWriteMs >= 250) {
+          const tmpPath = `${QUAD_STATE_FILE}.tmp.${process.pid}`;
+          fs.writeFileSync(tmpPath, serialized, 'utf8');
+          fs.renameSync(tmpPath, QUAD_STATE_FILE);
+          this.lastWrittenJson = serialized;
+          this.lastFileWriteMs = now;
+        }
       } catch {
         // 무시
       }

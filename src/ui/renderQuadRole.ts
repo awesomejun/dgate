@@ -5,7 +5,7 @@ import {
   truncateWidth,
   wrapByWidth,
 } from '../core/width.ts';
-import { effortToGauge, TRIGGER_LABELS } from '../state/store.ts';
+import { effortToGauge, sortRoutesForDisplay, TRIGGER_LABELS } from '../state/store.ts';
 import { THEME, type RGB } from '../theme.ts';
 import type { AppState, LogEntry, QuadRole } from '../types.ts';
 
@@ -101,24 +101,42 @@ function renderArgonView(buf: CellBuffer, state: AppState, cols: number, rows: n
     }
   );
 
-  const routes = state.routes.slice(0, decH - 2);
+  // N3: forcedSplit → split 우선 정렬 후 표시 — 소형 창에서도 4번째 라우트·강제 분기가 잘리지 않는다
+  const routes = sortRoutesForDisplay(state.routes).slice(0, Math.max(1, decH - 2));
   const labelW = 14;
   for (let i = 0; i < routes.length; i++) {
     const r = routes[i]!;
     const ry = decY + 1 + i;
     buf.writeText(padX + 2, ry, r.name, THEME.fgSoft, THEME.bgElevated, false, labelW);
 
-    const barW = Math.max(8, cols - padX * 2 - labelW - 20);
-    buf.drawProgressBar(padX + 2 + labelW, ry, barW, r.p, THEME.green, THEME.bgGreenTrack);
-
-    const tag = r.p >= 0.7 ? 'sharp' : 'split';
-    const tagFg = r.p >= 0.7 ? THEME.green : THEME.orange;
-    buf.writeText(
-      padX + 2 + labelW + barW + 1,
+    const isSplit = r.forcedSplit === true || r.p < 0.7;
+    const barFg = r.forcedSplit === true ? THEME.trafficRed : isSplit ? THEME.orange : THEME.green;
+    const barW = Math.max(8, cols - padX * 2 - labelW - 22);
+    buf.drawProgressBar(
+      padX + 2 + labelW,
       ry,
-      `p=${r.p.toFixed(2)} ${tag}`,
-      tagFg,
-      THEME.bgElevated
+      barW,
+      r.p,
+      barFg,
+      isSplit ? THEME.bgOrangeTrack : THEME.bgGreenTrack
+    );
+
+    // 축약 태그: 강제 분기는 ERR2, 일반은 근거 표본 수 m24/p2 (N3)
+    let tag = `p=${r.p.toFixed(2)} ${r.forcedSplit === true ? 'SPLIT' : isSplit ? 'split' : 'sharp'}`;
+    if (r.forcedSplit === true) {
+      tag += ' ERR2';
+    } else if (r.basis !== undefined) {
+      tag += ` ${r.basis === 'measured' ? 'm' : 'p'}${r.samples ?? 0}`;
+    }
+    const tagX = padX + 2 + labelW + barW + 1;
+    buf.writeText(
+      tagX,
+      ry,
+      tag,
+      r.forcedSplit === true ? THEME.trafficRed : isSplit ? THEME.orange : THEME.green,
+      THEME.bgElevated,
+      r.forcedSplit === true,
+      Math.max(0, cols - padX - 2 - tagX)
     );
   }
 

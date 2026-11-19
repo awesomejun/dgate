@@ -8,6 +8,16 @@ import {
   formatNowHHMMSS,
   formatTokensCount,
 } from '../state/store.ts';
+import { resolveDbPath, resolveProjectIdentity } from '../decision/db.ts';
+import { classifyTool } from '../decision/engine.ts';
+import { hasHookCoverageById, recordToolOutcomeSafe } from '../decision/telemetry.ts';
+import {
+  commandLineOfArgs,
+  decisionWriteBlocked,
+  evaluateToolDecision,
+  syncRoutesFromSsot,
+  targetHashForArgs,
+} from './agyStreamMapper.ts';
 import type { AppState } from '../types.ts';
 
 export interface TranscriptToolCall {
@@ -28,6 +38,7 @@ export interface TranscriptStep {
   thinking?: string;
   tool_calls?: TranscriptToolCall[];
   content?: string;
+  error?: string;
 }
 
 export function isTranscriptStep(obj: unknown): obj is TranscriptStep {
@@ -102,14 +113,162 @@ function summarizeToolArgs(args?: Record<string, unknown> | string): string {
   return '';
 }
 
+// ---------------------------------------------------------------------------
+// [B6] PLANNER_RESPONSE(M tool_calls) → 직후 GENERIC M개 발행 순서 1:1 귀속
+
+interface PendingToolCall {
+  name: string;
+  args?: Record<string, unknown> | string;
+}
+
+interface PendingBatch {
+  plannerStepIdx: number | null;
+  calls: PendingToolCall[];
+  results: TranscriptStep[];
+}
+
+interface TxMapperCtx {
+  pending: PendingBatch | null;
+  /** 이전 미완 배치의 잔여 GENERIC 수 — 신규 배치 결과가 아니므로 스킵(순서 보존) */
+  orphanGenerics: number;
+}
+
+const txMapperCtx = new WeakMap<AppState, TxMapperCtx>();
+
+function txCtx(state: AppState): TxMapperCtx {
+  let ctx = txMapperCtx.get(state);
+  if (!ctx) {
+    ctx = { pending: null, orphanGenerics: 0 };
+    txMapperCtx.set(state, ctx);
+  }
+  return ctx;
+}
+
+/**
+ * 미완 배치 폐기 — 뒤이을 GENERIC들은 이 배치의 결과이므로 orphanGenerics로 넘겨
+ * 새 PLANNER 배치와의 1:1 순서 귀속을 보존한다(§5.2 B6 보수적 기록 생략).
+ */
+function abortPendingBatch(ctx: TxMapperCtx): void {
+  if (ctx.pending && ctx.pending.results.length < ctx.pending.calls.length) {
+    ctx.orphanGenerics += ctx.pending.calls.length - ctx.pending.results.length;
+  }
+  ctx.pending = null;
+}
+
+function parseToolArgs(
+  args: Record<string, unknown> | string | undefined
+): Record<string, unknown> | null {
+  if (!args) return null;
+  if (typeof args !== 'string') return args;
+  try {
+    const parsed: unknown = JSON.parse(args);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// [N6] GENERIC 본문 에러 판정 — 헤더(Created At·Completed At·Showing lines) 이후
+// 본문만 검사해 정상 소스 속 "Error" 문자열 오탐을 막는다.
+
+const GENERIC_HEADER_RE = /^(Created At|Completed At):\s/;
+const SHOWING_LINES_RE = /^Showing lines \d+(?:-\d+)? of \d+/;
+const EXIT_CODE_NONZERO_RE = /Command exited with code\s+(?!0\b)-?\d+/;
+
+export function genericBodyAfterHeaders(raw: string): string {
+  const lines = raw.split('\n');
+  let i = 0;
+  while (i < lines.length) {
+    const l = lines[i]!;
+    if (GENERIC_HEADER_RE.test(l) || SHOWING_LINES_RE.test(l) || l.trim() === '') {
+      i += 1;
+      continue;
+    }
+    break;
+  }
+  return lines.slice(i).join('\n');
+}
+
+export function isGenericStepError(step: TranscriptStep): boolean {
+  if (step.status === 'ERROR') return true; // ① 툴 실행 실패
+  const raw = step.content ?? '';
+  if (!raw) return false;
+  const body = genericBodyAfterHeaders(raw);
+  if (EXIT_CODE_NONZERO_RE.test(body)) return true; // ② run_command 비정상 종료
+  // ③ 파일 도구 에러 응답 — 본문 선두만 검사(본문 내부 "Error" 오탐 금지)
+  const head = body.trimStart();
+  if (head.startsWith('Encountered error in step execution:')) return true;
+  if (head.startsWith('{"error"')) return true;
+  if (/^ENOENT[:\s]/.test(head)) return true;
+  return false;
+}
+
+function genericErrorSnippet(step: TranscriptStep, body: string): string {
+  if (typeof step.error === 'string' && step.error) return step.error.slice(0, 300);
+  const m = /Encountered error in step execution:\s*([^\n]{0,300})/.exec(body);
+  if (m) return m[1]!.trim();
+  const c = /Command exited with code\s+(-?\d+)/.exec(body);
+  if (c) return `exit code ${c[1]}`;
+  return 'generic step error';
+}
+
+/**
+ * 완성 배치를 SSOT에 기록한다(source 'transcript', 멱등 키 tx:conv:plannerStepIdx:toolIdx).
+ * plannerStepIdx 누락 시 멱등 키를 만들 수 없어 배치 전체 기록 생략.
+ * RUNNING GENERIC은 결과 미확정이라 해당 인덱스만 기록 생략한다.
+ */
+function flushTranscriptBatch(state: AppState, batch: PendingBatch): void {
+  if (decisionWriteBlocked(state)) return;
+  if (batch.plannerStepIdx === null || !Number.isFinite(batch.plannerStepIdx)) return;
+  const convId = state.conversationId;
+  const dbPath = resolveDbPath();
+  if (convId && hasHookCoverageById(dbPath, convId)) return;
+  try {
+    const { projectId, projectLabel } = resolveProjectIdentity(process.cwd());
+    for (let k = 0; k < batch.calls.length; k++) {
+      const call = batch.calls[k]!;
+      const gstep = batch.results[k]!;
+      if (gstep.status === 'RUNNING') continue;
+      const argsObj = parseToolArgs(call.args);
+      const toolName = call.name || 'tool';
+      const { route, toolClass } = classifyTool(toolName, argsObj ?? undefined);
+      const ok = !isGenericStepError(gstep);
+      recordToolOutcomeSafe(dbPath, {
+        projectId,
+        projectLabel,
+        route,
+        toolClass,
+        toolName,
+        ok,
+        conversationId: convId,
+        step: typeof gstep.step_index === 'number' ? gstep.step_index : null,
+        targetHash: targetHashForArgs(argsObj ?? undefined),
+        errorSnippet: ok
+          ? null
+          : genericErrorSnippet(gstep, genericBodyAfterHeaders(gstep.content ?? '')),
+        source: 'transcript',
+        dedupeKey: `tx:${convId ?? 'unknown'}:${batch.plannerStepIdx}:${k}`,
+        commandLine: commandLineOfArgs(argsObj ?? undefined),
+      });
+    }
+  } catch {
+    // fail-open — 수집 실패가 UI를 죽이지 않는다(§3.5)
+  }
+}
+
 /**
  * transcript.jsonl의 개별 스텝을 TUI AppState에 정밀 매핑합니다.
  */
 export function applyTranscriptStep(state: AppState, step: TranscriptStep): void {
   const timeStr = parseCreatedAtToHHMMSS(step.created_at);
+  const ctx = txCtx(state);
 
   // 1. 유저 요청 스텝 (USER_INPUT)
   if (step.type === 'USER_INPUT' || step.source === 'USER_EXPLICIT') {
+    abortPendingBatch(ctx); // [B6] 새 사용자 턴 — 미완 도구 배치 폐기
     const rawContent = step.content ?? '';
     const cleanRequest = extractUserRequest(rawContent);
     if (cleanRequest) {
@@ -175,9 +334,20 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
 
     // 도구 호출 (tool_calls) -> Decision 1 & Hydrogen & Neon
     const toolCalls = step.tool_calls ?? [];
+    abortPendingBatch(ctx); // [B6] 새 PLANNER 배치 — 이전 미완 배치는 고아로 폐기
     if (toolCalls.length > 0) {
       state.totalForks += toolCalls.length;
       state.phase = `도구 실행 (${toolCalls.length}건)`;
+
+      // [B6] 직후 GENERIC M개와 발행 순서대로 1:1 귀속할 배치 시작
+      ctx.pending = {
+        plannerStepIdx:
+          typeof step.step_index === 'number' && Number.isFinite(step.step_index)
+            ? step.step_index
+            : null,
+        calls: toolCalls.map((c) => ({ name: c.name || 'tool', args: c.args })),
+        results: [],
+      };
 
       for (const call of toolCalls) {
         const toolName = call.name || 'tool';
@@ -185,25 +355,12 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
         const cardIdx = classifyToolCard(toolName);
         const card = state.cards[cardIdx]!;
 
-        // Decision 라우트 확률 갱신
-        const isSearch =
-          toolName.includes('grep') ||
-          toolName.includes('find') ||
-          toolName.includes('list');
-        const isFile =
-          toolName.includes('file') ||
-          toolName.includes('dir') ||
-          toolName.includes('edit');
-        const isAsk =
-          toolName.includes('ask') || toolName.includes('question');
-
-        state.routes = [
-          { name: '어느 파일', p: isFile ? 0.92 : 0.82 },
-          { name: '어느 도구', p: isSearch ? 0.94 : 0.85 },
-          { name: '재시도 또는 중단', p: isAsk ? 0.42 : 0.91 },
-        ];
-        state.sharpCount = state.routes.filter((r) => r.p >= 0.7).length;
-        state.splitCount = state.routes.length - state.sharpCount;
+        // SQLite SSOT 실측 판정 — 고정 휴리스틱/'sharp' 하드코딩 제거(§5.1-3)
+        const decision = evaluateToolDecision(
+          toolName,
+          parseToolArgs(call.args) ?? undefined,
+          state.conversationId
+        );
 
         // Hydrogen 카드 갱신
         card.status = 'running';
@@ -230,7 +387,7 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
           state,
           'Decision 1',
           'green',
-          `도구 분기 → ${toolName}${argHint ? ` (${argHint})` : ''} sharp`,
+          `도구 분기 → ${toolName}${argHint ? ` (${argHint})` : ''} ${decision.tag} (p=${decision.p.toFixed(2)}, ${decision.basis})`,
           timeStr
         );
 
@@ -254,6 +411,7 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
           );
         }
       }
+      syncRoutesFromSsot(state); // 배치 전체 반영 후 라우트 4종 SSOT 최신화
     } else if (step.status === 'DONE') {
       // 도구 호출 없이 완료된 턴
       state.phase = '완료';
@@ -298,10 +456,21 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
 
   // 3. 도구 실행 결과 (GENERIC)
   if (step.type === 'GENERIC') {
+    // [B6] 배치 귀속 — 고아 잔여분 스킵, M개 완성 시 SSOT 1회 기록
+    if (ctx.orphanGenerics > 0) {
+      ctx.orphanGenerics -= 1;
+    } else if (ctx.pending) {
+      ctx.pending.results.push(step);
+      if (ctx.pending.results.length === ctx.pending.calls.length) {
+        const batch = ctx.pending;
+        ctx.pending = null;
+        flushTranscriptBatch(state, batch);
+      }
+    }
+
+    // [N6] 헤더 이후 본문 판정 — DONE인데 비정상 종료·파일 툴 에러도 감지
     const raw = step.content ?? '';
-    const isError =
-      step.status === 'ERROR' ||
-      raw.includes('Command exited with code') && !raw.includes('code 0');
+    const isError = isGenericStepError(step);
 
     if (isError) {
       state.consecutiveToolErrors += 1;
@@ -335,34 +504,41 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
         firstLine.length > 55 ? firstLine.slice(0, 54) + '…' : firstLine;
       appendLog(state, 'Hydrogen', 'blue', `도구 완료 — ${brief}`, timeStr);
     }
+
+    // GENERIC 결과 반영 후 라우트·sharp·split을 SSOT 실측으로 최신화(선행 버그 #3)
+    syncRoutesFromSsot(state);
   }
 }
 
 /**
- * ~/.gemini/antigravity/brain 디렉터리에서 가장 최근에 수정된 세션의 transcript.jsonl 경로를 탐색합니다.
+ * transcript.jsonl 경로 탐색 — CLI(`antigravity-cli`)와 GUI(`antigravity`) 두 brain
+ * 루트를 모두 스캔해 mtime이 가장 최신인 세션의 transcript를 반환합니다(§5.1-3).
  */
 export function findLatestTranscriptPath(customDir?: string): string | null {
-  const baseDir =
-    customDir ||
-    path.join(os.homedir(), '.gemini', 'antigravity', 'brain');
+  const baseDirs = customDir
+    ? [customDir]
+    : [
+        path.join(os.homedir(), '.gemini', 'antigravity-cli', 'brain'),
+        path.join(os.homedir(), '.gemini', 'antigravity', 'brain'),
+      ];
 
-  if (!fs.existsSync(baseDir)) return null;
+  let latestPath: string | null = null;
+  let latestMtime = -1;
 
-  try {
-    const entries = fs.readdirSync(baseDir, { withFileTypes: true });
-    let latestPath: string | null = null;
-    let latestMtime = -1;
-
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const transcriptFile = path.join(
-        baseDir,
-        entry.name,
-        '.system_generated',
-        'logs',
-        'transcript.jsonl'
-      );
-      if (fs.existsSync(transcriptFile)) {
+  for (const baseDir of baseDirs) {
+    if (!fs.existsSync(baseDir)) continue;
+    try {
+      const entries = fs.readdirSync(baseDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const transcriptFile = path.join(
+          baseDir,
+          entry.name,
+          '.system_generated',
+          'logs',
+          'transcript.jsonl'
+        );
+        if (!fs.existsSync(transcriptFile)) continue;
         try {
           const stat = fs.statSync(transcriptFile);
           if (stat.mtimeMs > latestMtime) {
@@ -373,11 +549,11 @@ export function findLatestTranscriptPath(customDir?: string): string | null {
           // 파일 접근 오류 무시
         }
       }
+    } catch {
+      // 디렉터리 읽기 실패 무시
     }
-    return latestPath;
-  } catch {
-    return null;
   }
+  return latestPath;
 }
 
 /**

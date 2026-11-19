@@ -1,123 +1,193 @@
-# Gemini CLI Subagent TUI
+# herdr-quad — 실측 통계 기반 멀티 에이전트 오케스트레이터
 
-[gemini_sub_neon.html](file:///Users/user01/Desktop/Gemini_trick/gemini_sub_neon.html)의 5계층 멀티 에이전트 오케스트레이션 화면(`Argon` · `Decision 1` · `Hydrogen` · `Gemini Neon` · `Carbon`)을 실제 터미널에서 실행·조작·스트림 연동할 수 있도록 구현한 TypeScript 기반 TUI 애플리케이션입니다.
+5개 역할 슬롯(lead·explore·coder·verifier·advisor)에 임의의 로컬 CLI 에이전트(`pi`·`agy`·`devin`·`claude`)를 바인딩해, **실측 통계 기반 Decision Gate**가 저비용 경로와 리드 승격 경로를 자동 분기하는 오케스트레이션 시스템이다. 핵심 목적:
 
-외부 패키지 설치(`npm install`) 없이 **Node.js (v22.6+)** 또는 **Bun**으로 즉시 실행됩니다.
+- **비용·리드 턴 절감** — 통계적으로 안정된 조사 태스크는 Pre-Lead 라우터가 읽기전용 워커로 직행시켜 리드 LLM 턴을 0으로 만든다.
+- **모델 가변성** — 어떤 모델을 어느 역할에 쓸지는 `roster.json` 설정 파일 하나로 교체한다. 코드 수정 불필요.
+- **로컬 전체 프로젝트 공용** — `--repo <path>`로 이 머신의 어느 로컬 저장소에서든 같은 오케스트레이터를 실행한다.
+
+결정 엔진은 SQLite(WAL) 위에 EWMA Beta 사후확률을 유지하고, **동일 조건 연속 오류 2회 시 강제 `split`**(리드 승격)으로 안전하게 폴백한다. 외부 npm 의존성은 0개 — Node.js 내장 모듈만으로 동작한다.
 
 ---
 
-## 1. 빠른 실행
+## 1. 아키텍처 요약 (Pre-Lead Gate + 5계층)
 
-```bash
-# 1) 실제 Antigravity(agy) / Gemini API 백엔드 연결 실행 (대화형 라이브 모드)
-npm run live
-# 또는
-node ./src/cli.ts --live
-node ./src/cli.ts --live --model gemini-4-argon-high --prompt "현재 저장소 구조를 요약해줘"
-node ./src/cli.ts --live --model gemini-4-neon-high --prompt "변경 사항 회귀 여부를 검토해줘"
-
-# 2) 실행 중인 agy 세션 트랜스크립트 실시간 관제 모드 (최신 transcript.jsonl 자동 감지 및 추적)
-npm run watch
-# 또는
-node ./src/cli.ts --watch
-node ./src/cli.ts --watch /path/to/transcript.jsonl
-
-# 3) 기본 인터랙티브 데모 모드 실행 (gemini_sub_neon.html 40초 24비트 시나리오 재현)
-npm run demo
-# 또는
-node ./src/cli.ts --demo
-
-# 4) 실시간 JSONL / agy stream-json 이벤트 파이프 연동 실행
-npm run stream:live
-# 또는
-agy --output-format stream-json --model gemini-4-argon-high --print="README 요약" | node ./src/cli.ts --stream
-
-# 5) 로컬 JSONL 세션 파일 로드 (--follow 로 실시간 추가 추적 가능)
-node ./src/cli.ts --file ./examples/sample-session.jsonl --replay-ms 500
-node ./src/cli.ts --file ./examples/sample-session.jsonl --follow
+```text
+                    ┌────────────────────────────────────────────┐
+  태스크 입력 ─────▶ │ Layer 0 · Pre-Lead Router (dg, LLM 0턴)    │
+                    │ sharp = 읽기전용 fast-path / split = 리드 승격 │
+                    └───────────────┬────────────────────────────┘
+              sharp (p≥0.7, 저위험)  │  split
+                    ┌───────────────▼────────────────────────────┐
+                    │ Layer 1 · Lead — 계획 수립·워커 브리프 발행    │
+                    ├────────────────────────────────────────────┤
+                    │ Layer 2 · Swarm — 읽기전용 탐색 + worktree    │
+                    │            코딩 워커 (동시 최대 2)            │
+                    ├────────────────────────────────────────────┤
+                    │ Layer 3 · 독립 검증자 — 이종 모델·읽기전용.    │
+                    │            [FAIL] → dg backprop → 재작업     │
+                    ├────────────────────────────────────────────┤
+                    │ Layer 4 · 온디맨드 자문 3관문 (계획/오류/완료) │
+                    └────────────────────────────────────────────┘
 ```
 
----
+- **Layer 0 (`dg` Pre-Lead Router)** — 태스크 종류 7종(`explore_read`·`code_search`·`single_edit` 등)별 사전확률과 실측 사후확률을 비교해 `sharp`(읽기전용 `pi` 워커 직행, 리드 턴 0) 또는 `split`(리드 승격)을 판정한다. LLM 호출 없이 순수 통계 판정이다.
+- **Layer 1 (Lead)** — `split`된 태스크의 계획을 수립하고 Layer 2 워커 브리프를 발행한다. `HERDR_DB_WRITE=1`로 결정 통계를 기록한다.
+- **Layer 2 (Swarm)** — 읽기전용 탐색 워커(동시 최대 4)와 `git worktree`에서 격리된 코딩 워커(동시 최대 2, 서로 다른 파일 영역)가 병렬 작업한다.
+- **Layer 3 (독립 검증자)** — 리드와 이종 모델·읽기전용 권한으로 검증한다. `[FAIL]` 판정은 `dg backprop`으로 원본 fork에 역전파돼 재작업된다.
+- **Layer 4 (자문 3관문)** — 계획·오류·완료 시점에만 온디맨드로 기동하는 자문 세션이다. 관문 통과 후 즉시 `hc kill; hc rm`으로 정리된다.
 
-## 2. 단축키 및 프롬프트 명령어
-
-### 기본 관제 모드 단축키
-| 단축키 | 기능 설명 |
-| :--- | :--- |
-| `Tab` / `Shift+Tab` | 패널 간 포커스 이동 (`Carbon` → `Argon` → `Neon` → `Decision 1` → `Hydrogen` → `세션 기록`) |
-| `Enter` | 포커스된 패널의 상세 드릴다운 모달 열기 (`Argon`에서는 프롬프트 입력 진입) |
-| `r` | 실제 에이전트가 생성한 **응답 전문 모달** 열기 (`↑`/`↓` 스크롤 지원) |
-| `s` / `n` / `c` / `d` / `l` | 스웜 50슬롯(`s`), **Gemini Neon 교차 검증(`n`)**, Carbon 자문(`c`), 분기 상세(`d`), 전체 로그(`l`) 모달 바로가기 |
-| `1` `2` `3` `4` `5` / `0` | 세션 기록 에이전트별 필터 토글 (`1`:Argon, `2`:Hydrogen, `3`:Decision, `4`:Neon, `5`:Carbon, `0`:해제) |
-| `↑` / `↓` | 세션 기록 스크롤 |
-| `Space` / `←` `→` | 데모 일시정지·재생 및 타임라인 `±2초` 탐색 |
-| `/` 또는 `i` | 하단 `~/app $ gemini █` 프롬프트 입력 모드 진입 (`Esc`로 복귀) |
-| `?` 또는 `h` | 인앱 도움말 모달 열기 |
-| `q` / `Ctrl+C` | 종료 |
-
-### 프롬프트 슬래시 명령어
-- 일반 텍스트 입력 후 `Enter`: (`--live`) 실제 에이전트(`agy` 또는 `GEMINI_API_KEY`) 호출 및 도구 실행
-- `/model <name>`: 실행 모델 변경 (예: `/model gemini-4-argon-high`, `/model gemini-4-neon-high`, `/model gemini-4-hydrogen-high`)
-- `/effort <low|medium|high|max>`: Argon의 추론 강도 게이지(`▮▮▮▮`) 변경
-- `/neon [검증 대상]`: (`--live`) **Gemini Neon**(`gemini-4-neon-high`) 독립 교차 검증 요청 / (`--demo`) 교차 검증 트리거 및 상세 모달 열기
-- `/carbon <질문>`: (`--live`) Carbon 자문 모델(`gemini-4-carbon-high`)에게 별도 조언 요청
-- `/new` / `/cancel`: (`--live`) 새 대화 세션 시작 또는 실행 중인 턴(Argon·Carbon·Neon) 중단
-- `/response`, `/swarm`, `/neon`, `/advisor`, `/decision`, `/logs`, `/help`: 각 상세 모달 열기
-- `/trigger <0|1|2>`, `/seek <0~40>`, `/filter <all|argon|hydrogen|decision|neon|carbon>`, `/pause`, `/play`, `/clear`, `/quit`
+세션 관제·런치는 `hc`(Herdr 터미널 CLI) 위에서 동작한다. 모든 통계는 `~/.local/state/gemini-trick/decision.db`(SQLite)에 SSOT로 축적된다.
 
 ---
 
-## 3. JSONL 실시간 스트림 프로토콜 (`--stream` / `--file`)
+## 2. 요구사항 & 빠른 시작
 
-외부 에이전트 프로세스에서 한 줄당 하나의 JSON 객체를 표준 출력으로 내보내고 파이프(`|`)로 연결하면 실시간 관제 대시보드로 동작합니다. ([examples/sample-session.jsonl](file:///Users/user01/Desktop/Gemini_trick/examples/sample-session.jsonl) 참고)
+### 요구사항
 
-```json
-{"type":"session","sessionId":204,"cwd":"~/app","model":"argon","effort":"high"}
-{"type":"phase","phase":"계획 확정","summary":"코드를 수정하고 테스트를 실행","argonBuilds":1}
-{"type":"neon","state":"run","progress":64,"label":"계획 교차 검토","model":"gemini-neon"}
-{"type":"neon","state":"pass","progress":100,"label":"계획 교차 검토","verified":1,"summary":"계획 교차 검토 완료 — 영향 범위 누락 없음"}
-{"type":"decision","forks":1420,"routes":[{"name":"어느 파일","p":0.89},{"name":"어느 도구","p":0.58},{"name":"재시도 또는 중단","p":0.84}]}
-{"type":"swarm","active":42,"max":50,"cards":[{"name":"search","progress":75,"description":"저장소 구조를 파악합니다","status":"running"}]}
-{"type":"advisor","trigger":0,"calls":2,"tokens":"184k","advice":"인증·DB/트랜잭션 호출을 계획에서 제외"}
-{"type":"log","time":"23:48:24","agent":"Neon","color":"neon","message":"계획 교차 검토 완료 — 영향 범위 누락 없음"}
-```
+- **Node.js 22.6+** (`node:sqlite` 내장 모듈 필요 — 외부 npm 의존성 0개, `npm install` 불필요)
+- 워커로 사용할 로컬 CLI 에이전트 중 최소 1종 (`pi` / `agy` / `devin` / `claude` — 없으면 `--dry-run` 계획 검증만 가능)
+- (선택) `hc`·`herdr-app` — 세션 기동·4분할 관제 화면용
 
----
-
-## 4. 프로젝트 구조
-
-- [src/backend/agentRunner.ts](file:///Users/user01/Desktop/Gemini_trick/src/backend/agentRunner.ts): `agy` CLI 멀티-에이전트 런타임(Argon·Carbon·Gemini Neon) & `GEMINI_API_KEY` REST API 폴백 에이전트 루프
-- [src/backend/transcriptMapper.ts](file:///Users/user01/Desktop/Gemini_trick/src/backend/transcriptMapper.ts): Antigravity / Gemini 활성 세션 트랜스크립트(`transcript.jsonl`) 자동 감지 및 5계층 TUI 실시간 매핑기
-- [src/backend/agyStreamMapper.ts](file:///Users/user01/Desktop/Gemini_trick/src/backend/agyStreamMapper.ts): `agy --output-format stream-json` NDJSON 이벤트 → 5계층 TUI 실시간 매핑기
-- [src/cli.ts](file:///Users/user01/Desktop/Gemini_trick/src/cli.ts): CLI 엔트리포인트, 키보드/리사이즈 이벤트 루프, 스냅샷 출력기
-- [src/theme.ts](file:///Users/user01/Desktop/Gemini_trick/src/theme.ts): `gemini_sub_neon.html` 1:1 매칭 24-bit TrueColor 팔레트
-- [src/core/width.ts](file:///Users/user01/Desktop/Gemini_trick/src/core/width.ts): 한글(CJK) 전각 2셀 폭 계산 및 어절 단위 줄바꿈 엔진
-- [src/core/buffer.ts](file:///Users/user01/Desktop/Gemini_trick/src/core/buffer.ts): 2D 셀 버퍼, 1/8 정밀 프로그레스 바, 와이어 펄스, Zero-Flicker Diff ANSI 렌더러
-- [src/core/terminal.ts](file:///Users/user01/Desktop/Gemini_trick/src/core/terminal.ts): Alternate Screen 제어 및 UTF-8 키 이벤트 파서
-- [src/state/demoEngine.ts](file:///Users/user01/Desktop/Gemini_trick/src/state/demoEngine.ts): 원본 40초 24비트 시나리오 수식 및 슬래시 커맨드(`/neon`, `/carbon` 등) 처리기
-- [src/state/streamAdapter.ts](file:///Users/user01/Desktop/Gemini_trick/src/state/streamAdapter.ts): `stdin` 파이프 및 JSONL 파일(`--follow`) 실시간 스트림 어댑터
-- [src/ui/layout.ts](file:///Users/user01/Desktop/Gemini_trick/src/ui/layout.ts): Wide / Standard / Compact 반응형 좌표, Argon-Neon 수평 링크 및 Carbon 트리거 앵커링 계산기
-- [src/ui/renderApp.ts](file:///Users/user01/Desktop/Gemini_trick/src/ui/renderApp.ts): 전체 화면, Gemini Neon 교차 검증 패널 및 와이어 토폴로지 컴포지터
-- [src/ui/renderModal.ts](file:///Users/user01/Desktop/Gemini_trick/src/ui/renderModal.ts): 50개 스웜 매트릭스, Gemini Neon 교차 검증 인스펙터 및 상세 드릴다운 오버레이 모달
-- [src/ui/renderQuadRole.ts](file:///Users/user01/Desktop/Gemini_trick/src/ui/renderQuadRole.ts): Herdr 4분할 전용 역할별(Argon · Carbon · Neon · Hydrogen) 독립 대시보드 렌더러
-- [src/ipc/quadBus.ts](file:///Users/user01/Desktop/Gemini_trick/src/ipc/quadBus.ts): Unix Domain Socket 기반 4개 패널 실시간 상태 동기화 IPC 버스
-- [scripts/herdr-quad-launch.ts](file:///Users/user01/Desktop/Gemini_trick/scripts/herdr-quad-launch.ts): Herdr App 자동 4분할 및 에이전트 오케스트레이션 런처
-
----
-
-## 5. Herdr App 4분할 오케스트레이션 (`herdr-gemini-quad` 스킬)
-
-Herdr App에서 새 탭을 만들고 자동으로 2×2 4분할 창을 구성하여 **Argon**, **Carbon**, **Neon**, **Hydrogen** 모델이 동시에 동작·협업하는 모습을 모니터링할 수 있습니다.
+### 빠른 시작
 
 ```bash
-# 1) 동기화 데모 오케스트레이션 (4분할)
+git clone <this-repo> && cd <this-repo>
+
+# 1) 오케스트레이션 계획 리허설 (모델 호출 0회, 실기동 0회 — 무조건 안전)
+npm run orchestrate:dry
+
+# 2) 전체 테스트 (외부 의존성 0개)
+npm test
+
+# 3) 데모 TUI 스냅샷 (터미널에 관제 화면 정적 출력)
+npm run snapshot
+
+# 4) 4분할 데모 오케스트레이션 (Herdr App 필요)
 npm run herdr:quad
-
-# 2) 실제 Antigravity(agy) / Gemini API 연동 라이브 오케스트레이션
-npm run herdr:quad:live -- --prompt "현재 프로젝트 구조를 점검해줘"
-
-# 3) 현재 실행 중인 agy 세션 트랜스크립트 4분할 실시간 관제
-npm run herdr:quad:watch
 ```
 
-- 글로벌 스킬 설치 경로: [SKILL.md](file:///Users/user01/.gemini/config/skills/herdr-gemini-quad/SKILL.md)
+---
+
+## 3. 모델·구독 가변 설정 (`roster.json` & 환경변수)
+
+역할↔모델 바인딩은 전부 외부 설정으로 분리돼 있다. **구독·쿼터·결제 상황이 바뀌면 설정 파일만 교체한다.**
+
+### roster.json 탐색 우선순위
+
+```text
+--roster <path> 플래그  >  HERDR_ROSTER_PATH 환경변수  >  <repo>/.herdr/roster.json
+>  ~/.config/herdr-quad/roster.json (전역 기본)  >  내장 기본값 (quota-saver)
+```
+
+### 설정 예시
+
+[`.herdr/roster.example.json`](.herdr/roster.example.json)을 참고해 자신의 환경에 맞게 복사·편집한다:
+
+```bash
+mkdir -p ~/.config/herdr-quad
+cp .herdr/roster.example.json ~/.config/herdr-quad/roster.json
+# 이후 구독 변동 시 이 파일의 bin·provider·model·dailyTurnBudgets만 수정
+```
+
+```jsonc
+{
+  "defaultProfile": "quota-saver",
+  "profiles": {
+    "quota-saver": {
+      "roles": {
+        "lead":     { "cli": "pi", "provider": "opencodex", "model": "<lead-model>", "thinking": "max" },
+        "explore":  { "cli": "pi", "provider": "opencodex", "model": "<cheap-model>", "thinking": "medium", "readonly": true },
+        "verifier": { "cli": "pi", "provider": "opencodex", "model": "<verifier-model>", "thinking": "max", "readonly": true },
+        "advisor":  { "cli": "agy", "model": "<advisor-model>", "readonly": true, "onDemand": true }
+      }
+    }
+  }
+}
+```
+
+- 미지정 필드는 내장 기본값을 상속한다(부분 오버라이드 허용).
+- `bin`은 포터블한 명령 이름(`"pi"` 등)을 권장한다. 절대경로가 필요할 때만 명시.
+- 실행 파일 해석 순서: `bin` 필드 → 환경변수 → `PATH` 탐색 → 관례적 설치 위치(`~/.bun/bin/pi`, `~/.local/bin/agy`).
+
+### 환경변수
+
+| 변수 | 용도 |
+| :--- | :--- |
+| `GEMINI_TRICK_DB_PATH` | 결정 엔진 SQLite DB 경로 (기본 `~/.local/state/gemini-trick/decision.db`) |
+| `HERDR_ROSTER_PATH` | roster.json 경로 오버라이드 |
+| `PI_BIN` / `HERDR_PI_BIN` | `pi` 실행 파일 경로 오버라이드 |
+| `AGY_BIN` / `DEVIN_BIN` / `HC_BIN` / `CLAUDE_BIN` | 각 CLI 실행 파일 경로 오버라이드 |
+| `HERDR_AGY_TURN_BUDGET` | agy 일일 턴 예산 (기본 20 — 초과 시 프로필 자동 강등) |
+| `DECISION_API` / `GEMINI_DECISION_API_KEY` | TUI 라이브 모드 Gemini REST API 폴백용 |
+
+> **API 키는 절대 이 저장소에 커밋하지 않는다.** 키 주입은 환경변수로만 하고, `.env*` 파일은 `.gitignore`로 차단돼 있다.
+
+### 내장 프로필
+
+| 프로필 | 구성 | 비고 |
+| :--- | :--- | :--- |
+| `quota-saver` (기본) | lead/verifier는 `pi`, advisor만 온디맨드 `agy` | agy 상시 세션 0 |
+| `agy-quad` | lead·verifier·advisor 모두 `agy` 상시 | 일일 예산 초과 시 `quota-saver`로 자동 강등 |
+
+---
+
+## 4. 타 로컬 저장소 공용 실행 (`--repo`) & `dg` CLI
+
+### 다른 저장소에서 실행
+
+`dg.ts`·역할 계약서·roster는 오케스트레이터 루트 기준, 작업 cwd·worktree·project_id는 `--repo` 기준으로 해석된다. 어느 프로젝트에서든 동일하게 동작한다:
+
+```bash
+node ./scripts/herdr-quad-launch.ts --repo /path/to/your-project --mode orchestrate --dry-run
+```
+
+### `dg` 서브커맨드 (9종)
+
+```bash
+node ./src/decision/dg.ts <command> [flags]
+```
+
+| 명령 | 용도 |
+| :--- | :--- |
+| `route` | 태스크 종류별 `sharp`/`split` 라우팅 판정 (LLM 턴 0) |
+| `gate` | 게이트 진입 시 사후확률·강제 조건 평가 |
+| `close` | fork 종료 처리 (`--outcome ok\|fail\|rerouted`) |
+| `touch` | fork TTL 갱신 (워커 하트비트) |
+| `record` | 도구 사용 결과 표본 기록 (EWMA 입력) |
+| `backprop` | 검증 `[FAIL]`을 원본 fork에 역전파 |
+| `settle-orphans` | TTL 만료 fork 일괄 정산 |
+| `wrap` | 워커 커맨드를 감싸 종료코드를 SSOT에 자동 기록 |
+| `compact` | 결정 DB 압축·통계 정리 |
+
+---
+
+## 5. 보안·격리 설계
+
+- **fail-closed 읽기전용 가드** — `.agents/hooks.json` + `.agents/hooks/dg-hook.ts`가 `HERDR_READONLY=1` 워커의 도구 호출을 사전 차단한다. 개행·제어문자 주입, 위험 플래그(`--dangerously-skip-permissions` 등), 쓰기·위임 도구를 차단하고, 가드 자체 오류 시에도 차단(fail-closed)한다.
+- **fail-open 수집** — `PostToolUse` 텔레메트리 수집은 본령이 아니므로 실패해도 워커를 막지 않는다(fail-open).
+- **읽기전용 워커 도구 제한** — `pi` 워커는 `--tools read,grep,find,ls`로 기동되며 bash·편집 도구가 계약상 존재하지 않는다. 사용자 roster가 임의 `--tools`를 지정해도 `--exclude-tools edit,write`가 자동 부여된다.
+- **세션명 충돌 방지** — 모든 `hc run --name`은 `^[a-z0-9_-]{1,32}$` 계약 + 런타임 6-hex 접미로 유일성을 보장하고, 기동 전 `hc ls` 충돌 점검을 수행한다.
+- **dry-run 무오염** — `--dry-run`은 임시 `:memory:` DB에서 리허설해 사용자 결정 DB·파일 시스템을 건드리지 않는다.
+
+---
+
+## 6. 기존 TUI 관제 화면
+
+원본 프로젝트(`Gemini_trick`)의 5계층 관제 TUI가 그대로 포함돼 있다:
+
+```bash
+npm run demo          # 40초 데모 시나리오 (모델 호출 없음)
+npm run live          # 실제 agy/Gemini API 연동 라이브 모드
+npm run watch         # 실행 중인 agy 세션 트랜스크립트 실시간 관제
+npm run snapshot      # 현재 상태 정적 스냅샷 출력
+agy --output-format stream-json --print "…" | node ./src/cli.ts --stream   # JSONL 파이프 관제
+```
+
+주요 조작: `Tab` 패널 포커스 이동 · `Enter` 상세 모달 · `r` 응답 전문 · `s`/`n`/`c` 스웜·검증·자문 모달 · `/` 프롬프트 입력 · `?` 도움말. JSONL 스트림 프로토콜은 [examples/sample-session.jsonl](examples/sample-session.jsonl) 참고.
+
+---
+
+## 라이선스·크레딧
+
+본 저장소는 로컬 멀티 에이전트 관제 TUI 프로젝트 `Gemini_trick`의 오케스트레이션 후속으로, Decision Gate·roster·읽기전용 격리 계약을 통합해 일반화했다.

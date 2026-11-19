@@ -25,23 +25,25 @@ Herdr App의 현재 스페이스에 새 탭을 열고 창을 자동으로 **4분
 
 ## 실행 방법
 
+> 아래 예시는 저장소 루트(이 프로젝트를 클론한 디렉터리) 기준 상대경로다. `scripts/`·`src/` 경로는 실제 클론 위치로 치환해 실행한다.
+
 ### 1. 기본 4분할 오케스트레이션 실행 (동기화 데모 시나리오)
 ```bash
-node /Users/user01/Desktop/Gemini_trick/scripts/herdr-quad-launch.ts --mode demo
+node ./scripts/herdr-quad-launch.ts --mode demo
 ```
 
 ### 2. 실제 Antigravity(`agy`) / Gemini API 라이브 오케스트레이션 실행
 ```bash
-node /Users/user01/Desktop/Gemini_trick/scripts/herdr-quad-launch.ts --mode live --prompt "현재 저장소 구조를 분석하고 개선점을 제안해줘"
+node ./scripts/herdr-quad-launch.ts --mode live --prompt "현재 저장소 구조를 분석하고 개선점을 제안해줘"
 ```
 
 ### 3. 현재 실행 중인 `agy` 세션 트랜스크립트 실시간 관제 연동
 ```bash
-node /Users/user01/Desktop/Gemini_trick/scripts/herdr-quad-launch.ts --mode watch
+node ./scripts/herdr-quad-launch.ts --mode watch
 ```
 
 ### 주요 옵션
-- `--folder <path>`: 작업 디렉터리 지정 (기본: `/Users/user01/Desktop/Gemini_trick`)
+- `--folder <path>`: 작업 디렉터리 지정 (기본: 현재 cwd)
 - `--name <title>`: 생성할 Herdr 탭 이름 지정
 - `--prompt, -p <text>`: 시작과 동시에 Argon에 전달할 초기 프롬프트 (지정 시 자동 `--live` 전환)
 - `--dry-run`: 실제 분할하지 않고 실행될 `herdr-app` 및 `hc` 명령어만 출력
@@ -57,7 +59,7 @@ herdr-app shot /tmp/herdr-gemini-quad.png
 
 ## 프로젝트 내 npm 스크립트
 
-`/Users/user01/Desktop/Gemini_trick` 디렉터리에서 다음 명령도 바로 사용할 수 있습니다:
+이 저장소 루트 디렉터리에서 다음 명령을 바로 사용할 수 있다:
 - `npm run herdr:quad` (기본 4분할 데모 오케스트레이션)
 - `npm run herdr:quad:live` (라이브 에이전트 연동)
 - `npm run herdr:quad:watch` (실행 중인 세션 트랜스크립트 관제)

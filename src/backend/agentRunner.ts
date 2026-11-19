@@ -10,6 +10,15 @@ import {
   formatTokensCount,
 } from '../state/store.ts';
 import { parseJsonLine } from '../state/streamAdapter.ts';
+import { resolveDbPath, resolveProjectIdentity } from '../decision/db.ts';
+import { classifyTool } from '../decision/engine.ts';
+import { recordToolOutcomeSafe } from '../decision/telemetry.ts';
+import {
+  commandLineOfArgs,
+  decisionWriteBlocked,
+  syncRoutesFromSsot,
+  targetHashForArgs,
+} from './agyStreamMapper.ts';
 import type { AppState, BackendKind, EffortLevel } from '../types.ts';
 
 export type BackendPreference = 'auto' | 'agy' | 'api';
@@ -639,10 +648,52 @@ export class AgentRunner {
           onUpdate();
 
           const output = executeLocalReadOnlyTool(fc.name, fc.args ?? {});
-          state.cards[cardIdx]!.status = 'done';
+          const hadError = typeof output['error'] === 'string';
+          state.consecutiveToolErrors = hadError ? state.consecutiveToolErrors + 1 : 0;
+
+          // SSOT 기록(source 'rest_api') — demo·DECISION_READONLY 쓰기 가드(§5.2-C)
+          if (!decisionWriteBlocked(state)) {
+            try {
+              const fcArgs = fc.args ?? {};
+              const { route, toolClass } = classifyTool(fc.name, fcArgs);
+              const { projectId, projectLabel } = resolveProjectIdentity(process.cwd());
+              recordToolOutcomeSafe(resolveDbPath(), {
+                projectId,
+                projectLabel,
+                route,
+                toolClass,
+                toolName: fc.name,
+                ok: !hadError,
+                conversationId: state.conversationId,
+                targetHash: targetHashForArgs(fcArgs),
+                errorSnippet: hadError ? String(output['error']).slice(0, 300) : null,
+                source: 'rest_api',
+                commandLine: commandLineOfArgs(fcArgs),
+              });
+            } catch {
+              // fail-open — 수집 실패가 UI를 죽이지 않는다(§3.5)
+            }
+            syncRoutesFromSsot(state);
+          }
+
+          // 같은 오류 2연속 → Pre-Lead Gate 점등(§5.2-C.4)
+          if (state.consecutiveToolErrors >= 2) {
+            state.activeTrigger = 1;
+            state.advisorState = '자문 중';
+            state.carbonCalls += 1;
+            state.latestAdvice = `» ${fc.name} 연속 오류 감지 — 파라미터/경로 재검토 필요`;
+            appendLog(state, 'Carbon', 'purple', `같은 오류 2회 감지 — ${fc.name}`);
+          }
+
+          state.cards[cardIdx]!.status = hadError ? 'error' : 'done';
           state.cards[cardIdx]!.progress = 100;
           state.swarmActive = Math.max(0, state.swarmActive - 1);
-          appendLog(state, 'Hydrogen', 'blue', `${fc.name} 완료`);
+          appendLog(
+            state,
+            'Hydrogen',
+            'blue',
+            `${fc.name} ${hadError ? '실패' : '완료'}${hadError ? ` — ${String(output['error']).slice(0, 60)}` : ''}`
+          );
           fnResponses.push({
             functionResponse: {
               name: fc.name,

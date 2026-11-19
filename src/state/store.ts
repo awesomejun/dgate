@@ -2,12 +2,14 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type {
   AppState,
+  DecisionRoute,
   EffortLevel,
   FocusTarget,
   LogEntry,
   RunMode,
   SwarmWorker,
 } from '../types.ts';
+import { readTelemetrySnapshot } from '../decision/telemetry.ts';
 import type { AgentColorKey } from '../theme.ts';
 
 const FOCUS_ORDER: readonly FocusTarget[] = ['advisor', 'main', 'neon', 'decision', 'swarm', 'logs'];
@@ -34,6 +36,47 @@ const WORKER_ROLES: ReadonlyArray<SwarmWorker['role']> = [
 ];
 
 export const TRIGGER_LABELS = ['계획 확정 전', '같은 오류 2회', '완료 전'] as const;
+
+/**
+ * UI 표시용 라우트 우선 정렬(N3): forcedSplit 최우선 → p<0.70(split) 차우선 → 원래 순서 보존.
+ * 좁은 패널에서 slice 해도 delegate_swarm(4번째)이나 강제 분기 경고가 은닉되지 않게 한다.
+ */
+export function sortRoutesForDisplay(routes: readonly DecisionRoute[]): DecisionRoute[] {
+  return routes
+    .map((route, idx) => ({ route, idx }))
+    .sort((a, b) => {
+      const rank = (e: { route: DecisionRoute; idx: number }): number =>
+        e.route.forcedSplit === true ? 0 : e.route.p < 0.7 ? 1 : 2;
+      return rank(a) - rank(b) || a.idx - b.idx;
+    })
+    .map((e) => e.route);
+}
+
+/**
+ * TUI/워치 모드용 읽기전용 SQLite 구독 헬퍼(§5.3 W2-B).
+ *
+ * `readTelemetrySnapshot`(readOnly + query_only)만 경유하며 DB 미존재·오류 시 조용히 폴백해
+ * 기존 state.routes를 유지한다. `--demo` 모드는 DB 접근 자체를 하지 않는다(완전 격리).
+ *
+ * @returns live DB에서 로드했으면 true, 폴백·데모 no-op면 false
+ */
+export function syncStateFromDecisionDb(
+  state: AppState,
+  dbPath: string,
+  projectCwd: string
+): boolean {
+  if (state.mode === 'demo') return false;
+  try {
+    const snapshot = readTelemetrySnapshot(dbPath, projectCwd);
+    state.routes = snapshot.routes;
+    const split = snapshot.routes.filter((r) => r.forcedSplit === true || r.p < 0.7).length;
+    state.sharpCount = snapshot.routes.length - split;
+    state.splitCount = split;
+    return snapshot.live;
+  } catch {
+    return false;
+  }
+}
 
 export function createInitialWorkers(activeCount = 42, maxCount = 50): SwarmWorker[] {
   const workers: SwarmWorker[] = [];
@@ -69,6 +112,22 @@ export function formatTokensCount(n: number): string {
 export function createInitialState(mode: RunMode = 'demo'): AppState {
   const isLive = mode === 'live' || mode === 'watch';
   const isWatch = mode === 'watch';
+  // 초기 라우트도 SSOT 확장 필드(id/basis/samples/consecutiveErrors/forcedSplit)를 갖는다.
+  // delegate_swarm(스웜 위임) 4번째 라우트 포함 — 집계는 라우트 수에 관계없이 계산된다.
+  const initialRoutes: DecisionRoute[] = isLive
+    ? [
+        { name: '어느 파일', p: 0.9, targetHint: '대기', id: 'file_select', basis: 'prior', samples: 0, consecutiveErrors: 0, forcedSplit: false },
+        { name: '어느 도구', p: 0.9, targetHint: '대기', id: 'tool_select', basis: 'prior', samples: 0, consecutiveErrors: 0, forcedSplit: false },
+        { name: '재시도 또는 중단', p: 0.9, targetHint: '대기', id: 'retry_or_abort', basis: 'prior', samples: 0, consecutiveErrors: 0, forcedSplit: false },
+        { name: '스웜 위임', p: 0.9, targetHint: '대기', id: 'delegate_swarm', basis: 'prior', samples: 0, consecutiveErrors: 0, forcedSplit: false },
+      ]
+    : [
+        { name: '어느 파일', p: 0.89, targetHint: 'src/api/spec.ts', id: 'file_select', basis: 'prior', samples: 2, consecutiveErrors: 0, forcedSplit: false },
+        { name: '어느 도구', p: 0.94, targetHint: 'grep', id: 'tool_select', basis: 'prior', samples: 2, consecutiveErrors: 0, forcedSplit: false },
+        { name: '재시도 또는 중단', p: 0.88, targetHint: 'continue', id: 'retry_or_abort', basis: 'prior', samples: 2, consecutiveErrors: 0, forcedSplit: false },
+        { name: '스웜 위임', p: 0.62, targetHint: '스웜', id: 'delegate_swarm', basis: 'prior', samples: 2, consecutiveErrors: 0, forcedSplit: false },
+      ];
+  const initialSplit = initialRoutes.filter((r) => r.forcedSplit === true || r.p < 0.7).length;
   return {
     mode,
     paused: false,
@@ -137,19 +196,9 @@ export function createInitialState(mode: RunMode = 'demo'): AppState {
           },
         ],
 
-    routes: isLive
-      ? [
-          { name: '어느 파일', p: 0.9, targetHint: '대기' },
-          { name: '어느 도구', p: 0.9, targetHint: '대기' },
-          { name: '재시도 또는 중단', p: 0.9, targetHint: '대기' },
-        ]
-      : [
-          { name: '어느 파일', p: 0.89, targetHint: 'src/api/spec.ts' },
-          { name: '어느 도구', p: 0.94, targetHint: 'grep' },
-          { name: '재시도 또는 중단', p: 0.88, targetHint: 'continue' },
-        ],
-    sharpCount: isLive ? 3 : 2,
-    splitCount: isLive ? 0 : 1,
+    routes: initialRoutes,
+    sharpCount: initialRoutes.length - initialSplit,
+    splitCount: initialSplit,
 
     cards: [
       {

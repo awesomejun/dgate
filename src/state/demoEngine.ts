@@ -82,11 +82,12 @@ const NEON_WINDOWS = [
   },
 ] as const;
 
-const ROUTE_NAMES = ['어느 파일', '어느 도구', '재시도 또는 중단'] as const;
+const ROUTE_NAMES = ['어느 파일', '어느 도구', '재시도 또는 중단', '스웜 위임'] as const;
 const ROUTE_MATRIX: ReadonlyArray<ReadonlyArray<number>> = [
   [0.81, 0.89, 0.94, 0.64],
   [0.45, 0.94, 0.58, 0.83],
   [0.88, 0.82, 0.91, 0.8],
+  [0.72, 0.66, 0.78, 0.86],
 ];
 
 const CARD_SPECS = [
@@ -118,7 +119,11 @@ export function createDemoController(): DemoController {
 }
 
 /**
- * gemini_sub_neon.html의 render(t) 수식을 TUI AppState로 정밀 동기화합니다.
+ * 데모 시나리오 엔진 — gemini_sub_neon.html 원본의 render(t) 수식을 TUI AppState로 정밀 동기화합니다.
+ *
+ * 격리 불변식(§5.3 W2-B): 이 모듈과 `applyDemoTime`은 SQLite(`node:sqlite`) 및
+ * `src/decision/**`의 어떤 함수(읽기·쓰기 포함)도 호출하지 않는다. `--demo` 모드에서
+ * 결정 DB 파일이 생성·갱신되는 일은 원천 없다(검증: tests/ui-adapter.test.ts).
  */
 export function applyDemoTime(state: AppState, rawTimeSec: number, ctrl: DemoController): void {
   const t = ((rawTimeSec % LOOP) + LOOP) % LOOP;
@@ -242,7 +247,7 @@ export function applyDemoTime(state: AppState, rawTimeSec: number, ctrl: DemoCon
   state.neonSummary = nSummary;
   state.neonHistory = neonHistory;
 
-  // Decision 1 라우트 확률 업데이트
+  // Decision 1 라우트 확률 업데이트 (4번째 delegate_swarm 포함 — DB 접근 없는 순수 계산)
   let sharp = 0;
   let split = 0;
   state.routes = ROUTE_NAMES.map((name, i) => {

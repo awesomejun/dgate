@@ -22,6 +22,12 @@ export type LogFilter = 'all' | 'argon' | 'hydrogen' | 'decision' | 'neon' | 'ca
 
 export type NeonStatus = 'idle' | 'run' | 'pass' | 'fail';
 
+/** Decision 게이트 고정 라우트 열거형 (§4.1 — 4종만 허용) */
+export type RouteId = 'file_select' | 'tool_select' | 'retry_or_abort' | 'delegate_swarm';
+
+/** 사후확률 근거 표지: n_raw < N_min(=5) 구간은 prior, 이후 measured */
+export type DecisionBasis = 'prior' | 'measured';
+
 export type RunMode = 'demo' | 'stream' | 'live' | 'watch';
 
 export type BackendKind = 'agy' | 'gemini-api' | 'none';
@@ -38,6 +44,12 @@ export interface DecisionRoute {
   name: string;
   p: number; // 0.0 ~ 1.0 (p >= 0.70 => sharp, p < 0.70 => split)
   targetHint?: string;
+  // SQLite SSOT 확장 선택 필드 (W1 — §5.3)
+  id?: RouteId;
+  basis?: DecisionBasis;
+  samples?: number;
+  consecutiveErrors?: number;
+  forcedSplit?: boolean;
 }
 
 export interface SwarmCard {
@@ -166,7 +178,16 @@ export type StreamEvent =
   | {
       type: 'decision';
       forks?: number;
-      routes: Array<{ name: string; p: number; targetHint?: string }>;
+      routes: Array<{
+        name: string;
+        p: number;
+        targetHint?: string;
+        id?: RouteId;
+        basis?: DecisionBasis;
+        samples?: number;
+        consecutiveErrors?: number;
+        forcedSplit?: boolean;
+      }>;
     }
   | {
       type: 'swarm';

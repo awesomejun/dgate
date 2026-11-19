@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import * as path from 'node:path';
 import {
   appendLog,
@@ -5,7 +6,20 @@ import {
   formatNowHHMMSS,
   formatTokensCount,
 } from '../state/store.ts';
-import type { AppState } from '../types.ts';
+import { openDbSafe, resolveDbPath, resolveProjectIdentity } from '../decision/db.ts';
+import {
+  classifyTool,
+  evaluateForced,
+  getPosterior,
+  priorP0,
+  type RouteId,
+} from '../decision/engine.ts';
+import {
+  hasHookCoverageById,
+  readTelemetrySnapshot,
+  recordToolOutcomeSafe,
+} from '../decision/telemetry.ts';
+import type { AppState, DecisionBasis } from '../types.ts';
 
 interface AgyUsage {
   input_tokens?: number;
@@ -116,20 +130,138 @@ function syncSwarmCount(state: AppState): void {
   state.swarmActive = state.workers.filter((w) => w.status === 'running').length;
 }
 
-function updateDecisionRoutes(state: AppState, toolName: string, hadError: boolean): void {
-  state.totalForks += 1;
-  const isSearch = toolName.includes('grep') || toolName.includes('find') || toolName.includes('list');
-  const pFile = toolName.includes('file') || toolName.includes('dir') ? 0.94 : 0.85;
-  const pTool = isSearch ? 0.92 : toolName === 'run_command' ? 0.74 : 0.88;
-  const pRetry = hadError ? 0.48 : 0.91;
+// ---------------------------------------------------------------------------
+// Decision SSOT 연동 공통 헬퍼 (plan-r2.1 §5.2 — transcriptMapper·agentRunner 공용)
 
-  state.routes = [
-    { name: '어느 파일', p: pFile },
-    { name: '어느 도구', p: pTool },
-    { name: '재시도 또는 중단', p: pRetry },
-  ];
-  state.sharpCount = state.routes.filter((r) => r.p >= 0.7).length;
-  state.splitCount = state.routes.length - state.sharpCount;
+/** 쓰기 가드: demo 모드·DECISION_READONLY=1이면 DB 쓰기 생략(SSOT 읽기 동기화만) */
+export function decisionWriteBlocked(state: AppState): boolean {
+  return state.mode === 'demo' || process.env.DECISION_READONLY === '1';
+}
+
+/** state.routes·sharpCount·splitCount를 SQLite SSOT 실측으로 동기화(읽기전용 구독) */
+export function syncRoutesFromSsot(state: AppState, cwd = process.cwd()): void {
+  if (state.mode === 'demo') return; // 데모 라우트 표시는 데모 엔진 소유
+  try {
+    const snap = readTelemetrySnapshot(resolveDbPath(), cwd);
+    state.routes = snap.routes;
+    const splits = snap.routes.filter((r) => r.forcedSplit === true || r.p < 0.7).length;
+    state.splitCount = splits;
+    state.sharpCount = snap.routes.length - splits;
+  } catch {
+    // §3.5 안전 폴백: 텔레메트리 실패 시 기존 라우트 유지
+  }
+}
+
+export interface ToolDecision {
+  route: RouteId;
+  toolClass: string;
+  tag: 'sharp' | 'split';
+  p: number;
+  basis: DecisionBasis;
+  forcedSplit: boolean;
+}
+
+/**
+ * 도구 1건의 SSOT 실측 판정(p·basis·sharp/split·forcedSplit).
+ * DB 미존재·오류 시 사전확률(p0, basis='prior') 폴백(§3.5).
+ */
+export function evaluateToolDecision(
+  toolName: string,
+  args: Record<string, unknown> | undefined,
+  conversationId: string | null,
+  cwd = process.cwd()
+): ToolDecision {
+  const { route, toolClass } = classifyTool(toolName, args);
+  const fallback = (): ToolDecision => {
+    const p = priorP0(route, toolClass);
+    return {
+      route,
+      toolClass,
+      tag: p >= 0.7 ? 'sharp' : 'split',
+      p,
+      basis: 'prior',
+      forcedSplit: false,
+    };
+  };
+  const db = openDbSafe(resolveDbPath(), { readOnly: true, busyTimeoutMs: 1000 });
+  if (!db) return fallback();
+  try {
+    const { projectId } = resolveProjectIdentity(cwd);
+    const post = getPosterior(db, projectId, route, toolClass);
+    const forced = evaluateForced(db, projectId, route, toolClass, conversationId);
+    const split = forced.forcedSplit || post.p < 0.7;
+    return {
+      route,
+      toolClass,
+      tag: split ? 'split' : 'sharp',
+      p: post.p,
+      basis: post.basis,
+      forcedSplit: forced.forcedSplit,
+    };
+  } catch {
+    return fallback();
+  } finally {
+    try {
+      db.close();
+    } catch {
+      /* 무시 */
+    }
+  }
+}
+
+/** §4.5 target_hash = sha256(path || command_prefix) — 재시도 지문 */
+export function targetHashForArgs(args: Record<string, unknown> | undefined): string | null {
+  if (!args) return null;
+  const pathArg = args['Path'] ?? args['path'] ?? args['FilePath'] ?? args['DirectoryPath'];
+  if (typeof pathArg === 'string' && pathArg) {
+    return createHash('sha256').update(pathArg).digest('hex').slice(0, 16);
+  }
+  const cmdArg = args['CommandLine'] ?? args['command'];
+  if (typeof cmdArg === 'string' && cmdArg) {
+    const prefix = cmdArg.trim().split(/\s+/).slice(0, 4).join(' ');
+    return createHash('sha256').update(prefix).digest('hex').slice(0, 16);
+  }
+  return null;
+}
+
+/** 자기 호출 제외(B6) 판정용 명령문 추출 — engine이 dg.ts/dg-hook.ts 토큰을 탐지 */
+export function commandLineOfArgs(args: Record<string, unknown> | undefined): string | null {
+  const v = args?.['CommandLine'] ?? args?.['command'];
+  return typeof v === 'string' && v ? v : null;
+}
+
+// ---------------------------------------------------------------------------
+// totalForks 이중 카운트 방지 (선행 버그 #2 — §5.1)
+
+interface AgyMapperCtx {
+  counted: Set<string>;
+}
+const agyMapperCtx = new WeakMap<AppState, AgyMapperCtx>();
+
+/**
+ * 도구 스텝 1건 = totalForks 1회만 가산한다.
+ * step_index 유효 시 `convId:step_index` 키로 ACTIVE·DONE 어느 쪽이 먼저 와도 1회.
+ * step_index 누락(N5)은 ACTIVE에서만 가산한다(DONE은 미상관 스텝으로 간주).
+ */
+function countAgyForkOnce(
+  state: AppState,
+  conversationId: string | null,
+  stepIndex: number | undefined,
+  phase: 'ACTIVE' | 'DONE'
+): void {
+  if (typeof stepIndex !== 'number' || !Number.isFinite(stepIndex)) {
+    if (phase === 'ACTIVE') state.totalForks += 1;
+    return;
+  }
+  let ctx = agyMapperCtx.get(state);
+  if (!ctx) {
+    ctx = { counted: new Set() };
+    agyMapperCtx.set(state, ctx);
+  }
+  const key = `${conversationId ?? ''}:${stepIndex}`;
+  if (ctx.counted.has(key)) return;
+  ctx.counted.add(key);
+  state.totalForks += 1;
 }
 
 /**
@@ -215,15 +347,22 @@ export function applyAgyEvent(state: AppState, raw: AgyRawEvent): void {
       const card = state.cards[cardIdx]!;
       const hint = summarizeToolParam(toolName, u.tool_info?.parameters);
       const stepSlot = u.step_index ?? state.totalForks;
+      const convId = u.conversation_id ?? state.conversationId;
+      const params = u.tool_info?.parameters;
+      const role = cardIdx === 1 ? 'grep' : cardIdx === 2 ? 'audit' : 'search';
+
+      // 1스텝 1회만 가산 (선행 버그 #2 — ACTIVE·DONE 이중 카운트 제거)
+      countAgyForkOnce(state, convId, u.step_index, u.state === 'DONE' ? 'DONE' : 'ACTIVE');
 
       if (u.state === 'ACTIVE') {
         state.phase = `도구: ${toolName}`;
-        updateDecisionRoutes(state, toolName, false);
+        // SQLite SSOT 실측 평가 — 고정 휴리스틱/'sharp' 하드코딩 제거(§5.1-2)
+        const decision = evaluateToolDecision(toolName, params, convId);
+        syncRoutesFromSsot(state);
         card.status = 'running';
         card.progress = Math.min(85, Math.max(25, card.progress + 35));
         card.description = hint ? `${toolName}(${hint})` : `${toolName} 실행 중`;
 
-        const role = cardIdx === 1 ? 'grep' : cardIdx === 2 ? 'audit' : 'search';
         updateSwarmWorkerSlot(state, stepSlot, role, hint || toolName, false);
         syncSwarmCount(state);
 
@@ -231,14 +370,13 @@ export function applyAgyEvent(state: AppState, raw: AgyRawEvent): void {
           state,
           `Decision 1`,
           'green',
-          `도구 분기 → ${toolName}${hint ? ` (${hint})` : ''}  sharp`
+          `도구 분기 → ${toolName}${hint ? ` (${hint})` : ''}  ${decision.tag} (p=${decision.p.toFixed(2)}, ${decision.basis})`
         );
       } else if (u.state === 'DONE') {
         const errText = u.tool_info?.error;
-        const hadError = Boolean(errText);
-        if (hadError) {
+        const ok = !errText;
+        if (!ok) {
           state.consecutiveToolErrors += 1;
-          updateDecisionRoutes(state, toolName, true);
           card.status = 'error';
           if (state.consecutiveToolErrors >= 2) {
             state.activeTrigger = 1;
@@ -253,9 +391,48 @@ export function applyAgyEvent(state: AppState, raw: AgyRawEvent): void {
           card.progress = 100;
         }
 
-        const role = cardIdx === 1 ? 'grep' : cardIdx === 2 ? 'audit' : 'search';
+        // [N5] step_index가 유효 숫자일 때만 멱등 키 발급 — 누락 시 totalForks 폴백 없이 기록 생략.
+        // 쓰기 가드: demo·DECISION_READONLY·has_hook_coverage=1이면 쓰기 생략(SSOT 읽기 동기화만).
+        const hasStepIdx = typeof u.step_index === 'number' && Number.isFinite(u.step_index);
+        if (!decisionWriteBlocked(state) && hasStepIdx) {
+          const dbPath = resolveDbPath();
+          const hookCovered = convId ? hasHookCoverageById(dbPath, convId) : false;
+          if (!hookCovered) {
+            try {
+              const { route, toolClass } = classifyTool(toolName, params);
+              const { projectId, projectLabel } = resolveProjectIdentity(process.cwd());
+              recordToolOutcomeSafe(dbPath, {
+                projectId,
+                projectLabel,
+                route,
+                toolClass,
+                toolName,
+                ok,
+                conversationId: convId,
+                step: u.step_index,
+                targetHash: targetHashForArgs(params),
+                errorSnippet: errText ? String(errText).slice(0, 300) : null,
+                source: 'agy_stream',
+                dedupeKey: `agy:${convId ?? 'unknown'}:${u.step_index}`,
+                commandLine: commandLineOfArgs(params),
+              });
+            } catch {
+              // fail-open — 수집 실패가 UI를 죽이지 않는다(§3.5)
+            }
+          }
+        }
+        syncRoutesFromSsot(state);
+
         updateSwarmWorkerSlot(state, stepSlot, role, hint || toolName, true);
         syncSwarmCount(state);
+
+        const post = evaluateToolDecision(toolName, params, convId);
+        appendLog(
+          state,
+          'Decision 1',
+          'green',
+          `${toolName} 결과 → ${post.tag} (p=${post.p.toFixed(2)}, ${post.basis})`
+        );
 
         const dur =
           u.duration_seconds !== undefined ? ` (${u.duration_seconds.toFixed(2)}s)` : '';

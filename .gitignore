@@ -2,5 +2,22 @@
 node_modules/
 dist/
 *.log
+
+# 환경변수·시크릿 — 절대 커밋 금지
 .env
 .env.*
+.env*
+
+# 오케스트레이션 런타임 산출물 (로컬 상태·브리프·검증 결과)
+.verify/
+HANDOFF-NEON.md
+.herdr/worktrees/
+.herdr/briefs/
+.herdr/advice/
+.herdr/verify/
+.herdr/roster.json
+
+# SQLite 결정 엔진 DB
+*.db
+*.db-wal
+*.db-shm

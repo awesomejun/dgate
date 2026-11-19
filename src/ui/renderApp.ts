@@ -6,7 +6,7 @@ import {
   truncateWidth,
   wrapByWidth,
 } from '../core/width.ts';
-import { TRIGGER_LABELS, effortToGauge, getFilteredLogs } from '../state/store.ts';
+import { TRIGGER_LABELS, effortToGauge, getFilteredLogs, sortRoutesForDisplay } from '../state/store.ts';
 import { THEME, lerpColor, resolveColorKey, type RGB } from '../theme.ts';
 import type { AppState } from '../types.ts';
 import { computeLayout, type CompactLayout, type FullLayout } from './layout.ts';
@@ -640,21 +640,40 @@ function renderDecisionPanel(buf: CellBuffer, state: AppState, L: FullLayout): v
   }
   cy++;
 
-  // 3개 라우트 행
+  // 라우트 행(N3): forcedSplit → split 순으로 우선 정렬 후, 패널 높이가 허용하는 슬롯 전부 활용(최소 3행)
   const labelW = Math.min(18, Math.max(14, Math.floor(iw * 0.28)));
-  const statusW = 13; // "p=0.89 sharp"
+  const statusW = 19; // "p=0.89 sharp m:24" — 13→19 확장, barW 자동 축소로 좁은 폭 오버플로우 방지
   const barW = Math.max(8, iw - labelW - statusW - 4);
+  const maxRouteRows = Math.max(3, R.y + R.h - 1 - cy);
 
-  for (const route of state.routes.slice(0, 3)) {
+  for (const route of sortRoutesForDisplay(state.routes).slice(0, maxRouteRows)) {
     if (cy >= R.y + R.h - 1) break;
-    const isSplit = route.p < 0.7;
-    const rowColor: RGB = isSplit ? THEME.orange : THEME.green;
+    const isSplit = route.forcedSplit === true || route.p < 0.7;
+    const rowColor: RGB =
+      route.forcedSplit === true ? THEME.trafficRed : isSplit ? THEME.orange : THEME.green;
     const trackBg: RGB = isSplit ? THEME.bgOrangeTrack : THEME.bgGreenTrack;
-    const tag = `p=${route.p.toFixed(2)} ${isSplit ? 'split' : 'sharp'}`;
+    let tag: string;
+    if (route.forcedSplit === true) {
+      tag = `p=${route.p.toFixed(2)} SPLIT!`;
+    } else {
+      tag = `p=${route.p.toFixed(2)} ${isSplit ? 'split' : 'sharp'}`;
+      // basis가 주어지면 반드시 m:<n>(실측) / p:<n>(사전) 표기. undefined(데모·구버전)면 생략
+      if (route.basis !== undefined) {
+        tag += ` ${route.basis === 'measured' ? 'm' : 'p'}:${route.samples ?? 0}`;
+      }
+    }
 
-    buf.writeText(ix, cy, padRightWidth(route.name, labelW), isSplit ? THEME.orange : THEME.fg, THEME.bg);
+    buf.writeText(ix, cy, padRightWidth(route.name, labelW), isSplit ? rowColor : THEME.fg, THEME.bg);
     buf.drawProgressBar(ix + labelW + 2, cy, barW, route.p, rowColor, trackBg);
-    buf.writeText(ix + labelW + 2 + barW + 2, cy, tag, rowColor, THEME.bg, isSplit);
+    buf.writeText(
+      ix + labelW + 2 + barW + 2,
+      cy,
+      tag,
+      rowColor,
+      THEME.bg,
+      isSplit,
+      Math.max(0, iw - labelW - barW - 4)
+    );
     cy++;
   }
 
@@ -1002,13 +1021,29 @@ function renderCompactLayout(buf: CellBuffer, state: AppState, L: CompactLayout)
       iw
     );
     cy++;
-    for (const r of state.routes) {
+    for (const r of sortRoutesForDisplay(state.routes)) {
       if (cy >= B.y + B.h - 2) break;
-      const split = r.p < 0.7;
-      const col = split ? THEME.orange : THEME.green;
+      const split = r.forcedSplit === true || r.p < 0.7;
+      const col = r.forcedSplit === true ? THEME.trafficRed : split ? THEME.orange : THEME.green;
       buf.writeText(ix, cy, padRightWidth(r.name, 16), col, THEME.bg, false, 16);
-      buf.drawProgressBar(ix + 17, cy, Math.max(8, iw - 33), r.p, col, THEME.bgGreenTrack);
-      buf.writeRight(ix, cy, iw, `p=${r.p.toFixed(2)} ${split ? 'split' : 'sharp'}`, col, THEME.bg);
+      buf.drawProgressBar(
+        ix + 17,
+        cy,
+        Math.max(8, iw - 33),
+        r.p,
+        col,
+        split ? THEME.bgOrangeTrack : THEME.bgGreenTrack
+      );
+      let tag: string;
+      if (r.forcedSplit === true) {
+        tag = `p=${r.p.toFixed(2)} SPLIT!`;
+      } else {
+        tag = `p=${r.p.toFixed(2)} ${split ? 'split' : 'sharp'}`;
+        if (r.basis !== undefined) {
+          tag += ` ${r.basis === 'measured' ? 'm' : 'p'}:${r.samples ?? 0}`;
+        }
+      }
+      buf.writeRight(ix, cy, iw, tag, col, THEME.bg, r.forcedSplit === true);
       cy++;
     }
     cy++;

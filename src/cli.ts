@@ -35,12 +35,15 @@ import { computeLayout } from './ui/layout.ts';
 import { renderFrame } from './ui/renderApp.ts';
 import { renderQuadRoleFrame } from './ui/renderQuadRole.ts';
 import { QuadBusClient, QuadBusServer, type QuadMessage } from './ipc/quadBus.ts';
+import { resolveDbPath } from './decision/db.ts';
+import { readTelemetrySnapshot } from './decision/telemetry.ts';
 
 interface CliOptions {
   mode: RunMode;
   filePath: string | null;
   watchMode: boolean;
   watchDir: string | null;
+  watchDb: string | null;
   follow: boolean;
   replayMs: number;
   initialTime: number;
@@ -68,6 +71,7 @@ function parseArgs(argv: string[]): CliOptions {
     filePath: null,
     watchMode: false,
     watchDir: null,
+    watchDb: null,
     follow: false,
     replayMs: 0,
     initialTime: 0,
@@ -110,6 +114,12 @@ function parseArgs(argv: string[]): CliOptions {
       case '--watch-dir':
         opts.watchDir = argv[++i] ?? null;
         break;
+      case '--watch-db': {
+        // N8: SQLite 결정 DB 읽기전용 구독 경로. 우선순위 --watch-db > GEMINI_TRICK_DB_PATH > 기본 경로
+        const p = argv[++i];
+        if (p && !p.startsWith('-')) opts.watchDb = p;
+        break;
+      }
       case '--stream':
         opts.mode = 'stream';
         break;
@@ -219,7 +229,10 @@ GEMINI CLI SUBAGENT TUI (Argon · Decision 1 · Hydrogen · Neon · Carbon)
 
 실행 모드 옵션:
   --watch, -w [path]     실행 중인 agy/세션 트랜스크립트(transcript.jsonl) 자동 감지 및 실시간 관제
-  --watch-dir <path>     트랜스크립트 검색 기본 디렉터리 지정 (기본: ~/.gemini/antigravity/brain)
+  --watch-dir <path>     트랜스크립트 검색 기본 디렉터리 지정 (기본: CLI ~/.gemini/antigravity-cli/brain 및
+                         IDE ~/.gemini/antigravity/brain 중 최신 mtime 자동 선택)
+  --watch-db <path>      SQLite 결정 DB(decision.db) 읽기전용 구독 경로 지정 (N8)
+                         우선순위: --watch-db > GEMINI_TRICK_DB_PATH > ~/.local/state/gemini-trick/decision.db
   --live, --agy          실제 Antigravity(agy) / Gemini API 백엔드 에이전트 루프 연결 실행
   --demo                 gemini_sub_neon.html의 40초 멀티 에이전트 시나리오 데모 실행 (기본값)
   --stream               표준 입력(stdin)으로부터 JSONL(또는 agy stream-json) 실시간 렌더링
@@ -271,6 +284,21 @@ function main(): void {
   }
   if (opts.effort) {
     state.effort = opts.effort;
+  }
+
+  // N8: --watch-db > GEMINI_TRICK_DB_PATH > 기본 경로 우선순위로 SQLite 결정 DB 읽기전용 구독.
+  // W1은 최초 1회 로드만 수행한다(주기 구독 훅은 W2-B가 src/state에 추가).
+  const decisionDbPath = resolveDbPath(opts.watchDb);
+  if ((opts.watchDb !== null || process.env.GEMINI_TRICK_DB_PATH) && fs.existsSync(decisionDbPath)) {
+    try {
+      const snapshot = readTelemetrySnapshot(decisionDbPath, opts.watchDir ?? process.cwd());
+      state.routes = snapshot.routes;
+      const splitCount = snapshot.routes.filter((r) => r.forcedSplit === true || r.p < 0.7).length;
+      state.sharpCount = snapshot.routes.length - splitCount;
+      state.splitCount = splitCount;
+    } catch {
+      // 텔레메트리 로드 실패 시 기존 라우트 유지(§3.5 안전 폴백)
+    }
   }
 
   const runner =
@@ -383,32 +411,7 @@ function main(): void {
     }
   };
 
-  if (opts.isHub) {
-    busServer = new QuadBusServer((msg) => {
-      if (msg.type === 'action' && msg.action === 'prompt' && typeof msg.payload === 'string') {
-        executePromptCommand(msg.payload, state, demoCtrl, {
-          seekTo,
-          renderNow,
-          quitApp,
-          liveHooks,
-        });
-      }
-    });
-    void busServer.start().catch(() => {
-      // 소켓 바인드 실패 시 단독 모드로 동작
-      busServer = null;
-    });
-  } else if (opts.quad && opts.quadRole && opts.quadRole !== 'argon') {
-    busClient = new QuadBusClient((msg) => {
-      if (msg.type === 'state' && msg.state) {
-        isSyncedClient = true;
-        Object.assign(state, msg.state);
-        renderNow();
-      }
-    });
-    busClient.connect();
-  }
-
+  // 선행 버그 #1 수정: liveHooks를 Hub IPC 등록 이전에 선언해 핸들러에서 참조 가능하게 함
   const liveHooks: LivePromptHooks | undefined = runner
     ? {
         onLivePrompt: (text: string) => {
@@ -433,6 +436,29 @@ function main(): void {
         },
       }
     : undefined;
+
+  if (opts.isHub) {
+    busServer = new QuadBusServer((msg) => {
+      if (msg.type === 'action' && msg.action === 'prompt' && typeof msg.payload === 'string') {
+        // 선행 버그 #1 수정: executePromptCommand 위치 인자 시그니처 준수 + 즉시 렌더
+        executePromptCommand(msg.payload, state, demoCtrl, seekTo, quitApp, liveHooks);
+        renderNow();
+      }
+    });
+    void busServer.start().catch(() => {
+      // 소켓 바인드 실패 시 단독 모드로 동작
+      busServer = null;
+    });
+  } else if (opts.quad && opts.quadRole && opts.quadRole !== 'argon') {
+    busClient = new QuadBusClient((msg) => {
+      if (msg.type === 'state' && msg.state) {
+        isSyncedClient = true;
+        Object.assign(state, msg.state);
+        renderNow();
+      }
+    });
+    busClient.connect();
+  }
 
   if (opts.mode === 'live' && runner) {
     if (runner.backend === 'none') {
