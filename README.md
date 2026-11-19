@@ -65,7 +65,7 @@ node ./src/decision/dg.ts stats --cost --timing && node ./src/decision/dg.ts rep
 ### 빠른 시작
 
 ```bash
-git clone <this-repo> && cd <this-repo>
+git clone https://github.com/insightflo/dgate.git && cd dgate
 
 # 0) 환경 진단·온보딩 — 보유 CLI·사용 가능 모델 감지, 역할별 추천 + 맞춤 roster 설정
 npm run setup            # 대화형 위저드 (환경 진단·로스터 맞춤 설정·선택 도구 안내)
@@ -74,7 +74,7 @@ npm run setup:check      # 읽기전용 진단 리포트만 (파일 쓰기 0 —
 # 1) 오케스트레이션 계획 리허설 (모델 호출 0회, 실기동 0회 — 무조건 안전)
 npm run orchestrate:dry
 
-# 2) 전체 테스트 115건 (외부 의존성 0개)
+# 2) 전체 테스트 171건 (외부 의존성 0개)
 npm test
 
 # 3) 데모 TUI 스냅샷 (터미널에 관제 화면 정적 출력)
@@ -84,7 +84,15 @@ npm run snapshot
 npm run herdr:quad
 ```
 
-> **TUI 관측 vs 제어**: `npm run watch`/`--watch` 관제 화면의 `[읽기전용 관측 · WATCH]` 배지는 **읽기전용 실시간 관측 전용**이다 — DB·분기 확률·로그를 보는 화면일 뿐, 작업 실행·배차·라우팅·워치독 제어는 별도 셸에서 `dg`(또는 `scripts/dispatch.ts`) 명령으로 수행한다.
+### `npm run setup` — 0토큰 온보딩 위저드
+
+**모델 호출 없이(0토큰)** 설치된 CLI 에이전트와 로컬 모델을 자동 감지하고, 역할별 성능 가이드와 선호 모델 피커를 보여주며 맞춤 roster를 완성한다. 사용자 환경과 비교해 선택 동반 스킬(mistology·NeverStuck·todo-flow·Effort-Router)을 추천하고, 옵트인 GitHub 별점 안내도 여기서 나온다.
+
+### 자연어 스킬 플로우
+
+AI 채팅에서 `dgate로 진행해줘` 한 줄이면 끝난다: 조용한 환경·안전 설정 → 사전 평가(preflight) 모델 판정 + 저장소별 모니터 승인 → 워커 실행·교차 검증 → 쿼터 초과·스톨 시 워크트리를 보존하는 페일오버.
+
+> **TUI 관측 vs 제어**: `npm run watch`/`--watch` 관제 화면의 `[읽기전용 관측 · WATCH]` 배지는 **읽기전용 라이브 대시보드**다 — DB·분기 확률·로그를 실시간으로 보여줄 뿐, 화면 자체가 작업을 실행하거나 제어하지 않는다. 실제 태스크 제어는 AI 채팅에서 `dgate` 스킬로 하거나 별도 셸에서 `dg`(또는 `scripts/dispatch.ts`) 명령으로 수행한다. 와이어 애니메이션은 work/워커가 실제로 실행 중일 때만 움직이며, 대기 상태에서는 멈춰 있다.
 
 ---
 
@@ -238,9 +246,9 @@ node ./src/decision/dg.ts <command> [flags]
 
 ---
 
-## 6. 기존 TUI 관제 화면
+## 6. DGATE TUI 관제 화면
 
-원본 프로젝트(`Gemini_trick`)의 5계층 관제 TUI가 그대로 포함돼 있다:
+읽기전용 라이브 관제 TUI다. `roster.json` 변경을 핫리로드로 반영하고, 글로벌 watch 모드에서는 활성 `hc` 워커의 모델과 `[repo]` 태그가 붙은 1줄 리덕션 활동을 실시간으로 보여준다. 저장소 단위 스코프는 `--repo <dir>`로 — cwd 기준 워커 필터·project_id 기준 DB 필터가 적용된다. 감시 중인 호스트 Lead 라벨은 Antigravity / Claude Code / Codex 실제 값을 정직하게 표시하고, 좌측 상단 Watch/Control 모드 배지·`?` 평이한 한국어 도움말 모달, 대기 조용한(idle-quiet) 와이어로 구성된다.
 
 ```bash
 npm run demo          # 40초 데모 시나리오 (모델 호출 없음)
@@ -256,4 +264,10 @@ agy --output-format stream-json --print "…" | node ./src/cli.ts --stream   # J
 
 ## 라이선스·크레딧
 
-본 저장소는 로컬 멀티 에이전트 관제 TUI 프로젝트 `Gemini_trick`의 오케스트레이션 후속으로, Decision Gate·roster·읽기전용 격리 계약을 통합해 일반화했다.
+- **TUI 원조** — 관제 TUI는 [leecg39/Gemini_trick](https://github.com/leecg39/Gemini_trick)에서 왔다. 본 저장소는 그 오케스트레이션 후속으로, Decision Gate·roster·읽기전용 격리 계약을 통합해 일반화했다. 참고로 원조 저장소에는 현재 LICENSE 파일이 명시돼 있지 않으며, 본 저장소는 원조의 라이선스 조건을 따른다.
+- **설계 영감** — LoopForge의 실행 가드레일·체크포인트·텔레메트리 패턴에서 설계 영감을 받았다.
+- **선택 동반 스킬** (각 저장소 라이선스 지배):
+  - [chldbwnstm/mistology](https://github.com/chldbwnstm/mistology)
+  - [chldbwnstm/NeverStuck](https://github.com/chldbwnstm/NeverStuck)
+  - [JakeB-5/todo-flow](https://github.com/JakeB-5/todo-flow)
+  - [acc0mplish/Effort-Router](https://github.com/acc0mplish/Effort-Router)
