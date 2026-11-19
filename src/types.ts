@@ -1,0 +1,209 @@
+import type { AgentColorKey } from './theme.ts';
+
+export type QuadRole = 'argon' | 'carbon' | 'neon' | 'hydrogen' | 'all';
+
+export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
+
+export type FocusTarget = 'advisor' | 'main' | 'neon' | 'decision' | 'swarm' | 'logs';
+
+export type ModalKind =
+  | 'none'
+  | 'help'
+  | 'swarm'
+  | 'advisor'
+  | 'neon'
+  | 'decision'
+  | 'logs'
+  | 'response';
+
+export type CompactTab = 0 | 1 | 2 | 3; // 0: 파이프라인, 1: 스웜, 2: Carbon, 3: 세션 기록
+
+export type LogFilter = 'all' | 'argon' | 'hydrogen' | 'decision' | 'neon' | 'carbon';
+
+export type NeonStatus = 'idle' | 'run' | 'pass' | 'fail';
+
+export type RunMode = 'demo' | 'stream' | 'live' | 'watch';
+
+export type BackendKind = 'agy' | 'gemini-api' | 'none';
+
+export interface NeonCheckRecord {
+  time: string;
+  label: string;
+  status: 'run' | 'pass' | 'fail';
+  summary: string;
+  model: string;
+}
+
+export interface DecisionRoute {
+  name: string;
+  p: number; // 0.0 ~ 1.0 (p >= 0.70 => sharp, p < 0.70 => split)
+  targetHint?: string;
+}
+
+export interface SwarmCard {
+  name: string;
+  model: string;
+  progress: number; // 0 ~ 100
+  description: string;
+  status: 'running' | 'done' | 'idle' | 'error';
+}
+
+export interface SwarmWorker {
+  id: number; // 1..50
+  role: 'search' | 'grep' | 'audit' | 'index' | 'verify';
+  target: string;
+  progress: number;
+  status: 'running' | 'done' | 'idle';
+}
+
+export interface AdviceRecord {
+  time: string;
+  triggerIndex: 0 | 1 | 2;
+  triggerLabel: string;
+  text: string;
+  tokensRead: string;
+}
+
+export interface LogEntry {
+  id: number;
+  time: string;
+  agent: string;
+  color: AgentColorKey;
+  message: string;
+}
+
+export interface AppState {
+  mode: RunMode;
+  paused: boolean;
+  simTime: number; // 초 단위 (데모는 0~40 순환, 라이브는 연속 증가)
+  tickCount: number;
+
+  // 세션 메타
+  cwd: string;
+  sessionId: number;
+  modelFlag: string;
+  modelName: string;
+  backendKind: BackendKind;
+  conversationId: string | null;
+  agentBusy: boolean;
+  totalTokensUsed: number;
+  consecutiveToolErrors: number;
+  latestResponse: string;
+  responseScrollOffset: number;
+
+  // 상단 배지 & 메트릭
+  argonBuilds: number;
+  swarmActive: number;
+  swarmMax: number;
+  neonVerified: number;
+  carbonCalls: number;
+  totalForks: number;
+
+  // Argon 메인 & 리턴 패널
+  mainSummary: string;
+  effort: EffortLevel;
+  phase: string;
+  backSummary: string;
+
+  // Gemini Neon 교차 검증 패널
+  neonModelName: string;
+  neonModelFlag: string;
+  neonState: NeonStatus;
+  neonProgress: number; // 0 ~ 100
+  neonLabel: string;
+  neonSummary: string;
+  neonHistory: NeonCheckRecord[];
+
+  // Carbon 자문 패널
+  advisorState: '대기 중' | '자문 중';
+  activeTrigger: -1 | 0 | 1 | 2; // -1: 비활성, 0: 계획 확정 전, 1: 같은 오류 2회, 2: 완료 전
+  latestAdvice: string;
+  tokensRead: string;
+  adviceHistory: AdviceRecord[];
+
+  // Decision 1 분기 패널
+  routes: DecisionRoute[];
+  sharpCount: number;
+  splitCount: number;
+
+  // Hydrogen 스웜 패널
+  cards: SwarmCard[];
+  workers: SwarmWorker[];
+
+  // 세션 기록
+  logs: LogEntry[];
+  logScrollOffset: number; // 0이면 최신 줄 고정, 양수면 과거로 스크롤
+  logFilter: LogFilter;
+
+  // UI 인터랙션 상태
+  focus: FocusTarget;
+  inputActive: boolean;
+  inputValue: string;
+  statusFlash: string | null;
+  statusFlashUntil: number;
+  modal: ModalKind;
+  compactTab: CompactTab;
+}
+
+/**
+ * 실시간 JSONL 이벤트 스트림 프로토콜 (stdin 또는 --file 입력)
+ */
+export type StreamEvent =
+  | {
+      type: 'session';
+      sessionId?: number;
+      cwd?: string;
+      model?: string;
+      effort?: EffortLevel;
+    }
+  | {
+      type: 'phase';
+      phase: string;
+      summary?: string;
+      backSummary?: string;
+      argonBuilds?: number;
+    }
+  | {
+      type: 'decision';
+      forks?: number;
+      routes: Array<{ name: string; p: number; targetHint?: string }>;
+    }
+  | {
+      type: 'swarm';
+      active?: number;
+      max?: number;
+      cards?: Array<{
+        name: string;
+        model?: string;
+        progress: number;
+        description?: string;
+        status?: 'running' | 'done' | 'idle' | 'error';
+      }>;
+    }
+  | {
+      type: 'advisor';
+      trigger: -1 | 0 | 1 | 2;
+      state?: '대기 중' | '자문 중';
+      calls?: number;
+      tokens?: string;
+      advice?: string;
+    }
+  | {
+      type: 'neon';
+      state: NeonStatus;
+      progress?: number;
+      label?: string;
+      verified?: number;
+      summary?: string;
+      model?: string;
+    }
+  | {
+      type: 'log';
+      time?: string;
+      agent: string;
+      color?: AgentColorKey;
+      message: string;
+    }
+  | {
+      type: 'reset';
+    };

@@ -1,0 +1,582 @@
+<!doctype html>
+<html lang="ko">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:,">
+<title>Gemini CLI Subagent TUI</title>
+<style>
+/* ── 원본 스타일 (배치·색·서체 그대로) ─────────────────────────────── */
+:root{--bg:#1b2026;--fg:#d6dce3;--muted:#89919b;--orange:#e9a17c;--blue:#93b9ef;--green:#8cd5ae;--purple:#bda6ef;--neon:#e8d97a}
+*{box-sizing:border-box}
+html,body{height:100%;overflow:hidden}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:"Noto Sans Mono CJK KR",Pretendard,monospace;font-size:21px;line-height:1.35}
+#canvas{width:1920px;height:1080px;position:absolute;left:0;top:0;transform-origin:top left;padding:0 48px}
+b{font-weight:700}
+.orange{color:var(--orange)}.blue{color:var(--blue)}.green{color:var(--green)}.purple{color:var(--purple)}.neon{color:var(--neon)}.muted{color:var(--muted)}
+.chrome{height:32px;background:#252a32;margin:0 -48px;padding:7px 21px;display:flex;align-items:center;gap:9px;font-size:12px;color:#717a87}
+.chrome i{width:12px;height:12px;border-radius:50%;background:#f16e69}
+.chrome i:nth-child(2){background:#edbd54}
+.chrome i:nth-child(3){background:#65c785}
+.chrome span{position:absolute;left:850px}
+header{height:69px;border-bottom:3px double #4c535c;display:flex;align-items:center;gap:30px;font-size:23px}
+header strong{font-size:27px;letter-spacing:1px;margin-right:auto}
+header b{font-size:20px}
+nav{height:49px;display:flex;justify-content:center;gap:88px;color:var(--muted);font-size:20px}
+nav span{padding-top:10px}
+nav em{font-style:normal}
+.panel{position:absolute;border:2px solid;background:var(--bg)}
+h3{font-size:23px;margin:0 0 5px}
+
+/* Carbon · 자문 */
+#advisor{left:48px;top:150px;width:400px;height:666px;border-color:var(--purple);padding:15px 20px}
+#advisor h2{font-size:25px;text-align:center;margin:0;color:var(--purple)}
+#advisor .state{text-align:center;font-size:19px;margin:3px 0 9px;color:var(--purple)}
+.session{text-align:center;font-size:17px;color:var(--muted);margin-bottom:14px}
+.trigger{position:absolute;left:20px;right:20px;margin:0 -12px;padding:4px 12px;font-size:21px;color:var(--muted);
+  background:linear-gradient(#bda6ef24,#bda6ef24) no-repeat;background-size:0% 100%;transform-origin:left center}
+.trigger.active{color:var(--purple);text-shadow:0 0 10px #bda6ef70;font-weight:bold}
+#tr0{top:130px}#tr1{top:476px}#tr2{top:620px}
+.asidebody{position:absolute;top:172px;left:20px;right:20px;border-left:2px dashed #53505f;margin-left:2px;padding:8px 0 13px 17px;font-size:18px;line-height:1.6;color:var(--muted)}
+.advice{height:110px;margin-top:12px}
+.advice b{display:block;color:var(--purple);font-size:18px;line-height:1.65;word-break:keep-all}
+.stats{display:flex;justify-content:space-between;font-size:18px}
+.silent{margin-top:16px;font-size:18px}
+.explain{position:absolute;top:523px;left:20px;font-size:18px;padding:9px 0 0 18px;line-height:1.7;color:var(--muted);height:100px}
+
+/* Argon · 메인 세션 */
+#main{left:1000px;top:150px;width:470px;height:132px;border-color:var(--orange);text-align:center;padding:11px}
+#main p{margin:2px 0;font-size:20px}
+.effort{color:var(--muted);font-size:18px}
+.effort i{font-style:normal}
+
+/* Gemini Neon · 교차 검증 (추가된 모델) */
+#neon{left:1532px;top:150px;width:340px;height:132px;border-color:var(--neon);text-align:center;padding:11px}
+#neon .progress{margin:4px 0}
+#neon .progress .bar{width:215px;background:repeating-linear-gradient(90deg,#45432f 0 2px,#302f24 2px 4px)}
+#neon .progress i{background:var(--neon)}
+#neon .running{color:var(--neon)}
+
+/* Decision 1 · 분기 계층 */
+#decision{left:855px;top:317px;width:760px;height:180px;border-color:var(--green);padding:13px 20px}
+.forkhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:7px}
+.forkhead h3{font-size:22px;margin:0}
+.forkhead span{font-size:19px}
+.forkhead b{display:inline-block;width:90px;text-align:right;color:var(--green)}
+.route{display:grid;grid-template-columns:235px 230px 1fr;gap:15px;height:30px;align-items:center;font-size:20px}
+.bar{height:21px;background:repeating-linear-gradient(90deg,#38483f 0 2px,#23382e 2px 4px);position:relative;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--green);box-shadow:0 0 9px #8cd5ae50;position:relative;overflow:hidden}
+.bar i:after{content:"";position:absolute;inset:0;background:repeating-linear-gradient(90deg,transparent 0 20px,#1b202626 20px 22px)}
+.bar i:before{content:"";position:absolute;top:0;bottom:0;width:80px;left:calc(var(--sh,-1)*(100% + 80px) - 80px);background:linear-gradient(90deg,transparent,#ffffff55,transparent)}
+.route.split{color:var(--orange)}
+.route.split i{background:var(--orange)}
+.route small{font-size:19px}
+.routelegend{font-size:18px;margin-top:5px;color:var(--muted)}
+
+/* Hydrogen · 스웜 */
+#delegate{position:absolute;top:522px;left:690px;width:1090px;text-align:center;font-size:20px}
+.cards{position:absolute;left:609px;top:590px;display:flex;gap:26px}
+.card{border:2px solid var(--blue);background:var(--bg);width:400px;height:155px;text-align:center;padding:10px 13px}
+.card h3{margin:0;font-size:23px}
+.card .model{font-size:19px;color:var(--blue)}
+.progress{display:flex;align-items:center;gap:15px;justify-content:center;margin:6px 0}
+.progress .bar{width:245px;background:repeating-linear-gradient(90deg,#313c4c 0 2px,#252d38 2px 4px)}
+.progress i{background:var(--blue)}
+.progress span{font-size:18px;color:var(--muted);width:48px}
+.card p{font-size:18px;margin:3px 0}
+.running{font-size:18px;line-height:1.3;color:var(--blue)}
+
+/* 다시 Argon · 리드 */
+#back{left:960px;top:777px;width:550px;height:78px;border-color:var(--orange);text-align:center;padding:8px}
+#back h3{font-size:22px;margin:0 0 3px}
+#back div{font-size:20px}
+
+/* 연결선 · 파티클 */
+svg{position:absolute;inset:0;pointer-events:none;width:1920px;height:1080px}
+.wire{fill:none;stroke:#505761;stroke-width:2}
+.advisory{fill:none;stroke:#5a5668;stroke-dasharray:3 4;stroke-width:2}
+.advisory.on{stroke:var(--purple);filter:drop-shadow(0 0 4px #bda6ef)}
+#spot{position:absolute;left:0;top:0;width:760px;height:760px;margin:-380px 0 0 -380px;border-radius:50%;background:radial-gradient(closest-side,#9fb4d81c,transparent);pointer-events:none}
+
+/* 세션 기록 · 상태 바 */
+#logs{position:absolute;left:48px;top:883px;width:1824px;height:137px;border:2px solid #454c56;padding:12px 19px 6px;font-size:18px;overflow:visible}
+#logs label{position:absolute;top:-17px;left:22px;background:var(--bg);padding:0 12px;color:var(--muted);font-size:20px}
+#loglines{position:relative;height:110px;overflow:hidden}
+.logrow{position:absolute;left:0;right:0;top:0;height:22px;display:grid;grid-template-columns:120px 270px 1fr;white-space:nowrap}
+.logrow time{color:#69727f}
+.logrow .message{color:#aeb6c2}
+.logrow.new .message{color:var(--fg)}
+footer{position:absolute;top:1031px;left:48px;right:48px;font-size:19px;display:flex;justify-content:space-between}
+.cursor{display:inline-block;background:var(--green);width:11px;height:23px;vertical-align:middle}
+.status{display:flex;gap:25px}
+.pop{display:inline-block}
+.anim{will-change:transform,opacity}
+</style>
+
+<div id="canvas">
+  <div class="chrome"><i></i><i></i><i></i><span>~/app · gemini · 1920×1080</span></div>
+  <header>
+    <strong>GEMINI CLI SUBAGENT TUI</strong>
+    <b class="orange fade">ARGON BUILDS [1]</b>
+    <b class="blue fade">HYDROGEN SWARMS [<span id="badge">42</span>]</b>
+    <b class="neon fade">NEON VERIFIES [<span id="neonbadge" class="pop">0</span>]</b>
+    <b class="purple fade">CARBON [<span id="callsbadge" class="pop">1</span>]</b>
+  </header>
+  <nav>
+    <span><em class="orange">■</em> Argon · 리드</span>
+    <span><em class="blue">■</em> Hydrogen · 스웜</span>
+    <span><em class="green">■</em> Decision 1 · 분기</span>
+    <span><em class="neon">■</em> Neon · 검증</span>
+    <span><em class="purple">■</em> Carbon · 자문</span>
+  </nav>
+
+  <div id="spot"></div>
+
+  <svg viewBox="0 0 1920 1080">
+    <defs>
+      <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10" fill="#bda6ef"/></marker>
+    </defs>
+    <g id="wires">
+      <path class="wire" d="M1235 282V317"/>
+      <path class="wire" d="M1235 497V517"/>
+      <path class="wire" d="M1235 551V590"/>
+      <path class="wire" d="M1235 565H809V590"/>
+      <path class="wire" d="M1235 565H1661V590"/>
+      <path class="wire" d="M809 745V761H1235"/>
+      <path class="wire" d="M1661 745V761H1235"/>
+      <path class="wire" d="M1235 745V777"/>
+      <path class="wire" id="neonlink" d="M1470 216H1532"/>
+    </g>
+    <g id="advisories">
+      <path id="a0" class="advisory" d="M448 254H1000" marker-end="url(#arrow)"/>
+      <path id="a1" class="advisory" d="M448 646H609" marker-end="url(#arrow)"/>
+      <path id="a2" class="advisory" d="M448 790H960" marker-end="url(#arrow)"/>
+    </g>
+    <g id="fx"><circle id="ripple" r="5" fill="none" stroke="#bda6ef" stroke-width="2"/></g>
+  </svg>
+
+  <aside id="advisor" class="panel anim">
+    <h2>Carbon</h2>
+    <div class="state">advisor · <span id="advisorstate">대기 중</span></div>
+    <div class="session">세션 121 · session: 121</div>
+    <div class="trigger" id="tr0">◇ 계획 확정 전</div>
+    <div class="asidebody">세션 전체·도구 호출·결과를<br>읽습니다
+      <div class="advice">최근 조언<b id="advice"></b></div>
+      <div class="stats"><span>호출 수</span><b class="purple pop" id="calls"></b></div>
+      <div class="stats"><span>읽은 토큰</span><b class="purple" id="tokens"></b></div>
+      <div class="silent">일상 턴에서는 침묵</div>
+    </div>
+    <div class="trigger" id="tr1">◇ 같은 오류 2회</div>
+    <div class="explain">코드는 직접 쓰지 않습니다.<br>조언은 Argon이 적용합니다.</div>
+    <div class="trigger" id="tr2">◇ 완료 전</div>
+  </aside>
+
+  <section id="main" class="panel anim">
+    <h3 class="orange">Argon · 메인 세션</h3>
+    <p>코드를 수정하고 테스트를 실행</p>
+    <div class="effort">effort <b class="orange"><i class="eb">▮</i><i class="eb">▮</i><i class="eb">▮</i><i class="eb">▮</i> high</b> · <span id="phase" class="pop"></span></div>
+    <div class="muted" style="font-size:17px">--model argon</div>
+  </section>
+
+  <section id="neon" class="panel anim">
+    <h3 class="neon">Gemini Neon · 교차 검증</h3>
+    <div class="progress"><div class="bar"><i id="neonbar"></i></div><span id="neonpct"></span></div>
+    <div class="running" id="neonrun"></div>
+    <div class="muted" style="font-size:17px">--model gemini-neon</div>
+  </section>
+
+  <section id="decision" class="panel anim">
+    <div class="forkhead"><h3 class="green">Decision 1 · 분기 계층</h3><span class="muted">forks <b id="forks"></b></span></div>
+    <div id="routes"></div>
+    <div class="routelegend"><span class="green">sharp → 코드에서 실행</span>　 split → Argon</div>
+  </section>
+
+  <div id="delegate" class="anim">하위 에이전트에 위임 · <b class="blue">Hydrogen</b></div>
+  <div class="cards" id="cards"></div>
+
+  <section id="back" class="panel anim">
+    <h3 class="orange">다시 Argon · 리드</h3>
+    <div>검토 + 확인 <span class="muted">· review + verify</span></div>
+  </section>
+
+  <section id="logs"><label>세션 기록</label><div id="loglines"></div></section>
+
+  <footer>
+    <div><span class="green">~/app $</span> gemini <span class="cursor" id="cursor"></span></div>
+    <div class="status fade">
+      <span class="blue">[ 하위 에이전트 <b id="agents"></b>/50 ]</span>
+      <span class="neon">[ Neon <span id="neonstatus"></span> ]</span>
+      <span class="purple">[ <span id="statusstate"></span> ]</span>
+      <span class="green">[ <b id="statusforks"></b> 분기 ]</span>
+    </div>
+  </footer>
+</div>
+
+<script>
+/* ════════════════════════════════════════════════════════════════════
+   모든 모션은 시간 t(0~40초)의 함수입니다. CSS transition을 쓰지 않아
+   ?t= , window.__seek(s) 로 어느 프레임이든 똑같이 재현됩니다.
+   모션 개성: Corporate(대시보드) — 감속 진입 / 가속 퇴장 / 오버슈트 0~3%
+   레이어: 1차(데이터 흐름·상태 전환) · 2차(팝·타이핑·카운터) · 앰비언트(호흡·시머)
+   ════════════════════════════════════════════════════════════════════ */
+const $ = id => document.getElementById(id);
+const LOOP = 40, STEP = LOOP / 24;
+const REDUCE = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+const clamp01 = x => x < 0 ? 0 : x > 1 ? 1 : x;
+const seg = (t, start, dur) => clamp01((t - start) / dur);
+const lerp = (a, b, k) => a + (b - a) * k;
+const frac = x => x - Math.floor(x);
+const ease = {
+  out:   x => 1 - Math.pow(1 - x, 3),                      // 진입: 감속
+  in:    x => x * x * x,                                   // 퇴장: 가속
+  inOut: x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2,
+  snap:  x => 1 - Math.pow(1 - x, 4),                      // 대표 곡선 ≈ cubic-bezier(.2,0,0,1)
+};
+const bump = k => Math.sin(Math.PI * ease.out(k));         // 0→정점→0 (팝)
+
+const RGB = {orange:[233,161,124], blue:[147,185,239], green:[140,213,174], purple:[189,166,239], neon:[232,217,122], fg:[214,220,227], wire:[80,87,97]};
+const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a.toFixed(3)})`;
+const mix = (a, b, k) => `rgb(${a.map((v, i) => Math.round(lerp(v, b[i], k))).join(',')})`;
+
+/* ── 시나리오 (24비트 × 1.667초 = 40초, 끊김 없이 반복) ───────────── */
+const BEATS = [
+  ['Argon',           'orange', '작업 시작 — 수정 범위와 테스트를 확인',                         'main'],
+  ['Decision 1',      'green',  '어느 파일 → src/api/spec.ts　 p=0.89 sharp → code',             'decision'],
+  ['Hydrogen search', 'blue',   '모듈 4개를 파악　 p=0.55 split → Argon',                         'card0'],
+  ['Decision 1',      'green',  '어느 도구 → grep　 p=0.94 sharp → code',                         'decision'],
+  ['Hydrogen grep',   'blue',   '호출 위치 14개를 찾음',                                          'card1'],
+  ['Carbon',          'purple', '계획 확정 전 — 세션 전체를 읽는 중',                             'advisor'],
+  ['Carbon',          'purple', '인증·DB/트랜잭션 호출 제외 → Argon에 조언',                      'advisor'],
+  ['Neon',            'neon',   '계획 교차 검토 완료 — 영향 범위 누락 없음',                      'neon'],
+  ['Argon',           'orange', '계획 확정 · 수정 적용 + 테스트 실행',                            'main'],
+  ['Hydrogen audit',  'blue',   '워크트리 차이 비교 · fixture 확인',                              'card2'],
+  ['Argon',           'orange', 'mock_missing_symbol · 같은 오류 2회',                            'main'],
+  ['Carbon',          'purple', '같은 오류 2회 — 세션 전체를 읽는 중',                            'advisor'],
+  ['Carbon',          'purple', '잘못된 fixture → Argon이 수정',                                  'advisor'],
+  ['Decision 1',      'green',  '재시도 또는 중단 → 중단 후 질문　 p=0.42 split → Argon',         'decision'],
+  ['Argon',           'orange', 'fixture 수정 완료 · 테스트 28/28 통과',                          'main'],
+  ['Carbon',          'purple', '완료 전 — 변경 사항과 결과를 읽는 중',                           'advisor'],
+  ['Neon',            'neon',   '변경 diff 독립 재검증 시작',                                     'neon'],
+  ['Hydrogen audit',  'blue',   '차이 비교 완료 · 누락 없음',                                     'card2'],
+  ['Decision 1',      'green',  '어느 도구 → test　 p=0.94 sharp → code',                         'decision'],
+  ['Neon',            'neon',   '회귀 없음 · 28/28 재현 → Argon에 전달',                          'neon'],
+  ['Carbon',          'purple', '검토 완료 · 조언을 Argon에 전달',                                'advisor'],
+  ['Argon',           'orange', '검토 + 확인 · 테스트 통과',                                      'back'],
+  ['Hydrogen search', 'blue',   '다음 작업을 위한 탐색 재개',                                     'card0'],
+  ['Argon',           'orange', '세션 정리 · 다음 요청 대기',                                     'main'],
+];
+const at = beat => beat * STEP;
+
+// Carbon 자문 구간 (로그와 같은 박자에 켜지고 꺼짐)
+const ADV = [
+  {name: '계획 확정 전',  on: at(5),  off: at(8),  gain: 155, y: 254, end: 1000},
+  {name: '같은 오류 2회', on: at(11), off: at(13), gain: 138, y: 646, end: 609},
+  {name: '완료 전',       on: at(15), off: at(21), gain: 210, y: 790, end: 960},
+];
+const ADVICE = [
+  {at: at(6),  text: '» 인증·DB/트랜잭션 호출을 계획에서 제외, 토큰 약 120k 읽음'},
+  {at: at(12), text: '» 잘못된 fixture, 일상 턴'},
+  {at: at(20), text: '» 테스트 통과 확인, 변경 범위를 검토'},
+];
+const PHASES = [[0, '탐색'], [at(5), '계획 확정'], [at(9), '오류 수정'], [at(15), '검증 중'], [at(22), '완료']];
+// Gemini Neon 검증 구간: on → 진행 → done(✓) → off(대기)
+const NEON = [
+  {on: 9.0,    done: at(7),  off: at(7) + 2.4,  label: '계획 교차 검토'},
+  {on: at(16), done: at(19), off: at(19) + 2.6, label: '변경 diff 재검증'},
+];
+const ROUTES = [
+  {name: '어느 파일',        p: [.81, .89, .94, .64]},
+  {name: '어느 도구',        p: [.45, .94, .58, .83]},
+  {name: '재시도 또는 중단', p: [.88, .82, .91, .80]},
+];
+const CARDS = [
+  {name: 'search', desc: '저장소 구조를 파악합니다',       cx: 809},
+  {name: 'grep',   desc: '호출 위치를 찾습니다',           cx: 1235},
+  {name: 'audit',  desc: '워크트리에서 차이를 비교합니다', cx: 1661},
+];
+const CENTER = {main: [1235, 216], neon: [1702, 216], decision: [1235, 407], card0: [809, 667], card1: [1235, 667], card2: [1661, 667], back: [1235, 816], advisor: [248, 483]};
+
+/* ── DOM 한 번만 생성 (프레임마다 innerHTML을 다시 만들지 않음) ───── */
+$('cards').innerHTML = CARDS.map((c, i) => `<article class="card anim" id="card${i}"><h3>${c.name}</h3><div class="model">Hydrogen</div><div class="progress"><div class="bar"><i id="bar${i}"></i></div><span id="pct${i}"></span></div><p>${c.desc}</p><div class="running" id="run${i}"></div></article>`).join('');
+$('routes').innerHTML = ROUTES.map((r, i) => `<div class="route" id="route${i}"><span>${r.name}</span><div class="bar"><i id="rbar${i}"></i></div><small id="rtxt${i}"></small></div>`).join('');
+$('loglines').innerHTML = Array.from({length: 6}, (_, s) => `<div class="logrow" id="row${s}"><time></time><b></b><span class="message"></span></div>`).join('');
+
+const cache = new Map();
+function text(id, v) { if (cache.get(id) !== v) { cache.set(id, v); $(id).textContent = v; } }
+const el = Object.fromEntries(['advisor', 'main', 'neon', 'decision', 'delegate', 'back', 'card0', 'card1', 'card2', 'spot', 'loglines', 'ripple', 'neonlink'].map(id => [id, $(id)]));
+const fades = [...document.querySelectorAll('.fade')], bars = [...document.querySelectorAll('.eb')];
+const wires = [...document.querySelectorAll('#wires path')].map(p => ({p, len: p.getTotalLength()}));
+const rowSlot = [-9, -9, -9, -9, -9, -9];
+
+/* ── 파티클(혜성): 머리 + 꼬리 3개가 연결선을 따라 이동 ─────────── */
+const NS = 'http://www.w3.org/2000/svg';
+function route(pts) {
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+  return {pts, cum, len: cum[cum.length - 1]};
+}
+function pointAt(r, u) {
+  const d = clamp01(u) * r.len;
+  let i = 1;
+  while (i < r.cum.length - 1 && r.cum[i] < d) i++;
+  const k = (d - r.cum[i - 1]) / ((r.cum[i] - r.cum[i - 1]) || 1);
+  return [lerp(r.pts[i - 1][0], r.pts[i][0], k), lerp(r.pts[i - 1][1], r.pts[i][1], k)];
+}
+function comet(color, radius) {
+  const dots = [];
+  for (let j = 3; j >= 0; j--) {
+    const c = document.createElementNS(NS, 'circle');
+    c.setAttribute('fill', color);
+    c.setAttribute('r', (radius * (1 - j * .17)).toFixed(2));
+    c.style.opacity = 0;
+    $('fx').appendChild(c);
+    dots[j] = c;
+  }
+  return dots;
+}
+const TRAIL = [1, .55, .3, .14];
+// q: 이동 진행률(0~1, 선형 시간) → 위치는 ease-in-out, 양 끝에서 페이드
+function fly(dots, r, q, strength) {
+  const show = !REDUCE && q > 0 && q < 1;
+  const u = ease.inOut(q), alpha = show ? Math.min(1, q * 8, (1 - q) * 6) * strength : 0, gap = 9 / r.len;
+  dots.forEach((c, j) => {
+    const uu = u - j * gap;
+    if (alpha <= .004 || uu < 0) { c.style.opacity = 0; return; }
+    const [x, y] = pointAt(r, uu);
+    c.setAttribute('cx', x.toFixed(1));
+    c.setAttribute('cy', y.toFixed(1));
+    c.style.opacity = (alpha * TRAIL[j]).toFixed(3);
+  });
+}
+const R = {
+  mainDec:  route([[1235, 282], [1235, 317]]),
+  delegate: CARDS.map(c => route(c.cx === 1235 ? [[1235, 551], [1235, 590]] : [[1235, 551], [1235, 565], [c.cx, 565], [c.cx, 590]])),
+  ret:      CARDS.map(c => route(c.cx === 1235 ? [[1235, 745], [1235, 777]] : [[c.cx, 745], [c.cx, 761], [1235, 761], [1235, 777]])),
+  neonGo:   route([[1470, 216], [1532, 216]]),
+  neonBack: route([[1532, 216], [1470, 216]]),
+  adv:      ADV.map(a => route([[448, a.y], [a.end, a.y]])),
+};
+const C = {
+  mainDec:  comet('#e9a17c', 5),
+  delegate: CARDS.map(() => comet('#93b9ef', 5)),
+  ret:      CARDS.map(() => comet('#d6dce3', 4)),
+  neonGo:   comet('#e9a17c', 4),
+  neonBack: comet('#e8d97a', 4),
+  adv:      comet('#bda6ef', 5),
+};
+
+function shadow(node, layers) {
+  const s = layers.filter(l => l[2] > .004).map(l => `${l[3] ? 'inset ' : ''}0 0 ${l[1].toFixed(1)}px ${rgba(l[0], l[2])}`).join(',');
+  node.style.boxShadow = s || 'none';
+}
+
+/* ── 한 프레임 그리기 ─────────────────────────────────────────────── */
+function render(t) {
+  window.__tuiTime = t;
+  const seq = Math.floor(t / STEP), local = t - seq * STEP;
+  const breathe = .78 + .22 * Math.sin(t * 2.4);
+
+  // 루프 경계: 마지막 0.5초에 퇴장(가속), 첫 1.2초에 진입(감속·스태거)
+  const OUT = REDUCE ? 1 : 1 - ease.in(seg(t, LOOP - .5, .42));
+  const exitY = -10 * (1 - OUT);
+  const enter = delay => REDUCE ? 1 : ease.snap(seg(t, delay, .36));
+  const place = (node, k, extra = '', opacity = 1) => {
+    node.style.opacity = (k * OUT * opacity).toFixed(3);
+    node.style.transform = `translateY(${((1 - k) * 22 + exitY).toFixed(2)}px) ${extra}`;
+  };
+  const speak = id => BEATS[seq][3] === id ? 1 - ease.out(seg(local, 0, .75)) : 0;
+
+  /* 카운터 · 상태 텍스트 */
+  const forks = (1286 + Math.floor(t * 16.5)).toLocaleString('en-US');
+  const agents = 42 + Math.round(3 * Math.sin(t * .65));
+  text('forks', forks); text('statusforks', forks);
+  text('agents', agents); text('badge', agents);
+
+  let active = -1, calls = 1, tokens = 120, callPop = 0;
+  const actK = ADV.map((w, i) => {
+    if (t >= w.on && t < w.off) active = i;
+    if (t >= w.on) { calls++; callPop = Math.max(callPop, 1 - ease.out(seg(t, w.on, .4))); }
+    tokens += w.gain * seg(t, w.on, w.off - w.on);
+    return ease.snap(seg(t, w.on, .28)) * (1 - ease.in(seg(t, w.off, .22)));
+  });
+  text('calls', calls); text('callsbadge', calls);
+  $('calls').style.transform = $('callsbadge').style.transform = `scale(${(1 + .3 * callPop).toFixed(3)})`;
+  text('tokens', Math.round(tokens) + 'k');
+  text('advisorstate', active < 0 ? '대기 중' : '자문 중');
+  text('statusstate', active < 0 ? '대기 중' : '자문 중');
+
+  // 단계 텍스트: 바뀔 때 아래에서 올라오며 등장
+  let phase = PHASES[0];
+  PHASES.forEach(p => { if (t >= p[0]) phase = p; });
+  text('phase', phase[1]);
+  const pk = phase[0] === 0 ? 1 : ease.snap(seg(t, phase[0], .26));
+  $('phase').style.opacity = pk.toFixed(3);
+  $('phase').style.transform = `translateY(${((1 - pk) * 8).toFixed(2)}px)`;
+  bars.forEach((b, j) => { b.style.opacity = (.55 + .45 * Math.max(0, Math.sin(t * 3 - j * .7))).toFixed(3); });
+
+  // 최근 조언: 타자기처럼 입력
+  let advice = ADVICE[ADVICE.length - 1], typed = 1;
+  ADVICE.forEach(a => { if (t >= a.at) advice = a; });
+  if (t >= ADVICE[0].at) typed = seg(t, advice.at, .9);
+  const chars = Array.from(advice.text);
+  text('advice', chars.slice(0, Math.ceil(chars.length * typed)).join('') + (typed < 1 ? '▍' : ''));
+
+  /* Carbon 트리거 · 자문 화살표 */
+  ADV.forEach((w, i) => {
+    const on = active === i, tr = $('tr' + i), k = actK[i];
+    tr.classList.toggle('active', on);
+    text('tr' + i, (on ? '● ' : '◇ ') + w.name);
+    tr.style.backgroundSize = `${(k * 100).toFixed(1)}% 100%`;
+    tr.style.transform = `scale(${(1 + .03 * bump(seg(t, w.on, .34))).toFixed(4)})`;
+    const arrow = $('a' + i);
+    arrow.classList.toggle('on', on);
+    arrow.style.strokeDashoffset = on ? (-(t - w.on) * 16).toFixed(1) : 0;
+  });
+  const cur = ADV[Math.max(0, active)], trip = frac((t - cur.on) * .7);
+  fly(C.adv, R.adv[Math.max(0, active)], active < 0 ? 0 : trip / .82, 1);
+  const rp = active < 0 || REDUCE ? 1 : seg(trip, .7, .3);
+  el.ripple.setAttribute('cx', cur.end - 4); el.ripple.setAttribute('cy', cur.y);
+  el.ripple.setAttribute('r', (5 + 14 * ease.out(rp)).toFixed(1));
+  el.ripple.style.opacity = (.75 * (1 - rp)).toFixed(3);
+
+  /* Gemini Neon */
+  let nState = 'idle', nP = 0, nK = 0, nLabel = '', verified = 0, nPop = 0, nBadge = 0;
+  NEON.forEach(w => {
+    if (t >= w.done) { verified++; nBadge = Math.max(nBadge, 1 - ease.out(seg(t, w.done, .4))); }
+    if (t < w.on) return;
+    if (t < w.off) {
+      nK = ease.snap(seg(t, w.on, .3)) * (1 - ease.in(seg(t, w.off - .3, .3)));
+      nLabel = w.label;
+      if (t < w.done) { nState = 'run'; nP = (t - w.on) / (w.done - w.on); }
+      else { nState = 'pass'; nP = 1; nPop = bump(seg(t, w.done, .38)); }
+    } else { nState = 'idle'; nK = 0; nP = 1 - ease.in(seg(t, w.off, .25)); }   // 막대가 빠르게 접힘
+  });
+  $('neonbar').style.width = (nP * 100).toFixed(2) + '%';
+  $('neonbar').style.setProperty('--sh', nState === 'run' && !REDUCE ? ease.inOut(seg(t % 2.6, 0, 1.6)) : -1);
+  text('neonpct', nState === 'idle' ? '—' : Math.floor(nP * 100) + '%');
+  text('neonrun', nState === 'run' ? '◉ ' + nLabel : nState === 'pass' ? '✓ 검증 통과' : '○ 대기 · 호출 시 독립 검증');
+  $('neonrun').style.color = nState === 'pass' ? 'var(--green)' : nState === 'run' ? 'var(--neon)' : 'var(--muted)';
+  $('neonrun').style.transform = `scale(${(1 + .18 * nPop).toFixed(3)})`;
+  text('neonbadge', verified);
+  $('neonbadge').style.transform = `scale(${(1 + .3 * nBadge).toFixed(3)})`;
+  text('neonstatus', nState === 'run' ? '검증 중' : nState === 'pass' ? '통과' : '대기');
+  el.neonlink.style.stroke = mix(RGB.wire, RGB.neon, nK);
+  const nt = frac(t / 1.6) * 1.6;
+  fly(C.neonGo, R.neonGo, nState === 'run' ? nt / .55 : 0, 1);
+  fly(C.neonBack, R.neonBack, nState === 'run' ? (nt - .8) / .55 : nState === 'pass' ? seg(t, NEON[verified - 1].done, .55) : 0, 1);
+
+  /* Decision 1: 확률 막대가 이전 값에서 새 값으로 부드럽게 이동 */
+  ROUTES.forEach((r, i) => {
+    const x = (t - i * .07) / 2.5 + i, idx = Math.floor(x), k = ease.snap(seg(frac(x) * 2.5, 0, .5));
+    const p = lerp(r.p[((idx - 1) % 4 + 4) % 4], r.p[(idx % 4 + 4) % 4], k), split = p < .7;
+    $('route' + i).classList.toggle('split', split);
+    $('rbar' + i).style.width = (p * 100).toFixed(2) + '%';
+    text('rtxt' + i, `p=${p.toFixed(2)} ${split ? 'split' : 'sharp'}`);
+    $('rtxt' + i).style.opacity = (.55 + .45 * k).toFixed(3);
+  });
+
+  /* Hydrogen 카드: 진행 → 완료 팝 → 결과가 Argon으로 복귀 */
+  let arrive = 0;
+  CARDS.forEach((c, i) => {
+    const per = 9 + i * 1.7, fill = 7 + i * 1.7, cyc = (t + i * 2.7) % per, done = cyc >= fill;
+    const p = Math.min(1, cyc / fill), w = Math.max(p, 1 - ease.in(seg(cyc, 0, .22)));
+    $('bar' + i).style.width = (w * 100).toFixed(2) + '%';
+    $('bar' + i).style.setProperty('--sh', !done && !REDUCE ? ease.inOut(seg((t + i * .9) % 3.2, 0, 1.8)) : -1);
+    text('pct' + i, Math.floor(p * 100) + '%');
+    text('run' + i, done ? '✓ 완료' : '◉ 실행 중');
+    $('run' + i).style.color = done ? 'var(--green)' : 'var(--blue)';
+    $('run' + i).style.transform = `scale(${(1 + (done ? .22 * (1 - ease.out(seg(cyc, fill, .32))) : 0)).toFixed(3)})`;
+
+    const lc = cyc % 2.3, canSend = !done && cyc - lc + .9 <= fill;
+    fly(C.delegate[i], R.delegate[i], canSend ? lc / .9 : 0, 1);
+    fly(C.ret[i], R.ret[i], done ? (cyc - fill) / .8 : 0, 1);
+    if (cyc >= fill + .8) arrive = Math.max(arrive, 1 - ease.out(seg(cyc, fill + .8, .6)));
+
+    const node = el['card' + i], pop = done ? bump(seg(cyc, fill, .38)) : 0, flash = done ? 1 - ease.out(seg(cyc, fill, .9)) : 0;
+    const g = actK[1] * (.78 + .22 * Math.sin(t * 2.4 - i * .9)), sp = speak('card' + i);
+    place(node, enter(.4 + i * .06), `scale(${(1 + .03 * pop).toFixed(4)})`);
+    node.style.borderColor = mix(RGB.blue, RGB.purple, actK[1]);
+    shadow(node, [[RGB.blue, 18 * sp, .5 * sp], [RGB.green, 16 * flash, .5 * flash], [RGB.purple, 13 * g, .4 * g], [RGB.purple, 10 * g, .08 * g, 1]]);
+  });
+
+  /* 패널: 진입 스태거 + 화자 강조 + 자문 대상 글로우 */
+  const g0 = actK[0] * breathe, g2 = actK[2] * breathe, kMain = enter(.1);
+  el.main.style.opacity = (kMain * OUT).toFixed(3);
+  el.main.style.transform = `translateY(${exitY.toFixed(2)}px) scale(${lerp(.95, 1, kMain).toFixed(4)})`;
+  el.main.style.borderColor = mix(RGB.orange, RGB.purple, actK[0]);
+  shadow(el.main, [[RGB.orange, 18 * speak('main'), .5 * speak('main')], [RGB.purple, 13 * g0, .4 * g0], [RGB.purple, 10 * g0, .08 * g0, 1]]);
+
+  place(el.decision, enter(.22));
+  shadow(el.decision, [[RGB.green, 18 * speak('decision'), .45 * speak('decision')]]);
+
+  const nGlow = nK * breathe;
+  place(el.neon, enter(.28), `scale(${(1 + .03 * nPop).toFixed(4)})`, lerp(.62, 1, nK));
+  shadow(el.neon, [[RGB.neon, 18 * speak('neon'), .5 * speak('neon')], [RGB.neon, 13 * nGlow, .35 * nGlow], [RGB.neon, 10 * nGlow, .07 * nGlow, 1]]);
+
+  const aGlow = active < 0 ? 0 : .5 + .5 * Math.sin(t * 2.4);
+  place(el.advisor, enter(.28));
+  shadow(el.advisor, [[RGB.purple, 18 * speak('advisor'), .45 * speak('advisor')], [RGB.purple, 12 * aGlow, .22 * aGlow]]);
+
+  place(el.delegate, enter(.34));
+  place(el.back, enter(.6));
+  el.back.style.borderColor = mix(RGB.orange, RGB.purple, actK[2]);
+  shadow(el.back, [[RGB.orange, 18 * speak('back'), .5 * speak('back')], [RGB.fg, 14 * arrive, .4 * arrive], [RGB.purple, 13 * g2, .4 * g2], [RGB.purple, 10 * g2, .08 * g2, 1]]);
+
+  fades.forEach(f => { const k = enter(.05); f.style.opacity = (k * OUT).toFixed(3); f.style.transform = `translateY(${((1 - k) * 8).toFixed(2)}px)`; });
+
+  // 연결선: 중심에서 바깥으로 그려짐
+  wires.forEach((w, j) => {
+    const k = REDUCE ? 1 : ease.inOut(seg(t, .45 + j * .05, .5));
+    w.p.style.strokeDasharray = k >= 1 ? 'none' : w.len;
+    w.p.style.strokeDashoffset = k >= 1 ? 0 : (w.len * (1 - k)).toFixed(1);
+    w.p.style.opacity = OUT.toFixed(3);
+  });
+  $('advisories').style.opacity = (enter(.9) * OUT).toFixed(3);
+  $('fx').style.opacity = (enter(1.0) * OUT).toFixed(3);
+  fly(C.mainDec, R.mainDec, frac(t) / .55, 1);
+
+  // 스포트라이트: 지금 말하는 노드 쪽으로 천천히 이동 (앰비언트)
+  const from = CENTER[BEATS[(seq + 23) % 24][3]], to = CENTER[BEATS[seq][3]], sk = ease.inOut(seg(local, 0, .7));
+  el.spot.style.transform = `translate(${lerp(from[0], to[0], sk).toFixed(1)}px,${lerp(from[1], to[1], sk).toFixed(1)}px)`;
+  el.spot.style.opacity = (enter(.6) * OUT).toFixed(3);
+
+  /* 세션 기록: 새 줄이 아래에서 올라오고 기존 줄은 한 칸씩 밀림 */
+  const e = REDUCE ? 1 : ease.inOut(seg(local, 0, .26));
+  for (let s = 0; s < 6; s++) {
+    const k = seq - 5 + s, row = $('row' + s);
+    if (rowSlot[s] !== k) {
+      rowSlot[s] = k;
+      if (k >= 0) {
+        const b = BEATS[k];
+        row.children[0].textContent = `23:48:${String(10 + k * 2).padStart(2, '0')}`;
+        row.children[1].textContent = b[0];
+        row.children[1].className = b[1];
+        row.children[2].textContent = b[2];
+      }
+      row.classList.toggle('new', s === 5);
+    }
+    row.style.transform = `translateY(${((s - e) * 22).toFixed(2)}px)`;
+    row.style.opacity = k < 0 ? 0 : s === 0 ? (1 - e).toFixed(3) : s === 5 ? e.toFixed(3) : 1;
+  }
+  el.loglines.style.opacity = OUT.toFixed(3);
+  $('cursor').style.opacity = t % 1 < .6 ? 1 : .2;
+}
+
+/* ── 재생 제어: ?t=초, window.__seek(초), window.__play(), Space, ←/→ ── */
+let base = performance.now(), offset = Number(new URLSearchParams(location.search).get('t') || 0), frozen = false;
+const now = () => frozen ? offset : (((offset + (performance.now() - base) / 1000) % LOOP) + LOOP) % LOOP;
+window.__seek = s => { offset = ((s % LOOP) + LOOP) % LOOP; base = performance.now(); frozen = true; render(offset); };
+window.__play = () => { base = performance.now(); frozen = false; };
+addEventListener('keydown', ev => {
+  if (ev.code === 'Space') { ev.preventDefault(); if (frozen) window.__play(); else window.__seek(now()); }
+  else if (ev.code === 'ArrowRight') window.__seek(now() + 1);
+  else if (ev.code === 'ArrowLeft') window.__seek(now() - 1);
+});
+function tick() { if (!frozen) render(now()); requestAnimationFrame(tick); }
+function resize() {
+  const s = Math.min(innerWidth / 1920, innerHeight / 1080);
+  $('canvas').style.transform = `translate(${((innerWidth - 1920 * s) / 2).toFixed(1)}px,${((innerHeight - 1080 * s) / 2).toFixed(1)}px) scale(${s})`;
+}
+onresize = resize; resize(); render(now()); requestAnimationFrame(tick);
+</script>
+</html>
