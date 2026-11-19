@@ -13,6 +13,7 @@ import { parseJsonLine } from '../state/streamAdapter.ts';
 import { resolveDbPath, resolveProjectIdentity } from '../decision/db.ts';
 import { classifyTool } from '../decision/engine.ts';
 import { recordToolOutcomeSafe } from '../decision/telemetry.ts';
+import { buildSanitizedChildEnv, redactSecrets } from '../decision/redact.ts';
 import {
   commandLineOfArgs,
   decisionWriteBlocked,
@@ -22,6 +23,16 @@ import {
 import type { AppState, BackendKind, EffortLevel } from '../types.ts';
 
 export type BackendPreference = 'auto' | 'agy' | 'api';
+
+/** Gemini REST 호출 타임아웃 — `GEMINI_REST_TIMEOUT_MS`로 오버라이드 가능 */
+function restTimeoutMs(): number {
+  return Number(process.env.GEMINI_REST_TIMEOUT_MS) || 60_000;
+}
+
+/** agy 자식 프로세스 무출력 스톨 한계 — `HERDR_AGY_STALL_MS`로 오버라이드 가능 */
+function agyStallMs(): number {
+  return Number(process.env.HERDR_AGY_STALL_MS) || 180_000;
+}
 
 export interface RunnerOptions {
   preference: BackendPreference;
@@ -211,7 +222,7 @@ export class AgentRunner {
       c.status = 'idle';
     }
 
-    appendLog(state, 'Argon', 'orange', `작업 지시 — ${prompt}`);
+    appendLog(state, 'Argon', 'orange', `작업 지시 — ${redactSecrets(prompt)}`);
     onUpdate();
 
     if (this.backend === 'agy') {
@@ -243,12 +254,55 @@ export class AgentRunner {
     const child = spawn('agy', args, {
       cwd: process.cwd(),
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: process.env,
+      env: buildSanitizedChildEnv({ allowKeys: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'] }),
     });
     this.activeChild = child;
 
+    // 무출력 스톨 타이머 — stdout/stderr 청크마다 리셋, 초과 시 SIGTERM → 5s 후 SIGKILL
+    const stallMs = agyStallMs();
+    let stallTimer: NodeJS.Timeout | null = null;
+    let stallKillTimer: NodeJS.Timeout | null = null;
+    let stalled = false;
+    const clearStallTimers = (): void => {
+      if (stallTimer) {
+        clearTimeout(stallTimer);
+        stallTimer = null;
+      }
+      if (stallKillTimer) {
+        clearTimeout(stallKillTimer);
+        stallKillTimer = null;
+      }
+    };
+    const armStallTimer = (): void => {
+      if (stallTimer) clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => {
+        stalled = true;
+        appendLog(
+          state,
+          'Carbon',
+          'purple',
+          `agy 무출력 스톨 감지 — ${Math.round(stallMs / 1000)}s 무응답, 강제 종료(stall)`
+        );
+        onUpdate();
+        try {
+          child.kill('SIGTERM');
+        } catch {
+          /* 무시 */
+        }
+        stallKillTimer = setTimeout(() => {
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            /* 무시 */
+          }
+        }, 5_000);
+      }, stallMs);
+    };
+    armStallTimer();
+
     const rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
     rl.on('line', (line) => {
+      armStallTimer();
       if (parseJsonLine(line, state)) {
         onUpdate();
       }
@@ -256,26 +310,34 @@ export class AgentRunner {
 
     const errRl = readline.createInterface({ input: child.stderr, crlfDelay: Infinity });
     errRl.on('line', (line) => {
+      armStallTimer();
       const trimmed = line.trim();
       if (!trimmed) return;
       if (trimmed.startsWith('warning:')) return;
-      appendLog(state, 'Argon', 'orange', trimmed);
+      appendLog(state, 'Argon', 'orange', redactSecrets(trimmed));
       onUpdate();
     });
 
     child.on('error', (err) => {
+      clearStallTimers();
       if (this.activeChild === child) this.activeChild = null;
       state.agentBusy = false;
       state.phase = '오류';
-      appendLog(state, 'Carbon', 'purple', `agy 실행 실패: ${err.message}`);
-      flashStatus(state, `실행 오류: ${err.message}`);
+      appendLog(state, 'Carbon', 'purple', `agy 실행 실패: ${redactSecrets(err.message)}`);
+      flashStatus(state, `실행 오류: ${redactSecrets(err.message)}`);
       onUpdate();
     });
 
     child.on('close', (code) => {
+      clearStallTimers();
       if (this.activeChild === child) this.activeChild = null;
       state.agentBusy = false;
-      if (code !== 0 && state.phase !== '완료' && state.phase !== '중단됨') {
+      if (stalled) {
+        state.phase = '오류';
+        state.activeTrigger = 1;
+        state.advisorState = '자문 중';
+        appendLog(state, 'Carbon', 'purple', 'agy 무응답 스톨(stall) — 프로세스 강제 종료됨');
+      } else if (code !== 0 && state.phase !== '완료' && state.phase !== '중단됨') {
         state.phase = '오류';
         state.activeTrigger = 1;
         state.advisorState = '자문 중';
@@ -301,7 +363,7 @@ export class AgentRunner {
     state.activeTrigger = 0;
     state.advisorState = '자문 중';
     state.carbonCalls += 1;
-    appendLog(state, 'Carbon', 'purple', `자문 분석 중 — ${question}`);
+    appendLog(state, 'Carbon', 'purple', `자문 분석 중 — ${redactSecrets(question)}`);
     onUpdate();
 
     const contextHint = state.latestResponse
@@ -320,7 +382,7 @@ export class AgentRunner {
     const child = spawn('agy', args, {
       cwd: process.cwd(),
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: process.env,
+      env: buildSanitizedChildEnv({ allowKeys: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'] }),
     });
     this.advisorChild = child;
 
@@ -350,7 +412,7 @@ export class AgentRunner {
 
     child.on('close', () => {
       if (this.advisorChild === child) this.advisorChild = null;
-      const clean = accText.trim().replace(/\s+/g, ' ');
+      const clean = redactSecrets(accText.trim().replace(/\s+/g, ' '));
       if (clean.length > 0) {
         state.latestAdvice = `» ${clean}`;
         state.adviceHistory.push({
@@ -385,7 +447,7 @@ export class AgentRunner {
     state.neonProgress = 18;
     state.neonLabel = label;
     state.neonSummary = `${label} 독립 교차 검증 중…`;
-    appendLog(state, 'Neon', 'neon', `독립 교차 검증 시작 — ${target}`);
+    appendLog(state, 'Neon', 'neon', `독립 교차 검증 시작 — ${redactSecrets(target)}`);
     flashStatus(state, `Gemini Neon 교차 검증 시작 (${state.neonModelName})`);
     onUpdate();
 
@@ -395,7 +457,7 @@ export class AgentRunner {
     const verifyPrompt = `${contextHint}당신은 코딩 세션의 독립 교차 검증 모델(Gemini Neon)입니다. 코드를 직접 수정하지 말고, 누락·회귀·엣지케이스 관점에서 아래 대상을 검증해 주세요. 첫 머리에 [PASS] 또는 [FAIL]을 붙이고 한국어 2문장 이내로 핵심 결과만 간결히 답하세요:\n${target}`;
 
     const finalizeNeon = (rawText: string, failedExec = false) => {
-      const clean = rawText.trim().replace(/\s+/g, ' ');
+      const clean = redactSecrets(rawText.trim().replace(/\s+/g, ' '));
       const isFail = failedExec || /^\[FAIL\]/i.test(clean);
       const display = clean.replace(/^\[(PASS|FAIL)\]\s*/i, '') || (isFail ? '검증 실패' : '회귀·누락 없음');
       state.neonState = isFail ? 'fail' : 'pass';
@@ -435,7 +497,7 @@ export class AgentRunner {
       const child = spawn('agy', args, {
         cwd: process.cwd(),
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: process.env,
+        env: buildSanitizedChildEnv({ allowKeys: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'] }),
       });
       this.neonChild = child;
 
@@ -480,17 +542,17 @@ export class AgentRunner {
       return;
     }
 
-    // GEMINI_API_KEY REST API 폴백 교차 검증
+    // GEMINI_API_KEY REST API 폴백 교차 검증 — 키는 헤더로만 전달(?key= URL 폐기)
     const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
     const apiModel = mapModelForGeminiApi(state.neonModelName);
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${apiModel}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${apiModel}:generateContent`;
     const ctrl = new AbortController();
     this.neonAbortController = ctrl;
 
     void fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: ctrl.signal,
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+      signal: AbortSignal.any([ctrl.signal, AbortSignal.timeout(restTimeoutMs())]),
       body: JSON.stringify({
         contents: [{ role: 'user', parts: [{ text: verifyPrompt }] }],
       }),
@@ -528,7 +590,7 @@ export class AgentRunner {
   ): Promise<void> {
     const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
     const apiModel = mapModelForGeminiApi(state.modelName);
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${apiModel}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${apiModel}:generateContent`;
 
     const ctrl = new AbortController();
     this.abortController = ctrl;
@@ -576,8 +638,8 @@ export class AgentRunner {
 
         const res = await fetch(url, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          signal: ctrl.signal,
+          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+          signal: AbortSignal.any([ctrl.signal, AbortSignal.timeout(restTimeoutMs())]),
           body: JSON.stringify({
             systemInstruction: {
               parts: [
@@ -644,7 +706,7 @@ export class AgentRunner {
           const cardIdx = fc.name === 'grep_search' ? 1 : 0;
           state.cards[cardIdx]!.status = 'running';
           state.cards[cardIdx]!.progress = 60;
-          appendLog(state, 'Decision 1', 'green', `도구 실행 → ${fc.name}`);
+          appendLog(state, 'Decision 1', 'green', `도구 실행 → ${redactSecrets(fc.name)}`);
           onUpdate();
 
           const output = executeLocalReadOnlyTool(fc.name, fc.args ?? {});
@@ -666,7 +728,7 @@ export class AgentRunner {
                 ok: !hadError,
                 conversationId: state.conversationId,
                 targetHash: targetHashForArgs(fcArgs),
-                errorSnippet: hadError ? String(output['error']).slice(0, 300) : null,
+                errorSnippet: hadError ? redactSecrets(String(output['error'])).slice(0, 300) : null,
                 source: 'rest_api',
                 commandLine: commandLineOfArgs(fcArgs),
               });
@@ -681,8 +743,8 @@ export class AgentRunner {
             state.activeTrigger = 1;
             state.advisorState = '자문 중';
             state.carbonCalls += 1;
-            state.latestAdvice = `» ${fc.name} 연속 오류 감지 — 파라미터/경로 재검토 필요`;
-            appendLog(state, 'Carbon', 'purple', `같은 오류 2회 감지 — ${fc.name}`);
+            state.latestAdvice = `» ${redactSecrets(fc.name)} 연속 오류 감지 — 파라미터/경로 재검토 필요`;
+            appendLog(state, 'Carbon', 'purple', `같은 오류 2회 감지 — ${redactSecrets(fc.name)}`);
           }
 
           state.cards[cardIdx]!.status = hadError ? 'error' : 'done';
@@ -692,7 +754,7 @@ export class AgentRunner {
             state,
             'Hydrogen',
             'blue',
-            `${fc.name} ${hadError ? '실패' : '완료'}${hadError ? ` — ${String(output['error']).slice(0, 60)}` : ''}`
+            `${fc.name} ${hadError ? '실패' : '완료'}${hadError ? ` — ${redactSecrets(String(output['error'])).slice(0, 60)}` : ''}`
           );
           fnResponses.push({
             functionResponse: {
@@ -708,7 +770,7 @@ export class AgentRunner {
         state.phase = '오류';
         state.activeTrigger = 1;
         state.advisorState = '자문 중';
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = redactSecrets(err instanceof Error ? err.message : String(err));
         state.latestAdvice = `» API 오류: ${msg}`;
         appendLog(state, 'Carbon', 'purple', `API 오류 — ${msg}`);
       }

@@ -15,14 +15,19 @@
  * - 모든 쓰기/조회 진입점은 트랜잭션 내에서 `settleOrphans`를 먼저 실행한다(§4.6).
  * - `source` enum은 DDL·CLI 모두 8값으로 통일(N-NEW-6). CLI에서는 'stream' 대신 'agy_stream'.
  */
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { openDbSafe, resolveProjectIdentity } from './db.ts';
 import {
+  applyVerdictToFork,
   backpropFork,
+  classifyFailure,
   closeFork,
+  collectForkRetroData,
+  commitWrapOutcome,
   compactDb,
   evaluateForced,
   getFork,
@@ -30,6 +35,7 @@ import {
   isEventSource,
   isRouteId,
   issueFork,
+  markForkWaitingHuman,
   recordToolOutcome,
   sampleSources,
   settleOrphans,
@@ -40,14 +46,17 @@ import {
   TTL_EXPLORE_MS,
   type CloseOutcome,
   type EventSource,
+  type FailureCause,
   type RiskLevel,
   type RouteId,
 } from './engine.ts';
+import { buildSanitizedChildEnv, redactSecrets } from './redact.ts';
+import { buildRetroMarkdown, validateVerdictFile } from './verdict.ts';
 
 class UsageError extends Error {}
 
 /** 값 없이 단독으로 쓰는 불리언 플래그 */
-const BOOL_FLAGS = new Set(['json', 'is-retry']);
+const BOOL_FLAGS = new Set(['json', 'is-retry', 'require-stdout-nonempty', 'require-nonempty', 'sanitize-env']);
 
 interface ParsedArgs {
   flags: Map<string, string>;
@@ -438,8 +447,16 @@ function cmdRecord(args: ParsedArgs, json: boolean): void {
 
 // ---------- backprop ----------
 
-function cmdBackprop(args: ParsedArgs, json: boolean): void {
+/**
+ * `dg backprop` 두 모드:
+ * - `--verdict-file` 부재: 기존 수동 역귀속(exit 0, UsageError=2).
+ * - `--verdict-file <p>` 존재: PR-A3 fail-closed verdict 파이프라인 —
+ *   `validateVerdictFile` → `applyVerdictToFork` → exit code는 결과의
+ *   `exitCode`(0 pass/backprop_fail/rework, 3 escalate_human)를 그대로 반환.
+ */
+function cmdBackprop(args: ParsedArgs, json: boolean): number | void {
   const forkId = requireFlag(args, 'fork');
+  const verdictFile = optionalFlag(args, 'verdict-file');
   const penalty = parseFloatFlag(args, 'penalty', 2.0);
   const reason = optionalFlag(args, 'reason') ?? null;
   const db = openWriter();
@@ -447,10 +464,70 @@ function cmdBackprop(args: ParsedArgs, json: boolean): void {
     settleOrphans(db);
     const fork = getFork(db, forkId);
     if (!fork) throw new UsageError(`fork not found: ${forkId}`);
+    if (verdictFile !== undefined) {
+      try {
+        const expectedHead = optionalFlag(args, 'expected-head');
+        const maxReworks = parseIntFlag(args, 'max-reworks', 2);
+        const verdict = validateVerdictFile(verdictFile, {
+          expectedForkId: forkId,
+          expectedHead,
+        });
+        const res = applyVerdictToFork(db, { forkId, verdict, maxReworks });
+        emit(
+          json,
+          () => `[backprop] ${forkId} verdict=${verdict.effectiveDecision} → ${res.action} (exit ${res.exitCode})`,
+          {
+            fork_id: forkId,
+            valid: verdict.valid,
+            effective_decision: verdict.effectiveDecision,
+            errors: verdict.errors,
+            action: res.action,
+            exit_code: res.exitCode,
+            committed: res.committed,
+            reason: res.reason ?? null,
+            waiting_human: res.waitingHuman ?? false,
+            p_after: res.pAfter ?? null,
+          }
+        );
+        return res.exitCode;
+      } catch (err) {
+        // fail-closed: verdict 경로의 내부 예외를 §3.5 DB 폴백(exit 0)으로 흡수하지 않는다
+        const message = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[dg backprop] verdict pipeline error: ${message}\n`);
+        let waitingHuman = false;
+        try {
+          waitingHuman = markForkWaitingHuman(db, forkId, {
+            reason: `verdict pipeline error: ${message}`,
+          }).marked;
+        } catch {
+          /* DB까지 불량이면 마킹 생략 — exit 3은 유지 */
+        }
+        emit(
+          json,
+          () => `[backprop] ${forkId} verdict 처리 오류 → escalate_human (exit 3): ${message}`,
+          {
+            fork_id: forkId,
+            valid: false,
+            effective_decision: 'human',
+            errors: [message],
+            action: 'escalate_human',
+            exit_code: 3,
+            committed: waitingHuman,
+            reason: message,
+            waiting_human: waitingHuman,
+            p_after: null,
+          }
+        );
+        return 3;
+      }
+    }
     if (fork.status !== 'open' && fork.status !== 'ok') {
       throw new UsageError(`fork ${forkId} cannot backprop (status=${fork.status})`);
     }
-    const res = backpropFork(db, forkId, penalty, reason);
+    const res = backpropFork(db, forkId, penalty, reason, { cause: 'gate_fail' });
+    if (!res.committed) {
+      throw new UsageError(`fork ${forkId} cannot backprop (${res.reason ?? 'stale'})`);
+    }
     emit(json, () => `[backprop] ${res.forkId} → backprop_fail penalty=${res.weightApplied} p_after=${res.pAfter.toFixed(3)}`, {
       fork_id: res.forkId,
       status: res.status,
@@ -481,7 +558,177 @@ function cmdSettleOrphans(args: ParsedArgs, json: boolean): void {
 
 // ---------- wrap ----------
 
-function cmdWrap(args: ParsedArgs, json: boolean): number {
+interface WrapRunResult {
+  exitCode: number | null;
+  signal: string | null;
+  spawnError: string | null;
+  durationMs: number;
+  stalled: boolean;
+  timedOut: boolean;
+  stdoutNonEmpty: boolean;
+  firstNonBlankLine: string | null;
+  tailLines: string[];
+}
+
+const SIGNAL_EXIT_OFFSET: Record<string, number> = {
+  SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGABRT: 6, SIGKILL: 9, SIGTERM: 15,
+};
+
+/**
+ * 단일 자식 실행 + 진행 감시 루프(§2.5): stdout/stderr를 패스스루 캡처하고
+ * `hasNewProgress` 게이트의 하트비트(onHeartbeat)와 stall/timeout 워치독을 돌린다.
+ * `detached:true`로 자식을 자체 프로세스 그룹 리더로 띄워 `killProcessGroup`이
+ * 자식의 자식까지 한 번에 끝내도록 한다.
+ */
+function runWrappedChild(opts: {
+  command: string[];
+  env: NodeJS.ProcessEnv;
+  stallMs: number;
+  maxMs: number;
+  heartbeatMs: number;
+  killGraceMs: number;
+  onHeartbeat: () => void;
+}): Promise<WrapRunResult> {
+  return new Promise((resolve) => {
+    const startedAt = Date.now();
+    let lastOutputAt = startedAt;
+    let lastTouchAt = startedAt;
+    let hasNewProgress = false;
+    let settled = false;
+    let killSent = false;
+    let stalled = false;
+    let timedOut = false;
+    let spawnError: string | null = null;
+    let stdoutNonEmpty = false;
+    let firstNonBlankLine: string | null = null;
+    let stdoutScanBuf = '';
+    let pendingLine = '';
+    const tailLines: string[] = [];
+
+    const pushLine = (line: string): void => {
+      tailLines.push(redactSecrets(line));
+      if (tailLines.length > 20) tailLines.shift();
+    };
+    const ingest = (text: string): void => {
+      const parts = (pendingLine + text).split('\n');
+      pendingLine = parts.pop() ?? '';
+      for (const l of parts) pushLine(l);
+    };
+
+    const child = spawn(opts.command[0]!, opts.command.slice(1), {
+      stdio: ['inherit', 'pipe', 'pipe'],
+      detached: true,
+      env: opts.env,
+    });
+
+    child.stdout?.on('data', (chunk: Buffer) => {
+      const text = chunk.toString();
+      lastOutputAt = Date.now();
+      hasNewProgress = true;
+      process.stdout.write(text);
+      if (!stdoutNonEmpty && /\S/.test(text)) stdoutNonEmpty = true;
+      if (firstNonBlankLine === null) {
+        stdoutScanBuf += text;
+        for (const l of stdoutScanBuf.split('\n')) {
+          if (l.trim().length > 0) {
+            firstNonBlankLine = l.trim();
+            break;
+          }
+        }
+      }
+      ingest(text);
+    });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      const text = chunk.toString();
+      lastOutputAt = Date.now();
+      hasNewProgress = true;
+      process.stderr.write(text);
+      ingest(text);
+    });
+    child.on('error', (err) => {
+      spawnError = err.message;
+    });
+
+    const finish = (code: number | null, signal: string | null): void => {
+      if (settled) return;
+      settled = true;
+      clearInterval(timer);
+      if (pendingLine.length > 0) pushLine(pendingLine);
+      resolve({
+        exitCode: code,
+        signal,
+        spawnError,
+        durationMs: Date.now() - startedAt,
+        stalled,
+        timedOut,
+        stdoutNonEmpty,
+        firstNonBlankLine,
+        tailLines,
+      });
+    };
+
+    const killGroup = (sig: 'SIGTERM' | 'SIGKILL'): void => {
+      try {
+        if (child.pid !== undefined) process.kill(-child.pid, sig);
+        else child.kill(sig);
+      } catch {
+        try {
+          child.kill(sig);
+        } catch {
+          /* 무시 */
+        }
+      }
+    };
+
+    const beginKill = (kind: 'stall' | 'timeout'): void => {
+      if (killSent) return;
+      killSent = true;
+      if (kind === 'stall') stalled = true;
+      else timedOut = true;
+      killGroup('SIGTERM');
+      setTimeout(() => {
+        if (!settled) killGroup('SIGKILL');
+      }, opts.killGraceMs).unref();
+    };
+
+    // 1s 틱 — --stall-ms 지정 시 반응성을 위해 min(stallMs/4, 1000) 틱
+    const tickMs =
+      opts.stallMs > 0 ? Math.min(Math.max(Math.floor(opts.stallMs / 4), 10), 1000) : 1000;
+    const timer = setInterval(() => {
+      if (settled || killSent) return; // 킬 개시 후 하트비트·감시 즉시 중단
+      const now = Date.now();
+      if (opts.stallMs > 0 && now - lastOutputAt >= opts.stallMs) {
+        beginKill('stall');
+        return;
+      }
+      if (opts.maxMs > 0 && now - startedAt >= opts.maxMs) {
+        beginKill('timeout');
+        return;
+      }
+      if (hasNewProgress && opts.heartbeatMs > 0 && now - lastTouchAt >= opts.heartbeatMs) {
+        try {
+          opts.onHeartbeat();
+        } catch {
+          /* fork가 이미 닫혀 있음 — 하트비트만 중단 */
+        }
+        hasNewProgress = false;
+        lastTouchAt = now;
+      }
+    }, tickMs);
+    timer.unref();
+    child.on('close', (code, signal) => finish(code, signal));
+  });
+}
+
+function statSizeOrNull(p: string): number | null {
+  try {
+    return fs.statSync(p).size;
+  } catch {
+    return null;
+  }
+}
+
+async function cmdWrap(args: ParsedArgs, json: boolean): Promise<number> {
   const route = parseRoute(requireFlag(args, 'route'));
   const toolClass = requireFlag(args, 'tool-class');
   const forkOpt = optionalFlag(args, 'fork');
@@ -489,6 +736,26 @@ function cmdWrap(args: ParsedArgs, json: boolean): number {
   const identity = resolveIdentity(optionalFlag(args, 'project'));
   const command = args.rest;
   if (command.length === 0) throw new UsageError('missing child command after "--"');
+
+  // §2.5 출력·산출물 계약 + 감시·펜스 플래그
+  const requireArtifact = optionalFlag(args, 'require-artifact');
+  const requireNonempty = optionalFlag(args, 'require-nonempty') === '1';
+  const requireStdout = optionalFlag(args, 'require-stdout-nonempty') === '1';
+  const stallMs = parseIntFlag(args, 'stall-ms', 120_000);
+  const maxMs = parseIntFlag(args, 'max-ms', 1_200_000);
+  const heartbeatMs = parseIntFlag(args, 'heartbeat-ms', 60_000);
+  const killGraceMs = parseIntFlag(args, 'kill-grace-ms', 1_000);
+  const expectedGen = optionalFlag(args, 'expected-gen') !== undefined
+    ? parseIntFlag(args, 'expected-gen', 0)
+    : undefined;
+  const expectedAttempt = optionalFlag(args, 'expected-attempt') !== undefined
+    ? parseIntFlag(args, 'expected-attempt', 0)
+    : undefined;
+  const sanitizeEnv = optionalFlag(args, 'sanitize-env') === '1';
+  const allowEnv = (optionalFlag(args, 'allow-env') ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
 
   let forkId: string | null = null;
   let db: DatabaseSync | null = null;
@@ -519,36 +786,117 @@ function cmdWrap(args: ParsedArgs, json: boolean): number {
   } catch (err) {
     if (err instanceof UsageError) throw err;
     process.stderr.write(`[dg wrap] db fallback: ${(err as Error).message}\n`);
+    try {
+      db?.close();
+    } catch {
+      /* 무시 */
+    }
+    db = null;
     forkId = forkId ?? fallbackForkId();
   }
 
-  const startedMs = Date.now();
-  const child = spawnSync(command[0]!, command.slice(1), { stdio: ['inherit', 'inherit', 'inherit'] });
-  const durationMs = Date.now() - startedMs;
-  const exitCode = child.status ?? 1;
-  const ok = child.status === 0;
+  const isFallbackFork = forkId === null || forkId.startsWith('fk_fallback_');
+  const onHeartbeat = (): void => {
+    if (db === null || isFallbackFork || forkId === null) return;
+    touchFork(db, forkId);
+  };
+  const childEnv = sanitizeEnv
+    ? buildSanitizedChildEnv({ allowKeys: allowEnv })
+    : process.env;
 
+  const run = await runWrappedChild({
+    command,
+    env: childEnv,
+    stallMs,
+    maxMs,
+    heartbeatMs,
+    killGraceMs,
+    onHeartbeat,
+  });
+
+  // AND 게이트 출력 계약(§2.5): clean exit(0 + 자연 종료)에서만 계약 평가
+  const cleanExit = run.exitCode === 0 && !run.stalled && !run.timedOut && run.spawnError === null;
+  let contractOk = true;
+  let noResult = false;
+  let artifactMissing = false;
+  let rerouted = false;
+  if (requireStdout && cleanExit && run.firstNonBlankLine === 'rerouted') {
+    rerouted = true; // 워커의 리드 승격 신호 — 표본·실패 모두 아님
+  }
+  if (requireStdout && cleanExit && !rerouted && !run.stdoutNonEmpty) {
+    contractOk = false;
+    noResult = true;
+  }
+  if (requireArtifact !== undefined && cleanExit && !rerouted) {
+    const size = statSizeOrNull(requireArtifact);
+    if (size === null || (requireNonempty && size === 0)) {
+      contractOk = false;
+      artifactMissing = true;
+    }
+  }
+  const ok = cleanExit && contractOk && !rerouted;
+  let cause: FailureCause = classifyFailure({
+    ok,
+    exitCode: run.exitCode,
+    signal: run.signal,
+    stalled: run.stalled,
+    timedOut: run.timedOut,
+    artifactMissing,
+    noResult,
+    errorText: run.spawnError ?? run.tailLines.join('\n'),
+  });
+  // 외인성 정상 중단(SIGINT/SIGTERM, 스톨 킬 제외)은 rerouted로 분리해 EWMA 오염 차단
+  let outcome: CloseOutcome = rerouted ? 'rerouted' : ok ? 'ok' : 'fail';
+  if (!rerouted && cause === 'interrupted') outcome = 'rerouted';
+  if (rerouted && cause !== 'interrupted') cause = 'interrupted';
+
+  // Bug A 수정: recordToolOutcome + closeFork 2-Tx → commitWrapOutcome 단일 Tx
+  let committed = false;
   let recorded = false;
   let closed = false;
-  if (db) {
+  let rejectReason: string | null = null;
+  if (db !== null) {
     try {
-      const res = recordToolOutcome(db, {
-        projectId: identity.projectId,
-        projectLabel: identity.projectLabel,
-        route,
-        toolClass,
-        toolName: 'dg_wrap',
-        ok,
-        weight: 1,
-        conversationId: null,
-        source,
-        forkId,
-        commandLine: command.join(' '), // B6 자기 호출 제외 판정 대상
-      });
-      recorded = res.recorded;
-      if (forkId && !forkId.startsWith('fk_fallback_')) {
-        closeFork(db, forkId, ok ? 'ok' : 'fail', 'worker', `exit_code=${exitCode}`, { recordStats: false });
-        closed = true;
+      if (!isFallbackFork && forkId !== null) {
+        const res = commitWrapOutcome(db, {
+          forkId,
+          projectId: identity.projectId,
+          projectLabel: identity.projectLabel,
+          route,
+          toolClass,
+          toolName: 'dg_wrap',
+          ok,
+          outcome,
+          cause,
+          exitCode: run.exitCode,
+          signal: run.signal,
+          errorSnippet: run.spawnError ?? run.tailLines.join('\n') ?? null,
+          commandLine: command.join(' '),
+          source,
+          expectedGen,
+          expectedAttempt,
+        });
+        committed = res.committed;
+        recorded = res.recorded;
+        closed = res.closed;
+        rejectReason = res.reason ?? null;
+      } else {
+        // fork 미발행 폴백 — 표본만 기록(구 동작 호환)
+        const res = recordToolOutcome(db, {
+          projectId: identity.projectId,
+          projectLabel: identity.projectLabel,
+          route,
+          toolClass,
+          toolName: 'dg_wrap',
+          ok,
+          weight: 1,
+          conversationId: null,
+          source,
+          forkId,
+          commandLine: command.join(' '),
+          cause,
+        });
+        recorded = res.recorded;
       }
     } catch (err) {
       process.stderr.write(`[dg wrap] record fallback: ${(err as Error).message}\n`);
@@ -560,13 +908,22 @@ function cmdWrap(args: ParsedArgs, json: boolean): number {
       }
     }
   }
+  const exitCode =
+    run.exitCode ?? (run.signal !== null ? 128 + (SIGNAL_EXIT_OFFSET[run.signal] ?? 0) : 127);
   const summary = {
     fork_id: forkId,
     exit_code: exitCode,
     ok: ok ? 1 : 0,
-    duration_ms: durationMs,
+    cause,
+    outcome,
+    committed,
     recorded,
     closed,
+    stalled: run.stalled,
+    timed_out: run.timedOut,
+    duration_ms: run.durationMs,
+    tail_lines: run.tailLines,
+    ...(rejectReason !== null ? { reason: rejectReason } : {}),
   };
   process.stderr.write(`${JSON.stringify(summary)}\n`);
   if (json) process.stdout.write(`${JSON.stringify(summary)}\n`);
@@ -596,6 +953,87 @@ function cmdCompact(args: ParsedArgs, json: boolean): void {
   }
 }
 
+// ---------- retro ----------
+
+/** 원인·상태 기반 다음 시도 권고(최대 3줄) — retro 마크다운의 권고 블록 소재 */
+function retroRecommendations(data: {
+  metadata: { cause?: string; waiting_human?: boolean; rework_count?: number };
+  fork: { status: string };
+}): string[] {
+  const out: string[] = [];
+  const cause = data.metadata.cause;
+  if (cause === 'stall' || cause === 'timeout') {
+    out.push('무출력 스톨/타임아웃 — 작업을 더 작은 단위로 분할하고 주기적 진행 로그를 남겨라');
+  }
+  if (cause === 'artifact_missing' || cause === 'no_result') {
+    out.push('산출물 계약 미충족 — 요구 산출물 경로·작성 의무·종료 전 출력을 브리프에 명시하라');
+  }
+  if (cause === 'gate_fail') {
+    out.push('Verifier fail — findings의 evidence를 해소한 뒤 재검증하라');
+  }
+  if (cause === 'config_error') {
+    out.push('환경/설정 오류 — CLI 경로·플래그·인증 키를 먼저 점검하라(EWMA 표본 미반영)');
+  }
+  if (data.metadata.waiting_human === true) {
+    out.push('사람 승인 대기 — waiting_reason을 확인하고 사람이 개입 결정하라');
+  }
+  if ((data.metadata.rework_count ?? 0) > 0) {
+    out.push(`재작업 ${data.metadata.rework_count}회 누적 — 같은 접근 반복 대신 근본 원인을 재진단하라`);
+  }
+  return out.slice(0, 3);
+}
+
+/**
+ * `dg retro --fork <id> [--out <path>] [--json]` (§2.7):
+ * `collectForkRetroData` → `buildRetroMarkdown(..., sanitize: redactSecrets)`로
+ * 다음 워커 브리프용 회고 마크다운을 생성한다. `--out` 지정 시 부모 디렉터리를
+ * 만들고 파일로 기록, 아니면 stdout으로 출력한다.
+ */
+function cmdRetro(args: ParsedArgs, json: boolean): void {
+  const forkId = requireFlag(args, 'fork');
+  const outPath = optionalFlag(args, 'out');
+  const db = openWriter();
+  try {
+    const data = collectForkRetroData(db, forkId);
+    if (!data) throw new UsageError(`fork not found: ${forkId}`);
+    const md = buildRetroMarkdown({
+      forkId,
+      projectLabel: data.fork.project_label,
+      route: data.fork.route,
+      toolClass: data.fork.tool_class,
+      status: data.fork.status,
+      attempts: data.metadata.attempt ?? data.eventCount,
+      cause: data.metadata.cause,
+      reworkCount: data.metadata.rework_count,
+      reason:
+        data.metadata.close_reason ??
+        data.metadata.backprop_reason ??
+        data.metadata.waiting_reason,
+      topFailedTools: data.topFailedTools.map((t) => ({
+        toolName: t.toolName,
+        count: t.count,
+        lastError: t.lastError ?? undefined,
+      })),
+      recommendations: retroRecommendations(data),
+      sanitize: redactSecrets,
+    });
+    if (outPath !== undefined) {
+      fs.mkdirSync(path.dirname(outPath), { recursive: true });
+      fs.writeFileSync(outPath, md, 'utf8');
+    } else if (!json) {
+      process.stdout.write(md);
+      return;
+    }
+    emit(
+      json,
+      () => `[retro] ${forkId} → ${outPath ?? 'stdout'}`,
+      { fork_id: forkId, written: outPath !== undefined, out: outPath ?? null, markdown: md }
+    );
+  } finally {
+    db.close();
+  }
+}
+
 // ---------- fallback & main ----------
 
 function fallbackJson(cmd: string, err: Error, args: ParsedArgs): Record<string, unknown> {
@@ -616,6 +1054,7 @@ function fallbackJson(cmd: string, err: Error, args: ParsedArgs): Record<string,
   if (cmd === 'record') return { ...base, recorded: false };
   if (cmd === 'close') return { ...base, fork_id: fork ?? null, recorded: false };
   if (cmd === 'backprop') return { ...base, fork_id: fork ?? null, status: null };
+  if (cmd === 'retro') return { ...base, fork_id: fork ?? null, written: false };
   return fork ? { ...base, fork_id: fork } : base;
 }
 
@@ -628,8 +1067,10 @@ const HELP = `dg — decision gate CLI (plan-r2.1 §4.7)
   dg touch --fork <id> [--ttl-ms <n>] [--json]
   dg record --route <r> --tool-class <c> --tool <name> --ok <0|1> [--weight 1.0] [--is-retry] [--conversation <id>] [--source <hook|agy_stream|transcript|rest_api|cli|wrap|ttl_orphan|neon_backprop>] [--target-hash <h>] [--error <snippet>] [--step <n>] [--command <text>] [--dedupe <key>] [--fork <id>] [--project <dir>] [--json]
   dg backprop --fork <id> [--penalty 2.0] [--reason <text>] [--json]
+  dg backprop --fork <id> --verdict-file <p> [--expected-head <sha>] [--max-reworks 2] [--json]
+  dg retro --fork <id> [--out <path>] [--json]
   dg settle-orphans [--json]
-  dg wrap --route <r> --tool-class <c> [--fork <id>] [--source wrap] [--json] -- <cmd…>
+  dg wrap --route <r> --tool-class <c> [--fork <id>] [--source wrap] [--require-artifact <path>] [--require-nonempty] [--require-stdout-nonempty] [--stall-ms 120000] [--max-ms 1200000] [--heartbeat-ms 60000] [--kill-grace-ms 1000] [--expected-gen <n>] [--expected-attempt <n>] [--sanitize-env] [--allow-env K1,K2] [--json] -- <cmd…>
   dg compact [--max-events 50000] [--days 30] [--json]
 
 라우트 r: file_select|tool_select|retry_or_abort|delegate_swarm
@@ -642,7 +1083,7 @@ function main(): void {
     process.exit(argv.length === 0 ? 2 : 0);
   }
   const cmd = argv[0]!;
-  if (!['route', 'gate', 'close', 'touch', 'record', 'backprop', 'settle-orphans', 'wrap', 'compact'].includes(cmd)) {
+  if (!['route', 'gate', 'close', 'touch', 'record', 'backprop', 'retro', 'settle-orphans', 'wrap', 'compact'].includes(cmd)) {
     process.stderr.write(`unknown command: ${cmd}\n\n${HELP}\n`);
     process.exit(2);
   }
@@ -667,16 +1108,31 @@ function main(): void {
       case 'record':
         cmdRecord(args, json);
         break;
-      case 'backprop':
-        cmdBackprop(args, json);
+      case 'backprop': {
+        const code = cmdBackprop(args, json);
+        if (typeof code === 'number') process.exit(code);
+        break;
+      }
+      case 'retro':
+        cmdRetro(args, json);
         break;
       case 'settle-orphans':
         cmdSettleOrphans(args, json);
         break;
       case 'wrap': {
-        const code = cmdWrap(args, json);
-        process.exit(code);
-        break;
+        // 비동기 래핑 — 자식 감시 루프 완료 후 promise 핸들러가 exit 수행
+        cmdWrap(args, json).then(
+          (code) => process.exit(code),
+          (err) => {
+            if (err instanceof UsageError) {
+              process.stderr.write(`[dg] ${(err as Error).message}\n`);
+              process.exit(2);
+            }
+            process.stderr.write(`[dg wrap] fatal: ${(err as Error).message}\n`);
+            process.exit(1);
+          }
+        );
+        return;
       }
       case 'compact':
         cmdCompact(args, json);

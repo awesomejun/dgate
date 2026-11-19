@@ -18,6 +18,7 @@ import {
   syncRoutesFromSsot,
   targetHashForArgs,
 } from './agyStreamMapper.ts';
+import { redactSecrets } from '../decision/redact.ts';
 import type { AppState } from '../types.ts';
 
 export interface TranscriptToolCall {
@@ -207,9 +208,9 @@ export function isGenericStepError(step: TranscriptStep): boolean {
 }
 
 function genericErrorSnippet(step: TranscriptStep, body: string): string {
-  if (typeof step.error === 'string' && step.error) return step.error.slice(0, 300);
+  if (typeof step.error === 'string' && step.error) return redactSecrets(step.error).slice(0, 300);
   const m = /Encountered error in step execution:\s*([^\n]{0,300})/.exec(body);
-  if (m) return m[1]!.trim();
+  if (m) return redactSecrets(m[1]!.trim());
   const c = /Command exited with code\s+(-?\d+)/.exec(body);
   if (c) return `exit code ${c[1]}`;
   return 'generic step error';
@@ -251,7 +252,7 @@ function flushTranscriptBatch(state: AppState, batch: PendingBatch): void {
           : genericErrorSnippet(gstep, genericBodyAfterHeaders(gstep.content ?? '')),
         source: 'transcript',
         dedupeKey: `tx:${convId ?? 'unknown'}:${batch.plannerStepIdx}:${k}`,
-        commandLine: commandLineOfArgs(argsObj ?? undefined),
+        commandLine: redactSecrets(commandLineOfArgs(argsObj ?? undefined) ?? '') || null,
       });
     }
   } catch {
@@ -270,7 +271,7 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
   if (step.type === 'USER_INPUT' || step.source === 'USER_EXPLICIT') {
     abortPendingBatch(ctx); // [B6] 새 사용자 턴 — 미완 도구 배치 폐기
     const rawContent = step.content ?? '';
-    const cleanRequest = extractUserRequest(rawContent);
+    const cleanRequest = redactSecrets(extractUserRequest(rawContent));
     if (cleanRequest) {
       state.mainSummary = cleanRequest;
       state.phase = '추론 시작';
@@ -314,9 +315,10 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
       // thinking 첫 1~2문장 추출
       const cleanThinking = step.thinking.trim().replace(/\s+/g, ' ');
       const sentences = cleanThinking.split(/(?<=[.?!])\s+/);
-      const adviceSummary =
+      const adviceSummary = redactSecrets(
         (sentences[0] ?? cleanThinking).slice(0, 75) +
-        (sentences[0] && sentences[0].length > 75 ? '…' : '');
+          (sentences[0] && sentences[0].length > 75 ? '…' : '')
+      );
 
       state.latestAdvice = `» ${adviceSummary}`;
       state.adviceHistory.push({
@@ -387,7 +389,7 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
           state,
           'Decision 1',
           'green',
-          `도구 분기 → ${toolName}${argHint ? ` (${argHint})` : ''} ${decision.tag} (p=${decision.p.toFixed(2)}, ${decision.basis})`,
+          `도구 분기 → ${toolName}${argHint ? ` (${redactSecrets(argHint)})` : ''} ${decision.tag} (p=${decision.p.toFixed(2)}, ${decision.basis})`,
           timeStr
         );
 
@@ -406,7 +408,7 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
             state,
             'Neon',
             'neon',
-            `독립 교차 검증 시작 — ${argHint || toolName}`,
+            `독립 교차 검증 시작 — ${redactSecrets(argHint || toolName)}`,
             timeStr
           );
         }
@@ -500,8 +502,9 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
       state.swarmActive = state.workers.filter((wk) => wk.status === 'running').length;
 
       const firstLine = raw.trim().split(/\r?\n/)[0] ?? '결과 수신';
-      const brief =
-        firstLine.length > 55 ? firstLine.slice(0, 54) + '…' : firstLine;
+      const brief = redactSecrets(
+        firstLine.length > 55 ? firstLine.slice(0, 54) + '…' : firstLine
+      );
       appendLog(state, 'Hydrogen', 'blue', `도구 완료 — ${brief}`, timeStr);
     }
 

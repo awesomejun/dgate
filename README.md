@@ -34,7 +34,7 @@
 - **Layer 0 (`dg` Pre-Lead Router)** — 태스크 종류 7종(`explore_read`·`code_search`·`single_edit` 등)별 사전확률과 실측 사후확률을 비교해 `sharp`(읽기전용 `pi` 워커 직행, 리드 턴 0) 또는 `split`(리드 승격)을 판정한다. LLM 호출 없이 순수 통계 판정이다.
 - **Layer 1 (Lead)** — `split`된 태스크의 계획을 수립하고 Layer 2 워커 브리프를 발행한다. `HERDR_DB_WRITE=1`로 결정 통계를 기록한다.
 - **Layer 2 (Swarm)** — 읽기전용 탐색 워커(동시 최대 4)와 `git worktree`에서 격리된 코딩 워커(동시 최대 2, 서로 다른 파일 영역)가 병렬 작업한다.
-- **Layer 3 (독립 검증자)** — 리드와 이종 모델·읽기전용 권한으로 검증한다. `[FAIL]` 판정은 `dg backprop`으로 원본 fork에 역전파돼 재작업된다.
+- **Layer 3 (독립 검증자)** — 리드와 이종 모델·읽기전용 권한으로 검증한다. 판정 SSOT는 구조화 verdict JSON(`.herdr/verify/<fork_id>-verdict.json`)이고, 리드가 `dg backprop --verdict-file`로 pass/rework/fail/human을 원본 fork에 fail-closed 반영한다(§5).
 - **Layer 4 (자문 3관문)** — 계획·오류·완료 시점에만 온디맨드로 기동하는 자문 세션이다. 관문 통과 후 즉시 `hc kill; hc rm`으로 정리된다.
 
 세션 관제·런치는 `hc`(Herdr 터미널 CLI) 위에서 동작한다. 모든 통계는 `~/.local/state/gemini-trick/decision.db`(SQLite)에 SSOT로 축적된다.
@@ -57,7 +57,7 @@ git clone <this-repo> && cd <this-repo>
 # 1) 오케스트레이션 계획 리허설 (모델 호출 0회, 실기동 0회 — 무조건 안전)
 npm run orchestrate:dry
 
-# 2) 전체 테스트 (외부 의존성 0개)
+# 2) 전체 테스트 92건 (외부 의존성 0개)
 npm test
 
 # 3) 데모 TUI 스냅샷 (터미널에 관제 화면 정적 출력)
@@ -142,7 +142,7 @@ cp .herdr/roster.example.json ~/.config/herdr-quad/roster.json
 node ./scripts/herdr-quad-launch.ts --repo /path/to/your-project --mode orchestrate --dry-run
 ```
 
-### `dg` 서브커맨드 (9종)
+### `dg` 서브커맨드 (10종)
 
 ```bash
 node ./src/decision/dg.ts <command> [flags]
@@ -155,9 +155,10 @@ node ./src/decision/dg.ts <command> [flags]
 | `close` | fork 종료 처리 (`--outcome ok\|fail\|rerouted`) |
 | `touch` | fork TTL 갱신 (워커 하트비트) |
 | `record` | 도구 사용 결과 표본 기록 (EWMA 입력) |
-| `backprop` | 검증 `[FAIL]`을 원본 fork에 역전파 |
+| `backprop` | 검증 `[FAIL]`을 원본 fork에 역전파 — 수동 또는 `--verdict-file` 구조화 판정 적용(fail-closed) |
+| `retro` | fork 회고 마크다운(상태·원인·실패 도구·권고)을 다음 워커 브리프용으로 생성 |
 | `settle-orphans` | TTL 만료 fork 일괄 정산 |
-| `wrap` | 워커 커맨드를 감싸 종료코드를 SSOT에 자동 기록 |
+| `wrap` | 워커 커맨드 래핑 — 워치독 감시·산출물 계약·원자 커밋으로 SSOT 기록 (§5) |
 | `compact` | 결정 DB 압축·통계 정리 |
 
 ---
@@ -169,6 +170,25 @@ node ./src/decision/dg.ts <command> [flags]
 - **읽기전용 워커 도구 제한** — `pi` 워커는 `--tools read,grep,find,ls`로 기동되며 bash·편집 도구가 계약상 존재하지 않는다. 사용자 roster가 임의 `--tools`를 지정해도 `--exclude-tools edit,write`가 자동 부여된다.
 - **세션명 충돌 방지** — 모든 `hc run --name`은 `^[a-z0-9_-]{1,32}$` 계약 + 런타임 6-hex 접미로 유일성을 보장하고, 기동 전 `hc ls` 충돌 점검을 수행한다.
 - **dry-run 무오염** — `--dry-run`은 임시 `:memory:` DB에서 리허설해 사용자 결정 DB·파일 시스템을 건드리지 않는다.
+
+### 실행 수명주기 & `dg wrap` 워치독
+
+`dg wrap`이 워커 자식을 `detached` 프로세스 그룹으로 띄워 종료 코드·신호·출력 tail을 함께 수집하고, 결과를 `commitWrapOutcome` 단일 트랜잭션으로 SSOT에 기록한다(이중 표본·TOCTOU 차단). `--expected-gen`/`--expected-attempt` 펜스로 세대·시도 불일치의 stale 커밋을 거부하고, 디스패처는 `repo_scope` cooperative lease로 동일 저장소를 점유 중인 세션과의 중복 디스패치를 미룬다(점유자 생존·만료 시 탈취, 조회 실패는 fail-open). 주요 계약:
+
+- **산출물·출력 계약** — `--require-artifact <path>`(파일 존재), `--require-nonempty`(크기 >0), `--require-stdout-nonempty`(비공백 stdout)를 clean exit(0) 시 AND 게이트로 검사한다. stdout 첫 비공백 줄이 `rerouted`면 워커의 리드 승격 신호 — 표본·실패 없이 `rerouted`로만 닫힌다.
+- **워치독** — `--stall-ms`(기본 120s) 무출력 스톨 시 프로세스 그룹 전체 SIGTERM→SIGKILL kill + 리댁션된 20줄 tail 보존, `--max-ms`(기본 20분) 총 시간 상한. 출력 진전이 있을 때만 `dg touch` 하트비트(`--heartbeat-ms`, 기본 60s)로 fork TTL을 갱신한다.
+- **`FailureCause` 11종** — `ok_pass`·`transient_network`·`tool_error`·`max_turns`·`no_result`·`artifact_missing`·`gate_fail`·`stall`·`timeout`·`config_error`·`interrupted`. 신호·종료코드 우선 분류라 문자열 휴리스틱 오탐을 막는다. `config_error`·`interrupted`는 EWMA·연속오류 카운터에서 격리돼 감사 로그만 남고, `ttl_orphan` 고아 정산은 w=1.0 실패 표본을 강제해 생존편향을 차단한다.
+
+### Fail-Closed 구조화 Verdict & `dg retro`
+
+- **`.herdr/verify/<fork_id>-verdict.json`** — 검증자가 남기는 SSOT 판정 문서(`schema_version: 1`). `decision`은 `pass|rework|fail|human` 4종, `findings[].severity`는 `P0|P1|P2|info`. `dg backprop --verdict-file <path> [--expected-head <sha>] [--max-reworks 2]`가 3중 불변식(스키마·fork_id/HEAD 결속·모순 판정)으로 검증해 fork에 반영한다 — `pass`는 fork→`ok`, `fail`은 역전파, `rework`는 재작업 카운트+w1.0 페널티, `human`/무효·누락·Stale·Replay는 전부 `exit 3` + `waiting_human` 파킹이다. pass에 P0/P1 finding이 있거나 fail/rework에 비공백 evidence가 없으면 모순으로 거부된다.
+- **`dg retro --fork <id> [--out <path>]`** — fork의 상태·원인·시도·재작업 횟수·실패 도구 상위 5건·다음 시도 권고를 리댁션된 마크다운으로 생성해 다음 워커 브리프에 주입한다(opt-in — 자동 생성하지 않는다).
+
+### 시크릿 3중 방어
+
+- **헤더 전용 키 전달** — Gemini REST 폴백은 `x-goog-api-key` 헤더로만 키를 보낸다(`?key=` URL 쿼리 폐기 — URL·로그·프록시 기록에 키가 남지 않는다).
+- **자식 env 최소 격리** — `buildSanitizedChildEnv`가 자식 워커 env에서 `*_API_KEY|_TOKEN|_SECRET|_PASSWORD|_PRIVATE_KEY` 계열을 제거하고 안전 키(`PATH`·`HOME`·`HERDR_*` 등)+명시 allow 목록만 통과시킨다. `dg wrap --sanitize-env --allow-env K1,K2`로 동일 격리를 래핑 자식에 적용한다.
+- **전역 리댁션** — `redactSecrets`(무예외 순수 함수)가 런타임 env 실측값·URL 인코딩 형태와 패턴 세트(`Authorization`/`x-goog-api-key` 헤더, `?key=` 쿼리, Bearer, `AIza…`·`sk-…`·`ghp_…`·`AKIA…` 등)를 `<redacted>`로 치환한다. 로그·`error_snippet`·`command_line`·verdict/retro 출력 등 기록 경로 전체에 적용된다. `tests/redact-security.test.ts`의 키 모양 문자열은 리댁션 검증용 의도된 합성 더미다.
 
 ---
 

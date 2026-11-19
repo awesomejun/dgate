@@ -37,7 +37,10 @@
 
 - 수정·구현 완료 주장 전 `.herdr/verify/<fork_id>-brief.md`를 작성한다 — 파일명·본문에 **`fork_id` 필수**, 원래 요구사항·diff 경로·테스트 명령 결과 포함.
 - `hc send verify-<RUN_ID> "독립검증: .herdr/verify/<fork_id>-brief.md 읽고 [PASS] 또는 [FAIL] 판정하라"` → `hc wait` → `hc read`.
-- 첫머리가 `[FAIL]`이면 즉시 `node ./src/decision/dg.ts backprop --fork <fork_id> --penalty 2.0 --reason "<요약>"` 실행 후 수정 루프로 복귀한다.
+- **구조화 Verdict 적용 (PR-A3)**: Verifier 판정 수령 시 `node ./src/decision/dg.ts backprop --fork <fork_id> --verdict-file .herdr/verify/<fork_id>-verdict.json --expected-head <HEAD>`를 호출한다. `--expected-head`에는 위임 시점 `git rev-parse HEAD`(full sha)를 넣는다 — Stale Verdict·Replay가 fail-closed(`human`)로 거부된다.
+- **`-verdict.json` 누락 시 1회 재요구**: 마크다운 `[PASS]`/`[FAIL]`만 남고 `-verdict.json`이 없으면 "verdict JSON만 기록하라"고 정확히 **1회** 재요구한다. 여전히 미제출이면 검증 불가 상태로 간주해 `human` 파킹 — 절대 통과로 해석하지 않는다.
+- `[FAIL]`·`rework` 판정이면 verdict 적용 결과에 따라 수정 루프로 복귀한다. `human` 파킹은 사용자 승인·개입 요청으로 이어진다.
+- **실패 회고 (opt-in)**: fork 실패·재작업 반복으로 다음 시도 컨텍스트가 필요하면 `node ./src/decision/dg.ts retro --fork <fork_id> --out .herdr/retro/<fork_id>.md`를 생성해 시도 횟수·원인·실패 도구 상위·권고를 다음 워커 브리프에 주입한다. `dg close` 때 자동 생성하지 않는다(워킹트리 오염 방지).
 
 ## 7. 동시성·타임아웃 상한
 

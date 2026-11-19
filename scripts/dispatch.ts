@@ -30,6 +30,7 @@ import { fileURLToPath } from 'node:url';
 import type { DatabaseSync } from 'node:sqlite';
 import { openDbSafe, resolveDbPath, resolveProjectIdentity } from '../src/decision/db.ts';
 import {
+  acquireScopeLease,
   escalateRisk,
   evaluateForced,
   getPosterior,
@@ -285,6 +286,36 @@ export function planDispatch(input: PlanDispatchInput): DispatchPlan {
       ? 'sharp'
       : 'split';
 
+  const idx = input.idx ?? 0;
+  // 동시성 상한 (§6.4): 탐색 ≤4, 코딩 ≤2
+  const expectedSession = decision === 'sharp' ? `exp-${idx}-${runId}` : `lead-${runId}`;
+  let deferred = false;
+  let reason: string | null = null;
+  if (decision === 'sharp' && (input.activeExplore ?? 0) >= MAX_CONCURRENT_EXPLORE) {
+    deferred = true;
+    reason = `explore concurrency cap (${MAX_CONCURRENT_EXPLORE}) reached`;
+  } else if (spec.requiresWrite && (input.activeCoding ?? 0) >= MAX_CONCURRENT_CODING) {
+    deferred = true;
+    reason = `coding concurrency cap (${MAX_CONCURRENT_CODING}) reached`;
+  }
+  // PR-A2 Cooperative Lease (§2.4): 동일 repo_scope를 살아있는 세션이 점유 중이면
+  // deferred — dry-run은 fork 미기록이므로 검사하지 않는다. hc 조회 실패는 fail-open.
+  if (!deferred && !dryRun && db) {
+    try {
+      const lease = acquireScopeLease(db, {
+        repoScope: repoDir,
+        leaseOwner: expectedSession,
+        liveSessions: listHcLiveNames(),
+      });
+      if (!lease.acquired) {
+        deferred = true;
+        reason = lease.reason ?? `scope lease held by ${lease.holder ?? 'unknown'}`;
+      }
+    } catch {
+      /* 리스 조회 실패 — fail-open, 리드 승격 판단에 위임 */
+    }
+  }
+
   if (!dryRun && db) {
     try {
       forkId = issueFork(db, {
@@ -298,6 +329,14 @@ export function planDispatch(input: PlanDispatchInput): DispatchPlan {
         forcedSplit: forced.forcedSplit,
         ttlMs: TTL_EXPLORE_MS,
         title: input.taskFile ?? null,
+        // 점유 리스는 실제 디스패치(비 deferred) 때만 기록 — deferred fork는 스코프를 홀드하지 않는다
+        metadata: deferred
+          ? undefined
+          : {
+              repo_scope: repoDir,
+              lease_owner: expectedSession,
+              lease_until_ms: Date.now() + TTL_EXPLORE_MS,
+            },
       });
     } catch {
       forkId = null;
@@ -305,25 +344,13 @@ export function planDispatch(input: PlanDispatchInput): DispatchPlan {
   }
   forkId ??= `fk_dry_${runId}`;
 
-  // 동시성 상한 (§6.4): 탐색 ≤4, 코딩 ≤2
-  let deferred = false;
-  let reason: string | null = null;
-  if (decision === 'sharp' && (input.activeExplore ?? 0) >= MAX_CONCURRENT_EXPLORE) {
-    deferred = true;
-    reason = `explore concurrency cap (${MAX_CONCURRENT_EXPLORE}) reached`;
-  } else if (spec.requiresWrite && (input.activeCoding ?? 0) >= MAX_CONCURRENT_CODING) {
-    deferred = true;
-    reason = `coding concurrency cap (${MAX_CONCURRENT_CODING}) reached`;
-  }
-
-  const idx = input.idx ?? 0;
   let sessionName: string | null = null;
   const hcCommands: string[][] = [];
   const worktreeCommands: string[][] = [];
   let carbonBriefPath: string | null = null;
 
   if (!deferred && decision === 'sharp') {
-    sessionName = `exp-${idx}-${runId}`;
+    sessionName = expectedSession;
     const prompt = `임무파일 ${input.taskFile ?? 'TASK.md'} 를 읽고 조사 결과를 최종 메시지로 출력하라`;
     hcCommands.push([
       'run',
@@ -342,12 +369,15 @@ export function planDispatch(input: PlanDispatchInput): DispatchPlan {
       spec.toolClass,
       '--fork',
       forkId,
+      '--require-stdout-nonempty',
+      '--stall-ms',
+      '120000',
       '--',
       ...buildWorkerCommand(rosterProfile.roles.explore, { prompt }),
     ]);
   } else if (!deferred) {
     // split → 리드 승격 (§6.1 Layer 1) — 역할 계약서는 repo 우선, 없으면 오케스트레이터 폴백
-    sessionName = `lead-${runId}`;
+    sessionName = expectedSession;
     const leadContract = resolveRoleContractPath(repoDir, ORCHESTRATOR_ROOT, 'lead') ?? '.herdr/roles/lead.md';
     hcCommands.push([
       'run',

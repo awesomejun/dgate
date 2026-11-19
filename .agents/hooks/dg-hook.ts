@@ -27,6 +27,7 @@ import * as fs from 'node:fs';
 import type { DatabaseSync } from 'node:sqlite';
 import { openDbSafe, resolveProjectIdentity } from '../../src/decision/db.ts';
 import { classifyTool, isSelfInvocation, recordToolOutcome } from '../../src/decision/engine.ts';
+import { redactSecrets } from '../../src/decision/redact.ts';
 
 const DELEGATE_DENY_REASON = 'Delegation must use hc CLI in herdr-quad mode';
 const FAIL_CLOSED_REASON = 'readonly guard: fail-closed';
@@ -278,7 +279,7 @@ function runCollect(): void {
       return;
     }
     const args = toolCall.args ?? {};
-    const commandLine = String(args.CommandLine ?? args.command ?? '');
+    const commandLine = redactSecrets(String(args.CommandLine ?? args.command ?? ''));
     // B6 자기 호출 제외: commandLine뿐 아니라 path 계열 인자에 dg.ts/dg-hook.ts가
     // 들어도 기록하지 않는다(파일 읽기 자체가 자기 호출인 케이스).
     const selfText = [
@@ -306,8 +307,8 @@ function runCollect(): void {
       input.error === undefined || input.error === null || input.error === false
         ? null
         : typeof input.error === 'string'
-          ? input.error.slice(0, 400)
-          : JSON.stringify(input.error).slice(0, 400);
+          ? redactSecrets(input.error).slice(0, 400)
+          : redactSecrets(JSON.stringify(input.error)).slice(0, 400);
 
     // 훅 busy_timeout=250ms — 3s 훅 타임아웃 내 즉시 폴백(§3.2/N1)
     const db: DatabaseSync | null = openDbSafe(undefined, { busyTimeoutMs: 250 });

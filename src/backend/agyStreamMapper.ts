@@ -19,6 +19,7 @@ import {
   readTelemetrySnapshot,
   recordToolOutcomeSafe,
 } from '../decision/telemetry.ts';
+import { redactSecrets } from '../decision/redact.ts';
 import type { AppState, DecisionBasis } from '../types.ts';
 
 interface AgyUsage {
@@ -370,7 +371,7 @@ export function applyAgyEvent(state: AppState, raw: AgyRawEvent): void {
           state,
           `Decision 1`,
           'green',
-          `도구 분기 → ${toolName}${hint ? ` (${hint})` : ''}  ${decision.tag} (p=${decision.p.toFixed(2)}, ${decision.basis})`
+          `도구 분기 → ${toolName}${hint ? ` (${redactSecrets(hint)})` : ''}  ${decision.tag} (p=${decision.p.toFixed(2)}, ${decision.basis})`
         );
       } else if (u.state === 'DONE') {
         const errText = u.tool_info?.error;
@@ -382,8 +383,8 @@ export function applyAgyEvent(state: AppState, raw: AgyRawEvent): void {
             state.activeTrigger = 1;
             state.advisorState = '자문 중';
             state.carbonCalls += 1;
-            state.latestAdvice = `» ${toolName} 연속 오류 감지 — 파라미터/경로 재검토 필요`;
-            appendLog(state, 'Carbon', 'purple', `같은 오류 2회 감지 — ${toolName}`);
+            state.latestAdvice = `» ${redactSecrets(toolName)} 연속 오류 감지 — 파라미터/경로 재검토 필요`;
+            appendLog(state, 'Carbon', 'purple', `같은 오류 2회 감지 — ${redactSecrets(toolName)}`);
           }
         } else {
           state.consecutiveToolErrors = 0;
@@ -411,10 +412,10 @@ export function applyAgyEvent(state: AppState, raw: AgyRawEvent): void {
                 conversationId: convId,
                 step: u.step_index,
                 targetHash: targetHashForArgs(params),
-                errorSnippet: errText ? String(errText).slice(0, 300) : null,
+                errorSnippet: errText ? redactSecrets(String(errText)).slice(0, 300) : null,
                 source: 'agy_stream',
                 dedupeKey: `agy:${convId ?? 'unknown'}:${u.step_index}`,
-                commandLine: commandLineOfArgs(params),
+                commandLine: redactSecrets(commandLineOfArgs(params) ?? '') || null,
               });
             } catch {
               // fail-open — 수집 실패가 UI를 죽이지 않는다(§3.5)
@@ -436,12 +437,12 @@ export function applyAgyEvent(state: AppState, raw: AgyRawEvent): void {
 
         const dur =
           u.duration_seconds !== undefined ? ` (${u.duration_seconds.toFixed(2)}s)` : '';
-        const out = u.tool_info?.output ? ` · ${u.tool_info.output}` : '';
+        const out = u.tool_info?.output ? ` · ${redactSecrets(u.tool_info.output)}` : '';
         appendLog(
           state,
           `Hydrogen ${role}`,
           'blue',
-          `${toolName}${hint ? ` [${hint}]` : ''} 완료${dur}${out}`
+          `${toolName}${hint ? ` [${redactSecrets(hint)}]` : ''} 완료${dur}${out}`
         );
       }
       return;
@@ -510,7 +511,7 @@ export function applyAgyEvent(state: AppState, raw: AgyRawEvent): void {
       state.phase = '오류';
       state.activeTrigger = 1;
       state.advisorState = '자문 중';
-      const errMsg = r.error ?? '실행 오류';
+      const errMsg = redactSecrets(r.error ?? '실행 오류');
       state.latestAdvice = `» 실행 중단: ${errMsg}`;
       state.backSummary = `오류: ${errMsg.slice(0, 36)}`;
       if (state.modelName.toLowerCase().includes('neon')) {
