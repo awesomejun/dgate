@@ -219,7 +219,7 @@ function openWriter(dbPath?: string): DatabaseSync {
   return db;
 }
 
-/** `--db` 공용 옵션 — 명시 시 `GEMINI_TRICK_DB_PATH`보다 우선 (resolveDbPath 우선순위 그대로) */
+/** `--db` 공용 옵션 — 명시 시 `DECISION_ORCHESTRATOR_DB_PATH`·`GEMINI_TRICK_DB_PATH`보다 우선 (resolveDbPath 우선순위 그대로) */
 function dbFlag(args: ParsedArgs): string | undefined {
   return optionalFlag(args, 'db');
 }
@@ -1517,11 +1517,11 @@ const HELP = `dg — decision gate CLI (plan-r2.1 §4.7)
   dg report [--days 14] [--project <dir>] [--out <path>] [--repo <dir>] [--db <path>] [--json]
 
 라우트 r: file_select|tool_select|retry_or_abort|delegate_swarm
-공용: --db <path>는 GEMINI_TRICK_DB_PATH보다 우선. --roster <path>/--profile <name> 명시 시
+공용: --db <path>는 DECISION_ORCHESTRATOR_DB_PATH·GEMINI_TRICK_DB_PATH보다 우선. --roster <path>/--profile <name> 명시 시
 route·gate에 roster 기반 동적 θ_sharp 적용 (미지정 시 0.70).
 Decision API: DECISION_API=off|shadow|on + GEMINI_DECISION_API_KEY (키 부재 시 off 강등).
 --decision-api는 env를 덮어쓰고, --context/--api-eval은 measured 기반에서도 평가를 강제한다.
-DB 경로: GEMINI_TRICK_DB_PATH 환경변수 또는 기본 ~/.local/state/gemini-trick/decision.db`;
+DB 경로: DECISION_ORCHESTRATOR_DB_PATH 환경변수(레거시 별칭 GEMINI_TRICK_DB_PATH) 또는 기본 ~/.local/state/decision-orchestrator/decision.db`;
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);

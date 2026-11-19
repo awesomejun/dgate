@@ -115,7 +115,7 @@ function parseArgs(argv: string[]): CliOptions {
         opts.watchDir = argv[++i] ?? null;
         break;
       case '--watch-db': {
-        // N8: SQLite 결정 DB 읽기전용 구독 경로. 우선순위 --watch-db > GEMINI_TRICK_DB_PATH > 기본 경로
+        // N8: SQLite 결정 DB 읽기전용 구독 경로. 우선순위 --watch-db > DECISION_ORCHESTRATOR_DB_PATH > 기본 경로
         const p = argv[++i];
         if (p && !p.startsWith('-')) opts.watchDb = p;
         break;
@@ -222,7 +222,7 @@ function parseArgs(argv: string[]): CliOptions {
 
 function printCliHelp(): void {
   const usage = `
-GEMINI CLI SUBAGENT TUI (Argon · Decision 1 · Hydrogen · Neon · Carbon)
+DECISION ORCHESTRATOR TUI (Argon · Decision 1 · Hydrogen · Neon · Carbon)
 
 사용법:
   node ./src/cli.ts [옵션]
@@ -232,7 +232,8 @@ GEMINI CLI SUBAGENT TUI (Argon · Decision 1 · Hydrogen · Neon · Carbon)
   --watch-dir <path>     트랜스크립트 검색 기본 디렉터리 지정 (기본: CLI ~/.gemini/antigravity-cli/brain 및
                          IDE ~/.gemini/antigravity/brain 중 최신 mtime 자동 선택)
   --watch-db <path>      SQLite 결정 DB(decision.db) 읽기전용 구독 경로 지정 (N8)
-                         우선순위: --watch-db > GEMINI_TRICK_DB_PATH > ~/.local/state/gemini-trick/decision.db
+                         우선순위: --watch-db > DECISION_ORCHESTRATOR_DB_PATH > GEMINI_TRICK_DB_PATH(레거시)
+                                  > ~/.local/state/decision-orchestrator/decision.db
   --live, --agy          실제 Antigravity(agy) / Gemini API 백엔드 에이전트 루프 연결 실행
   --demo                 gemini_sub_neon.html의 40초 멀티 에이전트 시나리오 데모 실행 (기본값)
   --stream               표준 입력(stdin)으로부터 JSONL(또는 agy stream-json) 실시간 렌더링
@@ -286,10 +287,14 @@ function main(): void {
     state.effort = opts.effort;
   }
 
-  // N8: --watch-db > GEMINI_TRICK_DB_PATH > 기본 경로 우선순위로 SQLite 결정 DB 읽기전용 구독.
+  // N8: --watch-db > DECISION_ORCHESTRATOR_DB_PATH > GEMINI_TRICK_DB_PATH(레거시) > 기본 경로
+  // 우선순위로 SQLite 결정 DB 읽기전용 구독.
   // W1은 최초 1회 로드만 수행한다(주기 구독 훅은 W2-B가 src/state에 추가).
   const decisionDbPath = resolveDbPath(opts.watchDb);
-  if ((opts.watchDb !== null || process.env.GEMINI_TRICK_DB_PATH) && fs.existsSync(decisionDbPath)) {
+  if (
+    (opts.watchDb !== null || process.env.DECISION_ORCHESTRATOR_DB_PATH || process.env.GEMINI_TRICK_DB_PATH) &&
+    fs.existsSync(decisionDbPath)
+  ) {
     try {
       const snapshot = readTelemetrySnapshot(decisionDbPath, opts.watchDir ?? process.cwd());
       state.routes = snapshot.routes;

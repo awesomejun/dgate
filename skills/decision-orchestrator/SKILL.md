@@ -77,7 +77,7 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
 
 - **실시간 TUI 대시보드**:
   - 백그라운드 모니터 세션 접속 *(선택 — `hc` 설치 시)*: `hc attach dg-monitor` (나오기: `Ctrl+\`)
-  - 직접 실행: `node $DECISION_ORCHESTRATOR_ROOT/src/cli.ts --watch-db ~/.local/state/gemini-trick/decision.db --watch`
+  - 직접 실행: `node $DECISION_ORCHESTRATOR_ROOT/src/cli.ts --watch-db ~/.local/state/decision-orchestrator/decision.db --watch`
 - **비용·타이밍 통계 (읽기전용)**:
   ```bash
   node $DECISION_ORCHESTRATOR_ROOT/src/decision/dg.ts stats --cost --timing [--project <TARGET_REPO>]

@@ -17,8 +17,8 @@
  *   project_id는 `--repo` 기준으로 해석한다.
  *
  * 주의:
- * - `quota-saver`(기본): `standing_agy_sessions=0`, `max_ondemand_agy=1` — `agy`는
- *   Carbon 관문 온디맨드 1회만 생존 후 `hc kill; hc rm`.
+ * - `quota-saver`(기본): `standing_agy_sessions=0`, `max_ondemand_agy=0` — agy 사용 0,
+ *   Carbon 관문 자문도 `pi`(glm-5.3) 온디맨드 1회만 생존 후 `hc kill; hc rm`.
  * - 모든 `pi` 명령은 `--no-approve` 포함(추가1: Trust 대화상자 blocked 방지).
  * - 모든 `hc run --name`은 `^[a-z0-9_-]{1,32}$`(N12) — `$RUN_ID` 접미 적용.
  */
@@ -304,9 +304,9 @@ function buildOrchestratePlan(opts: LaunchOptions): OrchestratePlan {
   worktreeCommands(commands, repoDir, wtDir, `feat/${coderName}`, coderName, profile.roles.coder ?? { cli: 'devin' });
 
   // Carbon Gate 온디맨드 템플릿 — advisor 슬롯 스펙 사용
-  // (quota-saver: 최대 1 / agy-quad: 최대 3 — roster에서 동적 재계산)
+  // (quota-saver: agy 최대 0 — pi 자문 / agy-quad: 최대 3 — roster에서 동적 재계산)
   // 이름은 Gate 1 예시 — 실기동 시 관문 번호로 치환(gate1/gate2/…)해 계약을 유지한다.
-  const advisorSpec = profile.roles.advisor ?? { cli: 'agy' };
+  const advisorSpec = profile.roles.advisor ?? { cli: 'pi', onDemand: true };
   const carbonArgv = [
     'run', '--bg', '--name', `carbon-gate1-${runId}`, '--cwd', repoDir, '--',
     'env', 'HERDR_ROLE=carbon', 'HERDR_READONLY=1',
@@ -667,7 +667,7 @@ Herdr App 창을 자동으로 4분할하여 Argon, Carbon, Neon, Hydrogen 패널
   --roster <path>            역할↔모델 roster.json (우선순위: --roster > HERDR_ROSTER_PATH > <repo>/.herdr/roster.json > ~/.config/herdr-quad/roster.json > 내장)
   --profile <name>           오케스트레이션 프로필 (기본: roster defaultProfile — 내장 quota-saver)
   --run-id <id>              세션 접미 RUN_ID (기본: generateRunId() 6자리 hex)
-  --db <path>                결정 DB 경로 (기본: GEMINI_TRICK_DB_PATH > ~/.local/state/gemini-trick/decision.db)
+  --db <path>                결정 DB 경로 (기본: DECISION_ORCHESTRATOR_DB_PATH > GEMINI_TRICK_DB_PATH(레거시) > ~/.local/state/decision-orchestrator/decision.db)
   --show-workers             워커 세션을 2x2 패인으로 표시 (orchestrate)
   --prompt, -p <text>        초기 프롬프트 (지정 시 --live 자동 전환)
   --folder <path>            작업 디렉터리 (--repo 별칭)

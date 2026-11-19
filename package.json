@@ -1,10 +1,11 @@
 {
-  "name": "gemini-subagent-tui",
+  "name": "decision-orchestrator",
   "version": "0.1.0",
-  "description": "Gemini CLI Multi-Agent Orchestration TUI (Argon · Decision 1 · Hydrogen · Neon · Carbon)",
+  "description": "Model-agnostic local SQLite Decision Gate & Multi-Agent Orchestration Engine + TUI",
   "type": "module",
   "bin": {
-    "gemini-sub-tui": "./src/cli.ts"
+    "dg": "./src/decision/dg.ts",
+    "decision-orchestrator": "./src/cli.ts"
   },
   "scripts": {
     "start": "node ./src/cli.ts --live",

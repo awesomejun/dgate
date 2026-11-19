@@ -192,13 +192,18 @@ test('6. launcher: quota-saver orchestrate --dry-run 계약', () => {
     const out = res.stdout;
     assert.match(out, /profile=quota-saver/);
     assert.match(out, /standing_agy_sessions=0/);
-    assert.match(out, /max_ondemand_agy=1/);
+    assert.match(out, /max_ondemand_agy=0/);
     assert.ok(out.includes('--no-approve'), 'pi commands must carry --no-approve');
     assert.ok(out.includes('--watch-db'), 'Tab 1 monitor must use --watch-db');
     assert.ok(out.includes('lead-'), 'lead session planned');
     assert.ok(out.includes('verify-'), 'verifier session planned');
     assert.ok(out.includes('worktree'), 'coder worktree example planned');
-    assert.ok(out.includes('gemini-4-hydrogen-xhigh'), 'carbon on-demand template planned');
+    const carbonLine = out.split('\n').find((l) => l.includes('carbon-gate1') && l.includes('hc run'));
+    assert.ok(carbonLine, 'carbon on-demand template planned');
+    assert.ok(carbonLine!.includes('HERDR_ROLE=carbon'), `carbon role env expected: ${carbonLine}`);
+    assert.ok(carbonLine!.includes('glm-zcode/glm-5.3'), `carbon advisor must use pi glm-5.3: ${carbonLine}`);
+    assert.ok(carbonLine!.includes('--no-approve'), `carbon advisor pi command must carry --no-approve: ${carbonLine}`);
+    assert.ok(!out.includes('gemini-4-hydrogen-xhigh'), 'quota-saver must not reference the agy advisor model');
     // B2: verifier 읽기전용 격리 — --tools read,grep,find,ls 포함·bash 불포함 (§6.1 Layer 3)
     const verifyLine = out.split('\n').find((l) => l.includes('verify-') && l.includes('hc run'));
     assert.ok(verifyLine, 'verifier hc command line expected');

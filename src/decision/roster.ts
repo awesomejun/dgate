@@ -158,14 +158,14 @@ export function resolveWorkerBin(cli: WorkerCliKind, specBin?: string): string {
 
 function builtinQuotaSaver(): RosterProfile {
   return {
-    description: '기본 프로필 — agy 상시 0, Lead/Verifier는 pi, Carbon(advisor)은 온디맨드 1회성',
-    dailyTurnBudgets: { agy: 20 },
+    description: '기본 프로필 — agy 0 (상시·온디맨드 모두), Lead/Verifier/Advisor 모두 pi, Advisor는 온디맨드 1회성',
+    dailyTurnBudgets: { agy: 0 },
     roles: {
       lead: { cli: 'pi', provider: 'opencodex', model: 'glm-zcode/glm-5.3', thinking: 'max', pricing: { relativeCost: 5.0 } },
       explore: { cli: 'pi', provider: 'opencodex', model: 'command-code/deepseek-deepseek-v4.1-flash', thinking: 'medium', readonly: true, pricing: { relativeCost: 1.0 } },
       coder: { cli: 'devin', permissionMode: 'auto', pricing: { relativeCost: 3.0 } },
       verifier: { cli: 'pi', provider: 'opencodex', model: 'command-code/deepseek-deepseek-v4.1-flash', thinking: 'max', readonly: true, pricing: { relativeCost: 1.5 } },
-      advisor: { cli: 'agy', model: 'gemini-4-hydrogen-xhigh', readonly: true, onDemand: true, pricing: { relativeCost: 8.0 } },
+      advisor: { cli: 'pi', provider: 'opencodex', model: 'glm-zcode/glm-5.3', thinking: 'high', readonly: true, onDemand: true, quotaBucket: 'pi' },
     },
   };
 }

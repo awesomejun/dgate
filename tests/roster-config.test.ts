@@ -140,18 +140,20 @@ test('1. 커스텀 roster: lead→claude·explore 교체 즉시 반영 + agy 세
     assert.ok(cli.stdout.includes('roster_source=flag'), cli.stdout);
 
     // (c) launcher --mode orchestrate --dry-run — 프로필 전환 + standing 재계산
-    //     custom-mix: verifier agy 상시 1 + advisor(상속) agy 온디맨드 → standing 1 / max 2
+    //     custom-mix: verifier agy 상시 1 + advisor(상속) pi 온디맨드 → standing 1 / max 1
     const res = runLauncher(e, [
       '--mode', 'orchestrate', '--dry-run', '--roster', rosterPath, '--repo', e.repo, '--run-id', 'ab12cd',
     ]);
     assert.equal(res.status, 0, res.stderr);
     assert.match(res.stdout, /profile=custom-mix/);
     assert.match(res.stdout, /standing_agy_sessions=1/);
-    assert.match(res.stdout, /max_ondemand_agy=2/);
+    assert.match(res.stdout, /max_ondemand_agy=1/);
     assert.ok(res.stdout.includes('/fake-bin/claude'), 'lead standing session uses roster claude');
     assert.ok(res.stdout.includes('claude-sonnet-4-6'), res.stdout);
     assert.ok(res.stdout.includes('openai-codex/gpt-5.6-luna'), 'rehearsal explore uses roster model');
-    assert.ok(!res.stdout.includes('glm-zcode/glm-5.3'), 'builtin lead model must not appear');
+    const leadLine = res.stdout.split('\n').find((l) => l.includes('--name lead-ab12cd'));
+    assert.ok(leadLine, 'lead hc command line expected');
+    assert.ok(!leadLine!.includes('glm-zcode/glm-5.3'), `lead must use the roster claude model, not builtin pi: ${leadLine}`);
     // verifier agy 승격 — neon 세션이 claude/pi가 아니라 agy 커맨드로 기동
     assert.ok(res.stdout.includes('--mode plan'), res.stdout);
   } finally {
@@ -289,7 +291,7 @@ test('4. 깨진 roster.json → stderr 경고 + 내장 quota-saver 안전 폴백
     assert.equal(loaded.config.defaultProfile, 'quota-saver');
     const qs = loaded.config.profiles['quota-saver']!;
     assert.equal(countStandingSessionsByBucket(qs, 'agy'), 0);
-    assert.equal(countMaxOndemandByBucket(qs, 'agy'), 1);
+    assert.equal(countMaxOndemandByBucket(qs, 'agy'), 0);
     // B2: 내장 quota-saver verifier는 bash 미포함 (§6.1 Layer 3 — --tools read,grep,find,ls)
     const verifierArgv = buildWorkerCommand(qs.roles.verifier!, { prompt: '검증' });
     assert.ok(verifierArgv.includes('read,grep,find,ls'), verifierArgv.join(' '));

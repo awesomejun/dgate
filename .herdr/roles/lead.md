@@ -31,7 +31,7 @@
 ## 5. Carbon 3관문 자문 (온디맨드 — 상시 세션 금지)
 
 - 관문: **Gate 0** 계획 확정 전 · **Gate 1** 같은 오류 2회(`forcedSplit` 자동 점등) · **Gate 2** 완료 선언 전.
-- 절차: 브리프 `.herdr/advice/gate<N>-<id>.md` 작성 → `hc run --bg --name carbon-gate<N>-<RUN_ID> --cwd "$REPO" -- env HERDR_ROLE=carbon HERDR_READONLY=1 agy --model gemini-4-hydrogen-xhigh --mode plan --dangerously-skip-permissions -i "관문 N 검토: <BRIEF_PATH>"` → `hc wait` → `hc read` → **즉시 `hc kill; hc rm` 정리**. 일상 턴에서 `agy` 호출 금지.
+- 절차: 브리프 `.herdr/advice/gate<N>-<id>.md` 작성 → `hc run --bg --name carbon-gate<N>-<RUN_ID> --cwd "$REPO" -- env HERDR_ROLE=carbon HERDR_READONLY=1 pi --provider opencodex --model glm-zcode/glm-5.3 --thinking high --tools read,grep,find,ls --no-extensions --no-mcp --no-approve "관문 N 검토: <BRIEF_PATH>"` → `hc wait` → `hc read` → **즉시 `hc kill; hc rm` 정리**. 자문 워커의 CLI·모델은 활성 roster의 advisor 슬롯을 따른다 — 기본 quota-saver는 `agy` 호출 완전 금지(opt-in `agy-quad`에서만 agy 자문).
 
 ## 6. 독립 검증 (Verifier) 결선
 
