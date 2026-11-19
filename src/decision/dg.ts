@@ -65,6 +65,14 @@ import {
   type RiskLevel,
   type RouteId,
 } from './engine.ts';
+import {
+  applyDecisionApi,
+  createDecisionAdapter,
+  isDecisionApiMode,
+  parseDecisionApiMode,
+  type DecisionApiAudit,
+  type DecisionApiMode,
+} from './adapter.ts';
 import { buildSanitizedChildEnv, redactSecrets } from './redact.ts';
 import {
   formatReportMarkdown,
@@ -89,6 +97,7 @@ const BOOL_FLAGS = new Set([
   'cost',
   'timing',
   'force',
+  'api-eval',
 ]);
 
 interface ParsedArgs {
@@ -242,9 +251,60 @@ function resolveSharpTheta(args: ParsedArgs): number | undefined {
   return computeDynamicSharpThreshold({ profile: resolved.profile }).threshold;
 }
 
+// ---------- Decision API (--decision-api/--context/--api-eval) ----------
+
+/** route·gate 공용 Decision API 플래그 — 무효 값은 UsageError(exit 2), 무키는 off 강등 */
+function parseDecisionApiFlags(args: ParsedArgs): { mode: DecisionApiMode; context: string | null; apiEval: boolean } {
+  const raw = optionalFlag(args, 'decision-api');
+  if (raw !== undefined && !isDecisionApiMode(raw)) {
+    throw new UsageError(`invalid --decision-api "${raw}" (allowed: off|shadow|on)`);
+  }
+  return {
+    mode: parseDecisionApiMode(process.env, raw),
+    context: optionalFlag(args, 'context') ?? null,
+    apiEval: optionalFlag(args, 'api-eval') === '1',
+  };
+}
+
+/** 사람 출력 접미 — audit가 있을 때만 (off 모드 출력 100% 불변 유지) */
+function apiSuffix(audit: DecisionApiAudit | null): string {
+  if (audit === null) return '';
+  return ` api=${audit.mode}(${audit.ok ? `p=${audit.p_api?.toFixed(3)},${audit.applied ? 'applied' : audit.disagreed ? 'disagreed' : 'agreed'}` : 'fallback'})`;
+}
+
+/** `dg gate --fork <existing>` 경로 — 기존 fork의 metadata_json에 decision_api를 병합 */
+function mergeForkDecisionApi(db: DatabaseSync, forkId: string, audit: DecisionApiAudit): void {
+  const row = db.prepare('SELECT metadata_json FROM forks WHERE fork_id = ?').get(forkId) as
+    | { metadata_json: string | null }
+    | undefined;
+  if (!row) return;
+  let meta: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(row.metadata_json ?? '{}');
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      meta = parsed as Record<string, unknown>;
+    }
+  } catch {
+    /* 손상 JSON은 새 객체로 교체 */
+  }
+  meta['decision_api'] = audit;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    db.prepare('UPDATE forks SET metadata_json = ? WHERE fork_id = ?').run(JSON.stringify(meta), forkId);
+    db.exec('COMMIT');
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      /* 무시 */
+    }
+    throw err;
+  }
+}
+
 // ---------- route ----------
 
-function cmdRoute(args: ParsedArgs, json: boolean): void {
+async function cmdRoute(args: ParsedArgs, json: boolean): Promise<void> {
   const taskKindRaw = requireFlag(args, 'task-kind');
   const spec = taskKindSpec(taskKindRaw);
   if (!spec) {
@@ -254,6 +314,7 @@ function cmdRoute(args: ParsedArgs, json: boolean): void {
   }
   const riskOverride = parseRisk(optionalFlag(args, 'risk'));
   const title = optionalFlag(args, 'title') ?? null;
+  const apiFlags = parseDecisionApiFlags(args);
   const theta = resolveSharpTheta(args);
   const identity = resolveIdentity(optionalFlag(args, 'project'));
   const db = openWriter(dbFlag(args));
@@ -266,31 +327,71 @@ function cmdRoute(args: ParsedArgs, json: boolean): void {
       sharpThreshold: theta,
     });
     if (!ev) throw new UsageError(`invalid --task-kind "${taskKindRaw}"`); // spec 선행 검증으로 미도달
-    const { post, forced, risk, decision } = ev;
+    const { post, forced, risk } = ev;
+    let { decision } = ev;
+    let finalP = post.p;
+    let finalRisk = risk;
+    const api =
+      apiFlags.mode === 'off'
+        ? null
+        : await applyDecisionApi({
+            mode: apiFlags.mode,
+            adapter: createDecisionAdapter(apiFlags.mode),
+            localDecision: ev.decision,
+            pLocal: post.p,
+            sharpThreshold: ev.sharpThreshold,
+            basis: post.basis,
+            sharpEligible: spec.sharpEligible,
+            localRisk: risk,
+            forcedSplit: forced.forcedSplit,
+            forceApiEval: apiFlags.apiEval || apiFlags.context !== null,
+            adapterInput: {
+              projectId: identity.projectId,
+              route: spec.route,
+              toolClass: spec.toolClass,
+              basis: post.basis,
+              pLocal: post.p,
+              taskKind: spec.taskKind,
+              requiresWrite: spec.requiresWrite,
+              riskLevel: risk,
+              samples: post.samples,
+              consecutiveErrors: post.consecutiveErrors,
+              title,
+              context: apiFlags.context,
+            },
+          });
+    let audit: DecisionApiAudit | null = null;
+    if (api) {
+      decision = api.decision;
+      finalP = api.p;
+      finalRisk = api.risk;
+      audit = api.audit;
+    }
     const forkId = issueFork(db, {
       projectId: identity.projectId,
       projectLabel: identity.projectLabel,
       route: spec.route,
       toolClass: spec.toolClass,
       decision,
-      pAtGate: post.p,
+      pAtGate: finalP,
       basisAtGate: post.basis,
       forcedSplit: forced.forcedSplit,
       ttlMs: TTL_EXPLORE_MS,
       title,
+      metadata: audit !== null ? { decision_api: audit } : undefined,
     });
     emit(
       json,
       () =>
-        `[route] ${spec.taskKind} → ${decision.toUpperCase()} (${spec.route}/${spec.toolClass}) p=${post.p.toFixed(3)} (${post.basis}, n=${post.samples}) fork=${forkId}`,
+        `[route] ${spec.taskKind} → ${decision.toUpperCase()} (${spec.route}/${spec.toolClass}) p=${finalP.toFixed(3)} (${post.basis}, n=${post.samples}) fork=${forkId}${apiSuffix(audit)}`,
       {
         fork_id: forkId,
         task_kind: spec.taskKind,
         route: spec.route,
         tool_class: spec.toolClass,
         requires_write: spec.requiresWrite,
-        risk_level: risk,
-        p: post.p,
+        risk_level: finalRisk,
+        p: finalP,
         basis: post.basis,
         samples: post.samples,
         consecutive_errors: post.consecutiveErrors,
@@ -303,6 +404,7 @@ function cmdRoute(args: ParsedArgs, json: boolean): void {
         ttl_ms: TTL_EXPLORE_MS,
         project_id: identity.projectId,
         sample_sources: sampleSources(db, identity.projectId, spec.route, spec.toolClass),
+        ...(audit !== null ? { decision_api: audit } : {}),
       }
     );
   } finally {
@@ -312,12 +414,13 @@ function cmdRoute(args: ParsedArgs, json: boolean): void {
 
 // ---------- gate ----------
 
-function cmdGate(args: ParsedArgs, json: boolean): void {
+async function cmdGate(args: ParsedArgs, json: boolean): Promise<void> {
   const route = parseRoute(requireFlag(args, 'route'));
   const toolClass = requireFlag(args, 'tool-class');
   const riskOverride = parseRisk(optionalFlag(args, 'risk'));
   const conversation = optionalFlag(args, 'conversation') ?? null;
   const forkOpt = optionalFlag(args, 'fork');
+  const apiFlags = parseDecisionApiFlags(args);
   const theta = resolveSharpTheta(args);
   const identity = resolveIdentity(optionalFlag(args, 'project'));
   const db = openWriter(dbFlag(args));
@@ -330,7 +433,43 @@ function cmdGate(args: ParsedArgs, json: boolean): void {
       conversationId: conversation,
       sharpThreshold: theta,
     });
-    const { post, forced, decision } = ev;
+    const { post, forced } = ev;
+    let { decision } = ev;
+    let finalP = post.p;
+    // gate 경로 로컬 위험도는 --risk 오버라이드뿐 — API는 상향만 가능, 'high'는 우회 불가
+    const localRisk: RiskLevel = riskOverride ?? 'low';
+    const api =
+      apiFlags.mode === 'off'
+        ? null
+        : await applyDecisionApi({
+            mode: apiFlags.mode,
+            adapter: createDecisionAdapter(apiFlags.mode),
+            localDecision: ev.decision,
+            pLocal: post.p,
+            sharpThreshold: ev.sharpThreshold,
+            basis: post.basis,
+            sharpEligible: true,
+            localRisk,
+            forcedSplit: forced.forcedSplit,
+            forceApiEval: apiFlags.apiEval || apiFlags.context !== null,
+            adapterInput: {
+              projectId: identity.projectId,
+              route,
+              toolClass,
+              basis: post.basis,
+              pLocal: post.p,
+              riskLevel: localRisk,
+              samples: post.samples,
+              consecutiveErrors: post.consecutiveErrors,
+              context: apiFlags.context,
+            },
+          });
+    let audit: DecisionApiAudit | null = null;
+    if (api) {
+      decision = api.decision;
+      finalP = api.p;
+      audit = api.audit;
+    }
     let forkId: string;
     if (forkOpt) {
       const fork = getFork(db, forkOpt);
@@ -339,6 +478,7 @@ function cmdGate(args: ParsedArgs, json: boolean): void {
       forkId = forkOpt;
       // PB-1: 열린 구간이 없으면(레거시 발행 fork 등) 현재 attempt의 wait 구간을 멱등 보장
       ensureForkWaitInterval(db, forkId);
+      if (audit !== null) mergeForkDecisionApi(db, forkId, audit);
     } else {
       forkId = issueFork(db, {
         projectId: identity.projectId,
@@ -346,22 +486,23 @@ function cmdGate(args: ParsedArgs, json: boolean): void {
         route,
         toolClass,
         decision,
-        pAtGate: post.p,
+        pAtGate: finalP,
         basisAtGate: post.basis,
         forcedSplit: forced.forcedSplit,
         conversationId: conversation,
         ttlMs: TTL_CODING_MS,
+        metadata: audit !== null ? { decision_api: audit } : undefined,
       });
     }
     emit(
       json,
       () =>
-        `[gate] ${route}/${toolClass} → ${decision.toUpperCase()}${forced.forcedSplit ? ' (forced)' : ''} p=${post.p.toFixed(3)} (${post.basis}, n=${post.samples}) fork=${forkId}`,
+        `[gate] ${route}/${toolClass} → ${decision.toUpperCase()}${forced.forcedSplit ? ' (forced)' : ''} p=${finalP.toFixed(3)} (${post.basis}, n=${post.samples}) fork=${forkId}${apiSuffix(audit)}`,
       {
         fork_id: forkId,
         route,
         tool_class: toolClass,
-        p: post.p,
+        p: finalP,
         basis: post.basis,
         samples: post.samples,
         consecutive_errors: forced.keyConsecutiveErrors,
@@ -374,6 +515,7 @@ function cmdGate(args: ParsedArgs, json: boolean): void {
         ttl_ms: TTL_CODING_MS,
         project_id: identity.projectId,
         sample_sources: sampleSources(db, identity.projectId, route, toolClass),
+        ...(audit !== null ? { decision_api: audit } : {}),
       }
     );
   } finally {
@@ -1355,8 +1497,8 @@ function fallbackJson(cmd: string, err: Error, args: ParsedArgs): Record<string,
 const HELP = `dg — decision gate CLI (plan-r2.1 §4.7)
 
 사용법:
-  dg route --task-kind <explore_read|code_search|static_check|single_edit|multi_edit|test_or_deploy|swarm_fanout> [--project <dir>] [--title <text>] [--json]
-  dg gate --route <r> --tool-class <c> [--fork <id>] [--risk <low|medium|high>] [--conversation <id>] [--project <dir>] [--json]
+  dg route --task-kind <explore_read|code_search|static_check|single_edit|multi_edit|test_or_deploy|swarm_fanout> [--project <dir>] [--title <text>] [--context <text>] [--decision-api <off|shadow|on>] [--api-eval] [--json]
+  dg gate --route <r> --tool-class <c> [--fork <id>] [--risk <low|medium|high>] [--conversation <id>] [--project <dir>] [--context <text>] [--decision-api <off|shadow|on>] [--api-eval] [--json]
   dg close --fork <id> --outcome <ok|fail|rerouted> [--ok 0|1] [--by dispatcher|lead|worker|ttl|verifier] [--reason <text>] [--json]
   dg touch --fork <id> [--ttl-ms <n>] [--json]
   dg record --route <r> --tool-class <c> --tool <name> --ok <0|1> [--weight 1.0] [--is-retry] [--conversation <id>] [--source <hook|agy_stream|transcript|rest_api|cli|wrap|ttl_orphan|neon_backprop>] [--target-hash <h>] [--error <snippet>] [--step <n>] [--command <text>] [--dedupe <key>] [--fork <id>] [--project <dir>] [--json]
@@ -1377,9 +1519,11 @@ const HELP = `dg — decision gate CLI (plan-r2.1 §4.7)
 라우트 r: file_select|tool_select|retry_or_abort|delegate_swarm
 공용: --db <path>는 GEMINI_TRICK_DB_PATH보다 우선. --roster <path>/--profile <name> 명시 시
 route·gate에 roster 기반 동적 θ_sharp 적용 (미지정 시 0.70).
+Decision API: DECISION_API=off|shadow|on + GEMINI_DECISION_API_KEY (키 부재 시 off 강등).
+--decision-api는 env를 덮어쓰고, --context/--api-eval은 measured 기반에서도 평가를 강제한다.
 DB 경로: GEMINI_TRICK_DB_PATH 환경변수 또는 기본 ~/.local/state/gemini-trick/decision.db`;
 
-function main(): void {
+async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
     process.stdout.write(`${HELP}\n`);
@@ -1399,10 +1543,10 @@ function main(): void {
     json = optionalFlag(args, 'json') === '1';
     switch (cmd) {
       case 'route':
-        cmdRoute(args, json);
+        await cmdRoute(args, json);
         break;
       case 'gate':
-        cmdGate(args, json);
+        await cmdGate(args, json);
         break;
       case 'close':
         cmdClose(args, json);
@@ -1475,4 +1619,7 @@ function main(): void {
   }
 }
 
-main();
+main().catch((err) => {
+  process.stderr.write(`[dg] fatal: ${(err as Error).message}\n`);
+  process.exit(1);
+});

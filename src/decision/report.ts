@@ -89,6 +89,22 @@ export interface OrphanStallStats {
   level: 'none' | 'warn' | 'critical';
 }
 
+/**
+ * Decision API shadow/on 평가 집계 — `forks.metadata_json.decision_api` 파싱 결과.
+ * API 평가가 없던 윈도우는 모든 필드가 0이다(섹션 자체는 항상 결정적 형태로 존재).
+ */
+export interface DecisionApiShadowSummary {
+  total: number;
+  ok: number;
+  errors: number;
+  shadow_count: number;
+  on_applied_count: number;
+  disagreed: number;
+  disagreement_rate: number | null;
+  total_input_tokens: number;
+  total_cost_usd: number;
+}
+
 export interface RuleCandidateReport {
   command: 'report';
   schema_version: 1;
@@ -113,6 +129,8 @@ export interface RuleCandidateReport {
   };
   /** 채택 임계를 만족한 후보 식별자(예: `tool_repetition:run_command`) */
   candidates: string[];
+  /** Decision API 감사 집계 — 읽기전용, total=0이면 마크다운 섹션 미출력 */
+  decisionApiShadow: DecisionApiShadowSummary;
 }
 
 export interface ReportOptions {
@@ -314,6 +332,58 @@ export function generateRuleCandidateReport(db: DatabaseSync, opts: ReportOption
     level: worst >= 0.25 ? 'critical' : worst >= 0.1 ? 'warn' : 'none',
   };
 
+  // Decision API 감사 집계 — forks.metadata_json.decision_api (손상 JSON은 json_valid로 배제)
+  let decisionApiShadow: DecisionApiShadowSummary = {
+    total: 0,
+    ok: 0,
+    errors: 0,
+    shadow_count: 0,
+    on_applied_count: 0,
+    disagreed: 0,
+    disagreement_rate: null,
+    total_input_tokens: 0,
+    total_cost_usd: 0,
+  };
+  if (forksTable) {
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) AS total,
+                SUM(CASE WHEN json_extract(metadata_json, '$.decision_api.ok') = 1 THEN 1 ELSE 0 END) AS ok_cnt,
+                SUM(CASE WHEN json_extract(metadata_json, '$.decision_api.mode') = 'shadow' THEN 1 ELSE 0 END) AS shadow_cnt,
+                SUM(CASE WHEN json_extract(metadata_json, '$.decision_api.mode') = 'on'
+                          AND json_extract(metadata_json, '$.decision_api.applied') = 1 THEN 1 ELSE 0 END) AS on_applied,
+                SUM(CASE WHEN json_extract(metadata_json, '$.decision_api.disagreed') = 1 THEN 1 ELSE 0 END) AS disagreed,
+                COALESCE(SUM(json_extract(metadata_json, '$.decision_api.input_tokens')), 0) AS input_tokens,
+                COALESCE(SUM(json_extract(metadata_json, '$.decision_api.cost_usd')), 0) AS cost_usd
+         FROM forks
+         WHERE ${forkWhere}
+           AND json_valid(metadata_json)
+           AND json_type(metadata_json, '$.decision_api') = 'object'`
+      )
+      .get(...forkArgs) as {
+        total: number;
+        ok_cnt: number | null;
+        shadow_cnt: number | null;
+        on_applied: number | null;
+        disagreed: number | null;
+        input_tokens: number | null;
+        cost_usd: number | null;
+      };
+    const total = Number(row?.total ?? 0);
+    const disagreed = Number(row?.disagreed ?? 0);
+    decisionApiShadow = {
+      total,
+      ok: Number(row?.ok_cnt ?? 0),
+      errors: total - Number(row?.ok_cnt ?? 0),
+      shadow_count: Number(row?.shadow_cnt ?? 0),
+      on_applied_count: Number(row?.on_applied ?? 0),
+      disagreed,
+      disagreement_rate: total > 0 ? disagreed / total : null,
+      total_input_tokens: Number(row?.input_tokens ?? 0),
+      total_cost_usd: Number(row?.cost_usd ?? 0),
+    };
+  }
+
   const candidates: string[] = [];
   if (toolRepetition.available) {
     for (const r of toolRepetition.rows) {
@@ -338,6 +408,7 @@ export function generateRuleCandidateReport(db: DatabaseSync, opts: ReportOption
     sections: { tool_repetition: toolRepetition, pingpong, failure_causes: failureCauses, orphan_stall: orphanStall },
     thresholds: { tool_min_events: 5, pingpong_ratio: 0.15, cause_min_count: 3, orphan_warn: 0.1, orphan_critical: 0.25 },
     candidates,
+    decisionApiShadow,
   };
 }
 
@@ -417,6 +488,17 @@ export function formatReportMarkdown(report: RuleCandidateReport): string {
   }
   lines.push(`- 경고 임계 ${t.orphan_warn} / 심각 임계 ${t.orphan_critical}`);
   lines.push('');
+
+  const da = report.decisionApiShadow;
+  if (da && da.total > 0) {
+    lines.push('## Decision API Shadow 요약');
+    lines.push(
+      `- API 평가: ${da.total}건 (shadow ${da.shadow_count} · on+적용 ${da.on_applied_count} · 오류 ${da.errors})`
+    );
+    lines.push(`- 로컬 판정과 불일치: ${da.disagreed}건 (불일치율 ${fmtRatio(da.disagreement_rate)})`);
+    lines.push(`- 입력 토큰 합계: ${da.total_input_tokens} / 추정 비용: $${da.total_cost_usd.toFixed(6)}`);
+    lines.push('');
+  }
 
   lines.push('## ⑤ 적용 방법 (수동)');
   lines.push('1. 위 표에서 채택할 항목만 고른다.');

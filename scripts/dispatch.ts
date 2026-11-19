@@ -30,6 +30,14 @@ import { fileURLToPath } from 'node:url';
 import type { DatabaseSync } from 'node:sqlite';
 import { getAgyBudget, openDbSafe, resolveDbPath, resolveProjectIdentity } from '../src/decision/db.ts';
 import {
+  applyDecisionApi,
+  createDecisionAdapter,
+  isDecisionApiMode,
+  parseDecisionApiMode,
+  type DecisionApiAudit,
+  type DecisionApiMode,
+} from '../src/decision/adapter.ts';
+import {
   acquireScopeLease,
   escalateRisk,
   evaluateRoute,
@@ -175,6 +183,8 @@ export interface DispatchPlan {
   roleSummary: Record<string, string>;
   /** PB-2A — 프로필 비용·쿼터 기반 동적 sharp 임계치 θ_sharp */
   sharp_threshold: number;
+  /** Decision API 감사 — shadow/on 경로에서 API 평가가 실제 수행됐을 때만 존재 */
+  decision_api?: DecisionApiAudit;
 }
 
 function emptyPlan(runId: string, dbPath: string): DispatchPlan {
@@ -239,6 +249,18 @@ const NO_FORCED: ForcedState = {
  * - 실행 모드: `resolveDbPath()`(또는 명시 dbPath)에 `settleOrphans` 후 fork를 발행한다.
  */
 export function planDispatch(input: PlanDispatchInput): DispatchPlan {
+  return planDispatchInner(input, null);
+}
+
+/** Decision API 오버라이드 — applyDecisionApi 결과를 계획 산출에 주입한다 */
+interface ApiOverride {
+  decision: 'sharp' | 'split';
+  p: number;
+  risk: RiskLevel;
+  audit: DecisionApiAudit | null;
+}
+
+function planDispatchInner(input: PlanDispatchInput, api: ApiOverride | null): DispatchPlan {
   const runId = input.runId ?? generateRunId();
   const dryRun = input.dryRun === true;
   const repoDir = input.repoDir;
@@ -251,7 +273,7 @@ export function planDispatch(input: PlanDispatchInput): DispatchPlan {
     plan.targetRepo = repoDir;
     return plan;
   }
-  const risk = escalateRisk(spec.defaultRisk, input.risk);
+  let risk = escalateRisk(spec.defaultRisk, input.risk);
   const identity = resolveProjectIdentity(repoDir);
 
   // W3.5 — 역할↔모델 바인딩을 roster.json에서 해석 (dispatch는 기본 프로필 사용)
@@ -316,6 +338,17 @@ export function planDispatch(input: PlanDispatchInput): DispatchPlan {
         : 'split';
   }
 
+  // Decision API 오버라이드 — on+applied 판정만 decision/p/risk에 반영.
+  // shadow·실패·미실행 경로는 로컬 결과를 절대 건드리지 않는다.
+  if (api?.audit) {
+    plan.decision_api = api.audit;
+    if (api.audit.applied) {
+      decision = api.decision;
+      post = { ...post, p: api.p };
+      risk = api.risk;
+    }
+  }
+
   const idx = input.idx ?? 0;
   // 동시성 상한 (§6.4): 탐색 ≤4, 코딩 ≤2
   const expectedSession = decision === 'sharp' ? `exp-${idx}-${runId}` : `lead-${runId}`;
@@ -360,13 +393,19 @@ export function planDispatch(input: PlanDispatchInput): DispatchPlan {
         ttlMs: TTL_EXPLORE_MS,
         title: input.taskFile ?? null,
         // 점유 리스는 실제 디스패치(비 deferred) 때만 기록 — deferred fork는 스코프를 홀드하지 않는다
-        metadata: deferred
-          ? undefined
-          : {
-              repo_scope: repoDir,
-              lease_owner: expectedSession,
-              lease_until_ms: Date.now() + TTL_EXPLORE_MS,
-            },
+        metadata:
+          deferred && !api?.audit
+            ? undefined
+            : {
+                ...(deferred
+                  ? {}
+                  : {
+                      repo_scope: repoDir,
+                      lease_owner: expectedSession,
+                      lease_until_ms: Date.now() + TTL_EXPLORE_MS,
+                    }),
+                ...(api?.audit ? { decision_api: api.audit } : {}),
+              },
       });
     } catch {
       forkId = null;
@@ -477,13 +516,146 @@ export function planDispatch(input: PlanDispatchInput): DispatchPlan {
   return plan;
 }
 
+// ---------- Decision API 디스패치 ----------
+
+export interface PlanDispatchWithApiInput extends PlanDispatchInput {
+  /** 모드 오버라이드 — 생략 시 `DECISION_API` env. `off`면 planDispatch와 바이트 동등 */
+  decisionApi?: DecisionApiMode;
+  /** 작업 배경 스니펫 — API 프롬프트에 리댁션 후 포함 */
+  context?: string;
+  /** measured 기반에서도 API 평가 강제 (--api-eval) */
+  apiEval?: boolean;
+  /** 모드·어댑터 설정에 사용할 env — 생략 시 process.env */
+  env?: Record<string, string | undefined>;
+}
+
+interface LocalDispatchEval {
+  spec: NonNullable<ReturnType<typeof taskKindSpec>>;
+  risk: RiskLevel;
+  post: PosteriorResult;
+  forced: ForcedState;
+  localDecision: 'sharp' | 'split';
+  sharpThreshold: number;
+  basis: 'prior' | 'measured';
+}
+
+/**
+ * planDispatchInner와 동일한 로컬 판정만 재계산 — 쓰기·fork 발행·리스 없이
+ * Decision API 입력을 조립하기 위한 읽기 전용 프로브.
+ */
+function probeDispatchLocal(input: PlanDispatchWithApiInput): LocalDispatchEval | null {
+  const spec = taskKindSpec(input.taskKind);
+  if (!spec) return null;
+  const risk = escalateRisk(spec.defaultRisk, input.risk);
+  const repoDir = input.repoDir;
+  const dryRun = input.dryRun === true;
+  const dbPath = input.dbPath ?? (dryRun ? ':memory:' : resolveDbPath());
+  const identity = resolveProjectIdentity(repoDir);
+  const loadedRoster = loadRosterConfig({ rosterPath: input.rosterPath, repoDir });
+  const rosterProfile = resolveRosterProfile(loadedRoster.config, loadedRoster.config.defaultProfile).profile;
+
+  let db: DatabaseSync | null = null;
+  try {
+    db = input.dbPath
+      ? openDbSafe(input.dbPath, { readOnly: true, busyTimeoutMs: 1000 })
+      : dryRun
+        ? openDbSafe(':memory:', { busyTimeoutMs: 250 })
+        : openDbSafe(dbPath, { readOnly: true, busyTimeoutMs: 1000 });
+  } catch {
+    db = null;
+  }
+
+  const bucketUsage: Record<string, number> = {};
+  if (db && !dryRun) {
+    try {
+      const budget = getAgyBudget(db);
+      if (budget) bucketUsage['agy'] = budget.turnsUsed;
+    } catch {
+      /* 예산 조회 실패 — 사용량 0으로 진행 */
+    }
+  }
+  const sharpThreshold = computeDynamicSharpThreshold({ profile: rosterProfile, bucketUsage }).threshold;
+
+  let post: PosteriorResult = priorOnly(spec);
+  let forced: ForcedState = NO_FORCED;
+  if (db) {
+    try {
+      const ev = evaluateRoute(db, {
+        projectId: identity.projectId,
+        taskKind: spec.taskKind,
+        risk,
+        sharpThreshold,
+      });
+      if (ev) {
+        post = ev.post;
+        forced = ev.forced;
+      }
+    } catch {
+      /* 조회 실패 — prior 폴백 */
+    }
+    try {
+      db.close();
+    } catch {
+      /* 무시 */
+    }
+  }
+  const localDecision = forced.forcedSplit
+    ? 'split'
+    : spec.sharpEligible && !spec.requiresWrite && risk === 'low' && post.p >= sharpThreshold && post.consecutiveErrors < 2
+      ? 'sharp'
+      : 'split';
+  return { spec, risk, post, forced, localDecision, sharpThreshold, basis: post.basis };
+}
+
+/**
+ * Decision API 적용 디스패치 — `off`는 `planDispatch`와 완전 동일 결과.
+ * `dryRun: true`는 어떤 모드에서도 HTTP 0·DB 쓰기 0이다(프로브마저 생략).
+ */
+export async function planDispatchWithDecisionApi(input: PlanDispatchWithApiInput): Promise<DispatchPlan> {
+  const env = input.env ?? process.env;
+  const mode = parseDecisionApiMode(env, input.decisionApi);
+  if (mode === 'off' || input.dryRun === true) {
+    return planDispatch(input);
+  }
+  const probe = probeDispatchLocal(input);
+  if (probe === null) return planDispatch(input);
+  const identity = resolveProjectIdentity(input.repoDir);
+  const api = await applyDecisionApi({
+    mode,
+    adapter: createDecisionAdapter(mode, env),
+    localDecision: probe.localDecision,
+    pLocal: probe.post.p,
+    sharpThreshold: probe.sharpThreshold,
+    basis: probe.basis,
+    sharpEligible: probe.spec.sharpEligible,
+    localRisk: probe.risk,
+    forcedSplit: probe.forced.forcedSplit,
+    forceApiEval: input.apiEval === true || (input.context?.trim() ?? '') !== '',
+    adapterInput: {
+      projectId: identity.projectId,
+      route: probe.spec.route,
+      toolClass: probe.spec.toolClass,
+      basis: probe.basis,
+      pLocal: probe.post.p,
+      taskKind: probe.spec.taskKind,
+      requiresWrite: probe.spec.requiresWrite,
+      riskLevel: probe.risk,
+      samples: probe.post.samples,
+      consecutiveErrors: probe.post.consecutiveErrors,
+      title: input.taskFile ?? null,
+      context: input.context ?? null,
+    },
+  });
+  return planDispatchInner(input, { decision: api.decision, p: api.p, risk: api.risk, audit: api.audit });
+}
+
 // ---------- CLI ----------
 
 function parseCli(argv: string[]): Record<string, string> {
   const out: Record<string, string> = {};
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
-    if (arg === '--dry-run' || arg === '--json') {
+    if (arg === '--dry-run' || arg === '--json' || arg === '--api-eval') {
       out[arg.slice(2)] = '1';
       continue;
     }
@@ -505,21 +677,7 @@ function isMainModule(): boolean {
   return path.resolve(entry) === fileURLToPath(import.meta.url);
 }
 
-if (isMainModule()) {
-  const flags = parseCli(process.argv.slice(2));
-  const plan = planDispatch({
-    taskKind: flags['task-kind'] ?? '',
-    risk: flags.risk as RiskLevel | undefined,
-    repoDir: flags.repo ?? flags.project ?? process.cwd(),
-    dbPath: flags.db,
-    runId: flags['run-id'],
-    dryRun: flags['dry-run'] === '1',
-    taskFile: flags['task-file'],
-    idx: flags.idx !== undefined ? Number(flags.idx) : undefined,
-    activeExplore: flags['active-explore'] !== undefined ? Number(flags['active-explore']) : undefined,
-    activeCoding: flags['active-coding'] !== undefined ? Number(flags['active-coding']) : undefined,
-    rosterPath: flags.roster,
-  });
+function renderPlan(plan: DispatchPlan, flags: Record<string, string>): number {
   if (flags.json === '1') {
     process.stdout.write(`${JSON.stringify(plan)}\n`);
   } else {
@@ -536,7 +694,44 @@ if (isMainModule()) {
       process.stdout.write(`  ${argv.join(' ')}\n`);
     }
     if (plan.carbonBriefPath) process.stdout.write(`  carbon brief: ${plan.carbonBriefPath}\n`);
+    if (plan.decision_api) {
+      const a = plan.decision_api;
+      process.stdout.write(
+        `  decision_api: ${a.mode} ${a.ok ? `p_api=${a.p_api?.toFixed(3)} ${a.applied ? 'applied' : a.disagreed ? 'disagreed' : 'agreed'}` : 'fallback'}\n`
+      );
+    }
     if (plan.reason) process.stdout.write(`  reason: ${plan.reason}\n`);
   }
-  process.exit(plan.ok ? 0 : 2);
+  return plan.ok ? 0 : 2;
+}
+
+if (isMainModule()) {
+  const flags = parseCli(process.argv.slice(2));
+  const rawMode = flags['decision-api'];
+  if (rawMode !== undefined && !isDecisionApiMode(rawMode)) {
+    process.stderr.write(`[dispatch] invalid --decision-api "${rawMode}" (allowed: off|shadow|on)\n`);
+    process.exit(2);
+  }
+  const input: PlanDispatchWithApiInput = {
+    taskKind: flags['task-kind'] ?? '',
+    risk: flags.risk as RiskLevel | undefined,
+    repoDir: flags.repo ?? flags.project ?? process.cwd(),
+    dbPath: flags.db,
+    runId: flags['run-id'],
+    dryRun: flags['dry-run'] === '1',
+    taskFile: flags['task-file'],
+    idx: flags.idx !== undefined ? Number(flags.idx) : undefined,
+    activeExplore: flags['active-explore'] !== undefined ? Number(flags['active-explore']) : undefined,
+    activeCoding: flags['active-coding'] !== undefined ? Number(flags['active-coding']) : undefined,
+    rosterPath: flags.roster,
+    decisionApi: rawMode as DecisionApiMode | undefined,
+    context: flags.context,
+    apiEval: flags['api-eval'] === '1',
+  };
+  void planDispatchWithDecisionApi(input)
+    .then((plan) => process.exit(renderPlan(plan, flags)))
+    .catch((err) => {
+      process.stderr.write(`[dispatch] fatal: ${(err as Error).message}\n`);
+      process.exit(1);
+    });
 }

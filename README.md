@@ -120,7 +120,13 @@ cp .herdr/roster.example.json ~/.config/herdr-quad/roster.json
 | `PI_BIN` / `HERDR_PI_BIN` | `pi` 실행 파일 경로 오버라이드 |
 | `AGY_BIN` / `DEVIN_BIN` / `HC_BIN` / `CLAUDE_BIN` | 각 CLI 실행 파일 경로 오버라이드 |
 | `HERDR_AGY_TURN_BUDGET` | agy 일일 턴 예산 (기본 20 — 초과 시 프로필 자동 강등) |
-| `DECISION_API` / `GEMINI_DECISION_API_KEY` | TUI 라이브 모드 Gemini REST API 폴백용 |
+| `DECISION_API` | Decision API 모드 — `off`(기본, 네트워크 0) / `shadow`(병행 평가·로컬 불변) / `on`(콜드스타트 `basis:prior`만 API 판정 적용) |
+| `GEMINI_DECISION_API_KEY` | Decision API 인증 키 — `x-goog-api-key` 헤더로만 전송(URL `?key=` 미사용). 부재·공백 시 `shadow`/`on`도 `off`로 강등 |
+| `DECISION_API_BASE_URL` | 엔드포인트 오버라이드 (기본 `https://generativelanguage.googleapis.com`, `POST {base}/v1beta/decisions`) |
+| `DECISION_API_MODEL` | 모델 오버라이드 (기본 `gemini-decision-1`) |
+| `DECISION_API_TIMEOUT_MS` | 요청 타임아웃 ms (기본 3000, 50–30000 클램프) |
+
+`dg route`/`dg gate`/`scripts/dispatch.ts`는 `--decision-api off|shadow|on`(env 덮어쓰기), `--context <text>`(리댁션 후 프롬프트 포함), `--api-eval`(measured 기반에서도 평가 강제) 플래그를 지원한다. 모든 실패는 로컬 EWMA로 fail-safe 폴백하고, 감사 결과는 `forks.metadata_json.decision_api`에 기록돼 `dg report`의 `decisionApiShadow` 요약으로 집계된다. `decision_events`에는 아무것도 기록되지 않는다(로컬 EWMA 오염 0).
 
 > **API 키는 절대 이 저장소에 커밋하지 않는다.** 키 주입은 환경변수로만 하고, `.env*` 파일은 `.gitignore`로 차단돼 있다.
 
