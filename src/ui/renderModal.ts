@@ -72,41 +72,31 @@ function renderHelpModal(buf: CellBuffer, rect: Rect): void {
   const iw = rect.w - 6;
   let cy = rect.y + 2;
 
-  buf.writeText(ix, cy++, '■ 이 화면의 역할 (관측 vs 제어)', THEME.green, THEME.bgModal, true, iw);
-  const roleRows: ReadonlyArray<readonly [string, string]> = [
-    ['이 TUI (관측·탐색)', '실시간 DB·분기 확률(p)·표본(n)·로그 확인 · 패널 이동(Tab)'],
-    ['', '상세 모달(r/s/n/c/d/l) · 필터(1~5/0) · 일시정지(Space) · 종료(q)'],
-    ['', '백그라운드 유지: hc attach 세션은 Ctrl+\\ 로 detach'],
-    ['제어 (별도 셸 명령)', '작업 배차(dispatch.ts / dg route) · 워커 감시(dg wrap)'],
-    ['', '통계·리포트(dg stats / dg report) · 초기 환경 진단(npm run setup)'],
-    ['', '워커 세션 제어(hc ls / attach / kill)'],
+  buf.writeText(ix, cy++, '■ 이 화면은 뭔가요? (보기 vs 작업 시키기)', THEME.green, THEME.bgModal, true, iw);
+  const introRows: readonly string[] = [
+    '• 이 화면은 실시간 구경 전용 계기판입니다 (여기서 직접 명령을 치지 않습니다).',
+    '• 작업 시키기: 원래 쓰던 AI 채팅창에서 "오케스트레이터로 진행해줘"라고 말씀하세요.',
+    '• 화면 나가기: Ctrl+\\ (백그라운드 유지)  ·  q (모니터 완전히 끄기)',
+    '• 둘러보기: Tab(칸 이동) · Enter(자세히) · 1~5/0(역할별 필터) · Space(잠시 멈춤)',
   ];
-  for (const [k, desc] of roleRows) {
+  for (const line of introRows) {
     if (cy >= rect.y + rect.h - 2) break;
-    buf.writeSegments(
-      ix,
-      cy++,
-      [
-        { text: padRightWidth(k, 21), fg: THEME.orange, bg: THEME.bgModal, bold: true },
-        { text: desc, fg: THEME.fgSoft, bg: THEME.bgModal },
-      ],
-      iw
-    );
+    buf.writeText(ix, cy++, line, THEME.fgSoft, THEME.bgModal, false, iw);
   }
   cy++;
 
   if (cy < rect.y + rect.h - 2) {
-    buf.writeText(ix, cy++, '■ 키보드 네비게이션 (기본 관제 모드)', THEME.orange, THEME.bgModal, true, iw);
+    buf.writeText(ix, cy++, '■ 화면 안에서 쓰는 버튼', THEME.orange, THEME.bgModal, true, iw);
   }
   const keys: ReadonlyArray<readonly [string, string]> = [
-    ['Tab / Shift+Tab', '패널 포커스 순환 (Advisor → Lead → Verifier → Decision Gate → Workers → 기록)'],
-    ['Enter', '현재 포커스된 패널의 상세 드릴다운 모달 열기'],
+    ['Tab / Shift+Tab', '칸 포커스 순환 (Advisor → Lead → Verifier → Decision Gate → Workers → 기록)'],
+    ['Enter', '현재 포커스된 칸의 자세한 내용 모달 열기'],
     ['r / s / n / c / d', '응답(r) · 스웜(s) · Verifier(n) · Advisor(c) · 분기(d) · 로그(l) 모달 열기'],
     ['1~5 / 0', '로그 필터 (1:Lead 2:Workers 3:Decision 4:Verifier 5:Advisor 0:전체)'],
     ['↑ / ↓', '세션 기록 / 응답 전문 스크롤 탐색'],
     ['Space / ← →', '(데모 모드) 재생 일시정지·재개 및 타임라인 ±2초 이동'],
     ['/ 또는 i', '하단 프롬프트 입력 모드 진입 (Esc로 복귀)'],
-    ['q / Ctrl+C', 'TUI 종료'],
+    ['q / Ctrl+C', '모니터 완전히 끄기'],
   ];
 
   for (const [k, desc] of keys) {
@@ -124,9 +114,11 @@ function renderHelpModal(buf: CellBuffer, rect: Rect): void {
 
   cy++;
   if (cy < rect.y + rect.h - 2) {
-    buf.writeText(ix, cy++, '■ 프롬프트 슬래시 명령어 & JSONL 스트림 연동', THEME.blue, THEME.bgModal, true, iw);
+    buf.writeText(ix, cy++, '■ (고급 · 터미널 직접 제어)', THEME.blue, THEME.bgModal, true, iw);
   }
   const cmds: ReadonlyArray<readonly [string, string]> = [
+    ['작업 배차·감시', 'dispatch.ts / dg route · dg wrap · 워커 세션 hc ls / attach / kill'],
+    ['통계·초기 설정', 'dg stats / dg report · 초기 환경 진단 npm run setup'],
     ['/model <name>', '라이브 모델 변경 (예: glm-5.3, deepseek-v4.1-flash, sonnet-4-6)'],
     ['/effort <level>', 'Lead 추론 강도 변경 (low | medium | high | max)'],
     ['/neon [대상]', 'Verifier 독립 교차 검증 실행 (--live 시 실제 verifier 모델 호출)'],

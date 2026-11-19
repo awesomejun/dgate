@@ -944,7 +944,7 @@ function renderFooter(
   const statusStartX = x + Math.max(0, width - statusTotalW);
 
   // 관측 전용(watch/stream) 모드: 가짜 대화형 프롬프트('$ pi █') 대신 읽기전용 상태·제어
-  // 힌트를 푸터 전폭으로 표기한다. 실제 실행·배차는 별도 셸(dg / dispatch.ts)에서 이뤄진다.
+  // 힌트를 푸터 전폭으로 표기한다. 작업 지시는 사용자의 AI 채팅창에서 자연어로 받는다.
   if ((state.mode === 'watch' || state.mode === 'stream') && !state.inputActive) {
     const flashActive = state.statusFlash && Date.now() < state.statusFlashUntil;
     if (flashActive) {
@@ -952,8 +952,8 @@ function renderFooter(
       return;
     }
     const ctlHint =
-      '관측 전용 (실시간 DB·로그)  |  [?]가이드  [Tab]패널  [Enter]상세  [1-5/0]필터  [Space]일시정지  [q]종료';
-    const shellHint = '실행·배차: 별도 셸 dg / dispatch.ts';
+      '관측 전용 (실시간 보기)  |  [?]사용법  [Tab]칸이동  [Enter]자세히  [Space]멈춤  [q]끄기';
+    const shellHint = '작업 지시: AI 채팅창에서 요청 (창만 닫기: Ctrl+\\)';
     const shellW = stringWidth(shellHint);
     buf.writeText(x, y, ctlHint, THEME.muted, THEME.bg, false, Math.max(0, width - shellW - 3));
     if (width > shellW + 24) {

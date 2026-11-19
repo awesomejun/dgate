@@ -407,26 +407,32 @@ function checkContracts(repoDir: string): ContractCheck[] {
     });
   }
   const hooksPath = path.join(repoDir, '.agents', 'hooks.json');
+  if (!fs.existsSync(hooksPath)) {
+    out.push({
+      path: '.agents/hooks.json',
+      ok: true,
+      detail: 'optional (not installed — workers already isolated via --tools; auto-attachable via setup.ts)',
+    });
+    return out;
+  }
   let hooksOk = false;
   let hooksDetail = 'MISSING';
-  if (fs.existsSync(hooksPath)) {
-    try {
-      const cfg = JSON.parse(fs.readFileSync(hooksPath, 'utf8')) as Record<string, any>;
-      const g = cfg['dg-guard']?.PreToolUse?.[0];
-      const c = cfg['dg-collect']?.PostToolUse?.[0];
-      hooksOk =
-        g?.matcher === '*' &&
-        g?.hooks?.[0]?.timeout === 3 &&
-        g?.hooks?.[0]?.command === 'node hooks/dg-hook.ts --guard' &&
-        c?.matcher === '*' &&
-        c?.hooks?.[0]?.timeout === 3 &&
-        c?.hooks?.[0]?.command === 'node hooks/dg-hook.ts --collect';
-      hooksDetail = hooksOk
-        ? 'dg-guard(PreToolUse)+dg-collect(PostToolUse), matcher *, timeout 3, node hooks/dg-hook.ts (N-NEW-1)'
-        : 'schema/command mismatch';
-    } catch (err) {
-      hooksDetail = `parse error: ${(err as Error).message}`;
-    }
+  try {
+    const cfg = JSON.parse(fs.readFileSync(hooksPath, 'utf8')) as Record<string, any>;
+    const g = cfg['dg-guard']?.PreToolUse?.[0];
+    const c = cfg['dg-collect']?.PostToolUse?.[0];
+    hooksOk =
+      g?.matcher === '*' &&
+      g?.hooks?.[0]?.timeout === 3 &&
+      g?.hooks?.[0]?.command === 'node hooks/dg-hook.ts --guard' &&
+      c?.matcher === '*' &&
+      c?.hooks?.[0]?.timeout === 3 &&
+      c?.hooks?.[0]?.command === 'node hooks/dg-hook.ts --collect';
+    hooksDetail = hooksOk
+      ? 'dg-guard(PreToolUse)+dg-collect(PostToolUse), matcher *, timeout 3, node hooks/dg-hook.ts (N-NEW-1)'
+      : 'schema/command mismatch';
+  } catch (err) {
+    hooksDetail = `parse error: ${(err as Error).message}`;
   }
   out.push({ path: '.agents/hooks.json', ok: hooksOk, detail: hooksDetail });
   return out;

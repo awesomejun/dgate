@@ -190,20 +190,23 @@ test('6. cli --snapshot — HERDR_ROSTER_PATH 커스텀 로스터 라벨 실반�
   }
 });
 
-test('7. watch 모드 — 읽기전용 배지 + 관측 전용 푸터 (가짜 /명령어 프롬프트 미노출)', () => {
+test('7. watch 모드 — 읽기전용 배지 + 순 한국어 관측 푸터 (전문용어·가짜 프롬프트 미노출)', () => {
   const state = createInitialState('watch');
   const text = renderFrame(state, 148, 43).toPlainString();
 
   assert.ok(text.includes('[읽기전용 관측 · WATCH]'), 'watch read-only mode badge');
   assert.ok(text.includes('관측 전용'), 'honest read-only footer status hint');
+  assert.ok(text.includes('작업 지시: AI 채팅창에서 요청'), 'plain-Korean dispatch hint in footer');
   assert.ok(!text.includes('/명령어 입력'), 'fake interactive prompt hidden in watch mode');
+  assert.ok(!text.includes('dg / dispatch.ts'), 'no raw dg/dispatch.ts jargon in footer');
 });
 
-test('8. help 모달 — 관측 vs 제어 역할 섹션 + 별도 셸 명령 안내', () => {
+test('8. help 모달 — 쉬운 한국어 안내 + 고급 터미널 명령 하단 분리', () => {
   const state = createInitialState('watch');
   state.modal = 'help';
   const text = renderFrame(state, 148, 43).toPlainString();
 
-  assert.ok(text.includes('이 화면의 역할 (관측 vs 제어)'), 'role clarity section header');
-  assert.ok(text.includes('dispatch.ts'), 'orchestration shell command hint');
+  assert.ok(text.includes('이 화면은 뭔가요?'), 'plain-Korean role clarity header');
+  assert.ok(text.includes('AI 채팅창에서'), 'work request points to the AI chat window');
+  assert.ok(text.includes('고급 · 터미널 직접 제어'), 'CLI details kept under the advanced section');
 });
