@@ -304,10 +304,22 @@ function renderPipelineWires(buf: CellBuffer, state: AppState, L: FullLayout): v
 
   // 데이터 흐름 펄스 애니메이션 (gemini_sub_neon.html의 comet 대응)
   const t = state.simTime;
-  buf.drawPulseAlongPath(pathMainToDec, t * 0.9, THEME.orange, '●');
-  buf.drawPulseAlongPath(pathFanOutLeft, t * 0.42, THEME.blue, '●');
-  buf.drawPulseAlongPath(pathFanOutRight, t * 0.36 + 0.35, THEME.blue, '●');
-  buf.drawPulseAlongPath(pathFanIn, t * 0.28, THEME.fg, '•');
+  const isDemo = state.mode === 'demo';
+  const idlePhases = new Set(['', '대기 중', '완료', '중단됨', 'idle', 'done']);
+  const leadActive = isDemo || !idlePhases.has(state.phase.trim());
+  const hasRunningWorkers =
+    isDemo || (state.liveWorkers !== undefined
+      ? state.liveWorkers.some((w) => w.status === 'running')
+      : state.swarmActive > 0);
+
+  if (leadActive || hasRunningWorkers) {
+    buf.drawPulseAlongPath(pathMainToDec, t * 0.9, THEME.orange, '●');
+  }
+  if (hasRunningWorkers) {
+    buf.drawPulseAlongPath(pathFanOutLeft, t * 0.42, THEME.blue, '●');
+    buf.drawPulseAlongPath(pathFanOutRight, t * 0.36 + 0.35, THEME.blue, '●');
+    buf.drawPulseAlongPath(pathFanIn, t * 0.28, THEME.fg, '•');
+  }
 
   if (pathNeonGo.length > 0) {
     if (state.neonState === 'run') {
@@ -317,13 +329,15 @@ function renderPipelineWires(buf: CellBuffer, state: AppState, L: FullLayout): v
       } else {
         buf.drawPulseAlongPath(pathNeonBack, (nt - 0.5) * 2, THEME.neon, '●');
       }
-    } else if (state.neonState === 'pass') {
+    } else if (isDemo && state.neonState === 'pass') {
       buf.drawPulseAlongPath(pathNeonBack, t * 0.85, THEME.neon, '●');
     }
   }
 }
 
 function renderAdvisoryWires(buf: CellBuffer, state: AppState, L: FullLayout): void {
+  const isDemo = state.mode === 'demo';
+  const advisorActive = isDemo || state.advisorState === '자문 중';
   const startX = L.advisor.x + L.advisor.w;
   const targets: ReadonlyArray<{ row: number; endX: number; idx: 0 | 1 | 2 }> = [
     { row: L.tr0Row, endX: L.main.x - 1, idx: 0 },
@@ -345,7 +359,7 @@ function renderAdvisoryWires(buf: CellBuffer, state: AppState, L: FullLayout): v
     }
     buf.setChar(item.endX, item.row, arrowChar, lineColor, THEME.bg, isOn);
 
-    if (isOn && path.length > 0) {
+    if (isOn && advisorActive && path.length > 0) {
       buf.drawPulseAlongPath(path, state.simTime * 0.75, THEME.borderFocusBoost, '◈');
     }
   }

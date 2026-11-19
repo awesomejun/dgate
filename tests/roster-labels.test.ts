@@ -204,6 +204,41 @@ test('7. watch 모드 — 읽기전용 배지 + 순 한국어 관측 푸터 (전
   assert.ok(!text.includes('dg / dispatch.ts'), 'no raw dg/dispatch.ts jargon in footer');
 });
 
+function wirePulseFrames(mode: 'watch' | 'demo', runningWorker = false) {
+  const state = createInitialState(mode);
+  state.phase = '완료';
+  state.liveRunning = false;
+  state.advisorState = '대기 중';
+  state.activeTrigger = 0; // Keep the last advisory route highlighted after work ends.
+  state.neonState = 'pass';
+  state.swarmActive = 0;
+  state.liveWorkers = runningWorker
+    ? [{ name: 'worker', model: 'test', progress: 25, description: 'test task', status: 'running' }]
+    : [];
+
+  return [1.0, 2.7].map((simTime) =>
+    renderFrame({ ...state, simTime }, 148, 43).toPlainString()
+  );
+}
+
+test('wire pulses: idle watch frames stay identical after verification passes', () => {
+  const [first, later] = wirePulseFrames('watch');
+  assert.ok(first === later, 'changing only simTime must not change the idle frame');
+  assert.doesNotMatch(first, /◈/, 'the highlighted advisory wire must not pulse while idle');
+});
+
+test('wire pulses: watch frames animate with a running worker', () => {
+  const [first, later] = wirePulseFrames('watch', true);
+  assert.ok(first !== later, 'a running worker must animate the wires');
+  assert.doesNotMatch(first, /◈/, 'worker activity must not animate an idle advisor');
+});
+
+test('wire pulses: demo frames still animate with no running workers', () => {
+  const [first, later] = wirePulseFrames('demo');
+  assert.ok(first !== later, 'demo wires must still animate');
+  assert.match(first, /◈/, 'demo keeps its advisory pulse on the highlighted route');
+});
+
 test('8. help 모달 — 쉬운 한국어 안내 + 고급 터미널 명령 하단 분리', () => {
   const state = createInitialState('watch');
   state.modal = 'help';
