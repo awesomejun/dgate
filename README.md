@@ -67,6 +67,10 @@ node ./src/decision/dg.ts stats --cost --timing && node ./src/decision/dg.ts rep
 ```bash
 git clone <this-repo> && cd <this-repo>
 
+# 0) 환경 진단·온보딩 — 보유 CLI·사용 가능 모델 감지, 역할별 추천 + 맞춤 roster 설정
+npm run setup            # 대화형 위저드 (환경 진단·로스터 맞춤 설정·선택 도구 안내)
+npm run setup:check      # 읽기전용 진단 리포트만 (파일 쓰기 0 — 안전 점검용)
+
 # 1) 오케스트레이션 계획 리허설 (모델 호출 0회, 실기동 0회 — 무조건 안전)
 npm run orchestrate:dry
 
@@ -79,6 +83,8 @@ npm run snapshot
 # 4) 4분할 데모 오케스트레이션 (Herdr App 필요)
 npm run herdr:quad
 ```
+
+> **TUI 관측 vs 제어**: `npm run watch`/`--watch` 관제 화면의 `[읽기전용 관측 · WATCH]` 배지는 **읽기전용 실시간 관측 전용**이다 — DB·분기 확률·로그를 보는 화면일 뿐, 작업 실행·배차·라우팅·워치독 제어는 별도 셸에서 `dg`(또는 `scripts/dispatch.ts`) 명령으로 수행한다.
 
 ---
 

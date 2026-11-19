@@ -13,6 +13,8 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
 - 이 문서에 등장하는 모든 외부 도구·서비스는 **전부 선택(OPTIONAL)**이다: `todo-flow`, `mistology`, `effort-router`, `neverstuck`, `GEMINI_DECISION_API_KEY`(Decision API), `hc`/멀티 CLI 워커. **설치돼 있지 않으면 해당 단계를 조용히 스킵한다** — 없다고 실패하거나 중단하지 않는다.
 - 워커 CLI는 `roster.json`에서 자유롭게 교체한다. `claude`/`codex`/`gemini`/`pi`/`devin` 등 로컬에 있는 아무 CLI나 바인딩할 수 있고, 하나도 없으면 `--dry-run` 리허설과 `dg stats`/`report` 같은 로컬 전용 기능만 사용한다.
 - **경로 변수**: 아래 예시의 `$DECISION_ORCHESTRATOR_ROOT`는 이 저장소를 clone한 루트를 가리킨다. 예: `export DECISION_ORCHESTRATOR_ROOT=/path/to/decision-orchestrator`
+- **최초 사용 시 또는 설정을 모를 때**: `node $DECISION_ORCHESTRATOR_ROOT/scripts/setup.ts --check --json`으로
+  사용자 환경을 먼저 진단해 보유 CLI·사용 가능 모델·미설치 선택 스킬을 맞춤형으로 안내한다.
 
 ## 1. 기존 스킬과의 역할 경계 (중복 금지)
 

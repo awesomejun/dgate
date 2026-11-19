@@ -19,6 +19,8 @@
     "herdr:quad:live": "node ./scripts/herdr-quad-launch.ts --live",
     "herdr:quad:watch": "node ./scripts/herdr-quad-launch.ts --watch",
     "test": "node --test tests/",
+    "setup": "node ./scripts/setup.ts",
+    "setup:check": "node ./scripts/setup.ts --check",
     "dg": "node ./src/decision/dg.ts",
     "orchestrate:dry": "node ./scripts/herdr-quad-launch.ts --mode orchestrate --dry-run"
   },

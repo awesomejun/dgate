@@ -72,7 +72,32 @@ function renderHelpModal(buf: CellBuffer, rect: Rect): void {
   const iw = rect.w - 6;
   let cy = rect.y + 2;
 
-  buf.writeText(ix, cy++, '■ 키보드 네비게이션 (기본 관제 모드)', THEME.orange, THEME.bgModal, true, iw);
+  buf.writeText(ix, cy++, '■ 이 화면의 역할 (관측 vs 제어)', THEME.green, THEME.bgModal, true, iw);
+  const roleRows: ReadonlyArray<readonly [string, string]> = [
+    ['이 TUI (관측·탐색)', '실시간 DB·분기 확률(p)·표본(n)·로그 확인 · 패널 이동(Tab)'],
+    ['', '상세 모달(r/s/n/c/d/l) · 필터(1~5/0) · 일시정지(Space) · 종료(q)'],
+    ['', '백그라운드 유지: hc attach 세션은 Ctrl+\\ 로 detach'],
+    ['제어 (별도 셸 명령)', '작업 배차(dispatch.ts / dg route) · 워커 감시(dg wrap)'],
+    ['', '통계·리포트(dg stats / dg report) · 초기 환경 진단(npm run setup)'],
+    ['', '워커 세션 제어(hc ls / attach / kill)'],
+  ];
+  for (const [k, desc] of roleRows) {
+    if (cy >= rect.y + rect.h - 2) break;
+    buf.writeSegments(
+      ix,
+      cy++,
+      [
+        { text: padRightWidth(k, 21), fg: THEME.orange, bg: THEME.bgModal, bold: true },
+        { text: desc, fg: THEME.fgSoft, bg: THEME.bgModal },
+      ],
+      iw
+    );
+  }
+  cy++;
+
+  if (cy < rect.y + rect.h - 2) {
+    buf.writeText(ix, cy++, '■ 키보드 네비게이션 (기본 관제 모드)', THEME.orange, THEME.bgModal, true, iw);
+  }
   const keys: ReadonlyArray<readonly [string, string]> = [
     ['Tab / Shift+Tab', '패널 포커스 순환 (Advisor → Lead → Verifier → Decision Gate → Workers → 기록)'],
     ['Enter', '현재 포커스된 패널의 상세 드릴다운 모달 열기'],

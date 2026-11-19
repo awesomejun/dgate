@@ -52,9 +52,11 @@ function renderFullLayout(buf: CellBuffer, state: AppState, L: FullLayout): void
     const centerTitle = `${state.cwd} · ${cliName} · ${L.cols}×${L.rows} · ${modeTag}`;
     buf.writeCentered(0, 0, L.cols, centerTitle, THEME.chromeFg, THEME.bgChrome, false);
     const rightChrome =
-      state.mode === 'live'
-        ? '?:도움말  r:응답  n:검증  s:스웜  /:입력'
-        : '?:도움말  n:검증  s:스웜(50)  /:입력';
+      state.mode === 'watch' || state.mode === 'stream'
+        ? '?:도움말  n:검증  s:스웜(50)  q:종료'
+        : state.mode === 'live'
+          ? '?:도움말  r:응답  n:검증  s:스웜  /:입력'
+          : '?:도움말  n:검증  s:스웜(50)  /:입력';
     buf.writeRight(0, 0, L.cols - 2, rightChrome, THEME.chromeFg, THEME.bgChrome);
   }
 
@@ -95,15 +97,37 @@ function renderHeader(
   const title = 'DECISION ORCHESTRATOR TUI';
   buf.writeText(x, y, title, THEME.fg, THEME.bg, true, width);
   const titleW = stringWidth(title);
-  if (width - titleW > 8) {
+
+  // 모드 배지 — 읽기전용 관측(watch/stream)과 대화형 제어(live)/시뮬레이션(demo)을 즉시 구분
+  const modeBadge =
+    state.mode === 'watch'
+      ? '[읽기전용 관측 · WATCH]'
+      : state.mode === 'demo'
+        ? '[시뮬레이션 · DEMO]'
+        : state.mode === 'live'
+          ? '[대화형 제어 · LIVE]'
+          : '[스트림 관측 · STREAM]';
+  const modeBadgeFg =
+    state.mode === 'live'
+      ? THEME.green
+      : state.mode === 'demo'
+        ? THEME.orange
+        : THEME.blue;
+  const badgeW = stringWidth(modeBadge);
+  let leftW = titleW;
+  if (width - leftW > badgeW + 10) {
+    buf.writeText(x + leftW + 1, y, modeBadge, modeBadgeFg, THEME.bg, true, width - leftW - 1);
+    leftW += 1 + badgeW;
+  }
+  if (width - leftW > 8) {
     buf.writeText(
-      x + titleW,
+      x + leftW,
       y,
       ` · profile=${state.rosterLabels.profileName}`,
       THEME.muted,
       THEME.bg,
       false,
-      width - titleW
+      width - leftW
     );
   }
 
@@ -125,7 +149,7 @@ function renderHeader(
     gap.length * 3;
   const startRight = x + width - totalRightW;
 
-  if (startRight > x + 24 + titleW) {
+  if (startRight > x + 24 + leftW) {
     buf.writeSegments(startRight, y, [
       { text: b1, fg: THEME.orange, bg: THEME.bg, bold: true },
       { text: gap, fg: THEME.muted, bg: THEME.bg },
@@ -918,6 +942,25 @@ function renderFooter(
     stringWidth(s4) +
     gap.length * 3;
   const statusStartX = x + Math.max(0, width - statusTotalW);
+
+  // 관측 전용(watch/stream) 모드: 가짜 대화형 프롬프트('$ pi █') 대신 읽기전용 상태·제어
+  // 힌트를 푸터 전폭으로 표기한다. 실제 실행·배차는 별도 셸(dg / dispatch.ts)에서 이뤄진다.
+  if ((state.mode === 'watch' || state.mode === 'stream') && !state.inputActive) {
+    const flashActive = state.statusFlash && Date.now() < state.statusFlashUntil;
+    if (flashActive) {
+      buf.writeText(x, y, `· ${state.statusFlash}`, THEME.orange, THEME.bg, false, width);
+      return;
+    }
+    const ctlHint =
+      '관측 전용 (실시간 DB·로그)  |  [?]가이드  [Tab]패널  [Enter]상세  [1-5/0]필터  [Space]일시정지  [q]종료';
+    const shellHint = '실행·배차: 별도 셸 dg / dispatch.ts';
+    const shellW = stringWidth(shellHint);
+    buf.writeText(x, y, ctlHint, THEME.muted, THEME.bg, false, Math.max(0, width - shellW - 3));
+    if (width > shellW + 24) {
+      buf.writeRight(x, y, width, shellHint, THEME.orange, THEME.bg);
+    }
+    return;
+  }
 
   // 우측 상태 배지 4종
   if (statusStartX > x + 20) {
