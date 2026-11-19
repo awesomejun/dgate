@@ -57,7 +57,7 @@ git clone <this-repo> && cd <this-repo>
 # 1) 오케스트레이션 계획 리허설 (모델 호출 0회, 실기동 0회 — 무조건 안전)
 npm run orchestrate:dry
 
-# 2) 전체 테스트 92건 (외부 의존성 0개)
+# 2) 전체 테스트 115건 (외부 의존성 0개)
 npm test
 
 # 3) 데모 TUI 스냅샷 (터미널에 관제 화면 정적 출력)
@@ -109,6 +109,7 @@ cp .herdr/roster.example.json ~/.config/herdr-quad/roster.json
 - 미지정 필드는 내장 기본값을 상속한다(부분 오버라이드 허용).
 - `bin`은 포터블한 명령 이름(`"pi"` 등)을 권장한다. 절대경로가 필요할 때만 명시.
 - 실행 파일 해석 순서: `bin` 필드 → 환경변수 → `PATH` 탐색 → 관례적 설치 위치(`~/.bun/bin/pi`, `~/.local/bin/agy`).
+- `pricing.relativeCost`(선택) — 역할별 상대비용 가중치. `dg route`/`dg gate`에 `--roster`/`--profile`을 주면 상수 0.70 대신 비용 인식 동적 `θ_sharp`를 산출한다(§5). 미지정 시 슬롯 기본값.
 
 ### 환경변수
 
@@ -142,7 +143,7 @@ cp .herdr/roster.example.json ~/.config/herdr-quad/roster.json
 node ./scripts/herdr-quad-launch.ts --repo /path/to/your-project --mode orchestrate --dry-run
 ```
 
-### `dg` 서브커맨드 (10종)
+### `dg` 서브커맨드 (15종)
 
 ```bash
 node ./src/decision/dg.ts <command> [flags]
@@ -150,15 +151,20 @@ node ./src/decision/dg.ts <command> [flags]
 
 | 명령 | 용도 |
 | :--- | :--- |
-| `route` | 태스크 종류별 `sharp`/`split` 라우팅 판정 (LLM 턴 0) |
-| `gate` | 게이트 진입 시 사후확률·강제 조건 평가 |
+| `route` | 태스크 종류별 `sharp`/`split` 라우팅 판정 (LLM 턴 0). `--roster`/`--profile` 지정 시 비용 인식 동적 `θ_sharp` 적용 |
+| `gate` | 게이트 진입 시 사후확률·강제 조건 평가 (`--roster`/`--profile` 동적 `θ_sharp` 연동) |
 | `close` | fork 종료 처리 (`--outcome ok\|fail\|rerouted`) |
 | `touch` | fork TTL 갱신 (워커 하트비트) |
 | `record` | 도구 사용 결과 표본 기록 (EWMA 입력) |
 | `backprop` | 검증 `[FAIL]`을 원본 fork에 역전파 — 수동 또는 `--verdict-file` 구조화 판정 적용(fail-closed) |
+| `attempt` | fork `generation`·`attempt` 펜스 조회·증가 (`--bump-gen`, DDL v2) |
 | `retro` | fork 회고 마크다운(상태·원인·실패 도구·권고)을 다음 워커 브리프용으로 생성 |
 | `settle-orphans` | TTL 만료 fork 일괄 정산 |
 | `wrap` | 워커 커맨드 래핑 — 워치독 감시·산출물 계약·원자 커밋으로 SSOT 기록 (§5) |
+| `stats` | 비용·실행/대기 시간 통계 (`--cost`·`--timing`·`--days`·`--db`) — 완전 읽기전용, 구간 합집합으로 병렬 중복 제거 |
+| `checkpoint` | 워크트리 체크포인트 `create\|verify\|restore` — git 패치+untracked 스냅숏, sha256 manifest 검증 |
+| `worktree` | `worktree remove` — 체크포인트 검증 통과 전 삭제 물리 차단 (`exit 4`, 우회 불가) |
+| `report` | 읽기전용 규칙 후보 리포트 (`--days`·`--out`) — `--out`은 `<repo>/.herdr/report/` 또는 저장소 외부만 허용 |
 | `compact` | 결정 DB 압축·통계 정리 |
 
 ---
@@ -183,6 +189,21 @@ node ./src/decision/dg.ts <command> [flags]
 
 - **`.herdr/verify/<fork_id>-verdict.json`** — 검증자가 남기는 SSOT 판정 문서(`schema_version: 1`). `decision`은 `pass|rework|fail|human` 4종, `findings[].severity`는 `P0|P1|P2|info`. `dg backprop --verdict-file <path> [--expected-head <sha>] [--max-reworks 2]`가 3중 불변식(스키마·fork_id/HEAD 결속·모순 판정)으로 검증해 fork에 반영한다 — `pass`는 fork→`ok`, `fail`은 역전파, `rework`는 재작업 카운트+w1.0 페널티, `human`/무효·누락·Stale·Replay는 전부 `exit 3` + `waiting_human` 파킹이다. pass에 P0/P1 finding이 있거나 fail/rework에 비공백 evidence가 없으면 모순으로 거부된다.
 - **`dg retro --fork <id> [--out <path>]`** — fork의 상태·원인·시도·재작업 횟수·실패 도구 상위 5건·다음 시도 권고를 리댁션된 마크다운으로 생성해 다음 워커 브리프에 주입한다(opt-in — 자동 생성하지 않는다).
+
+### DDL v2 무중단 마이그레이션·비용 인식 라우팅·시간 통계
+
+- **`PRAGMA user_version = 2` 자동 승격** — v1 결정 DB를 열 때 `VACUUM INTO` 백업 후 단일 `BEGIN IMMEDIATE` 트랜잭션 안에서 `forks` 리빌드·백필·버전 승격을 수행한다(이후 핫패스는 비용 0). v2는 `generation`/`attempt` 펜스와 실행·대기 구간 테이블 `fork_intervals`를 추가하며, `dg attempt --fork <id> [--bump-gen]`이 세대·시도를 관리한다.
+- **비용 인식 동적 `θ_sharp`** — roster의 `pricing.relativeCost`(미지정 시 슬롯 기본값)와 쿼터 희소도 승수 `κ_quota`(일일 예산 50% 초과분부터 제곱 증가, 100% 시 2.0)로 `θ_sharp = clamp((C_eff(explore)+C_switch)/(C_eff(lead)+C_switch), 0.70, 0.90)`을 산출한다 — 비싼 탐색 워커 프로필은 자동 보수 분기. `cost_status` 집계는 `unknown` 표본을 $0으로 위장하지 않는다.
+- **`dg stats` 실행/대기 시간 분리** — `fork_intervals`의 exec/wait/human 구간을 합집합으로 합산해 병렬 워커 중복을 제거한다(`--cost` 비용 집계, `--timing` 구간 통계, `--db` 임의 DB 지정). 읽기전용 연결로 어떤 쓰기 경로도 호출하지 않는다.
+
+### Git-Native 워크트리 체크포인트 & 삭제 게이트
+
+- **`dg checkpoint create|verify|restore`** — worktree의 staged/unstaged `git diff --binary` 패치와 untracked 원본(파일당·총합 12MiB 상한)을 `.herdr/checkpoints/<run_id>/<wt_name>/`에 스냅숏하고 sha256 manifest로 무결성을 검증한다. 경로 순회·제외 대상(`.git`·`node_modules`·`.herdr`·`.verify`·`*.db*`)은 저장·검증·복원에서 동일하게 차단하고, 심볼릭 링크는 대상 경로 문자열만 기록한다.
+- **`dg worktree remove` 삭제 게이트** — "체크포인트 저장 성공 + verify 유효"를 통과하기 전에는 `git worktree remove` 호출에 물리적으로 도달할 수 없다(우회 플래그 없음, 거부 시 `exit 4`).
+
+### 읽기전용 규칙 후보 리포트
+
+- **`dg report [--days 14] [--out <path>]`** — `decision_events`/`forks` 통계에서 사람이 검토할 규칙 후보 4종(도구 반복·핑퐁·FailureCause·고아/스톨)을 구조화 JSON+마크다운으로만 출력한다. 읽기전용 연결 + `PRAGMA query_only` 이중 보장이며, 프롬프트·역할 파일·코드·DB 자동 수정 기능은 존재하지 않는다(자동 변조 영구 금지). `--out`은 `<repo>/.herdr/report/` 내부 또는 저장소 외부 절대경로만 허용한다(allowlist, 심볼릭 링크 우회 차단).
 
 ### 시크릿 3중 방어
 

@@ -2,8 +2,11 @@
 /**
  * `dg` CLI — Decision 게이트 명령 체계 (plan-r2.1 §4.7, 9종).
  *
- * 목적: `route | gate | close | touch | record | backprop | settle-orphans | wrap | compact`
- * 명령으로 태스크 단위 선별 라우팅(LLM 턴 0)·Fork 생명주기·표본 수집을 제어한다.
+ * 목적: `route | gate | close | touch | record | backprop | attempt | retro | settle-orphans |
+ * wrap | compact | stats | checkpoint | worktree | report` 명령으로 태스크 단위 선별
+ * 라우팅(LLM 턴 0)·Fork 생명주기·표본 수집·읽기전용 통계/리포트·워크트리 체크포인트를 제어한다.
+ * PB-2.5: `stats`/`report`는 `readOnly: true`로만 열고 `settleOrphans`를 절대 호출하지
+ * 않으며, `checkpoint`/`worktree remove`는 checkpoint.ts의 삭제 게이트(exitCode 4)를 경유한다.
  *
  * 외부 연결:
  * - 디스패처/리드/워커 셸에서 `node ./src/decision/dg.ts <cmd> …` 로 직접 실행.
@@ -20,27 +23,39 @@ import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
+import {
+  createWorktreeCheckpoint,
+  restoreWorktreeCheckpoint,
+  safeRemoveWorktree,
+  verifyWorktreeCheckpoint,
+} from './checkpoint.ts';
 import { openDbSafe, resolveProjectIdentity } from './db.ts';
 import {
   applyVerdictToFork,
   backpropFork,
+  bumpForkAttempt,
   classifyFailure,
   closeFork,
   collectForkRetroData,
   commitWrapOutcome,
   compactDb,
+  ensureForkWaitInterval,
   evaluateForced,
+  evaluateGate,
+  evaluateRoute,
   getFork,
+  getForkGenAttempt,
   getPosterior,
   isEventSource,
+  isForkLiveStatus,
   isRouteId,
   issueFork,
   markForkWaitingHuman,
+  recordForkIntervalStart,
   recordToolOutcome,
   sampleSources,
   settleOrphans,
   taskKindSpec,
-  escalateRisk,
   touchFork,
   TTL_CODING_MS,
   TTL_EXPLORE_MS,
@@ -51,12 +66,30 @@ import {
   type RouteId,
 } from './engine.ts';
 import { buildSanitizedChildEnv, redactSecrets } from './redact.ts';
+import {
+  formatReportMarkdown,
+  generateRuleCandidateReport,
+  openReportDb,
+  writeReportFileSafe,
+} from './report.ts';
+import { loadRosterConfig, resolveRosterProfile } from './roster.ts';
+import { computeCostStats, computeDynamicSharpThreshold, computeTimingStats } from './stats.ts';
 import { buildRetroMarkdown, validateVerdictFile } from './verdict.ts';
 
 class UsageError extends Error {}
 
 /** 값 없이 단독으로 쓰는 불리언 플래그 */
-const BOOL_FLAGS = new Set(['json', 'is-retry', 'require-stdout-nonempty', 'require-nonempty', 'sanitize-env']);
+const BOOL_FLAGS = new Set([
+  'json',
+  'is-retry',
+  'require-stdout-nonempty',
+  'require-nonempty',
+  'sanitize-env',
+  'bump-gen',
+  'cost',
+  'timing',
+  'force',
+]);
 
 interface ParsedArgs {
   flags: Map<string, string>;
@@ -171,10 +204,42 @@ function fallbackForkId(): string {
   return `fk_fallback_${randomBytes(4).toString('hex')}`;
 }
 
-function openWriter(): DatabaseSync {
-  const db = openDbSafe(undefined, { busyTimeoutMs: 5000 });
+function openWriter(dbPath?: string): DatabaseSync {
+  const db = openDbSafe(dbPath, { busyTimeoutMs: 5000 });
   if (!db) throw new Error('decision db unavailable');
   return db;
+}
+
+/** `--db` 공용 옵션 — 명시 시 `GEMINI_TRICK_DB_PATH`보다 우선 (resolveDbPath 우선순위 그대로) */
+function dbFlag(args: ParsedArgs): string | undefined {
+  return optionalFlag(args, 'db');
+}
+
+/**
+ * 읽기전용 연결 — `stats` 전용. `settleOrphans` 등 쓰기 경로를 절대 타지 않는다
+ * (v1 DB readOnly 안전 — brief-pbwire §3). `report`는 openReportDb를 쓴다.
+ */
+function openReader(dbPath?: string): DatabaseSync {
+  const db = openDbSafe(dbPath, { readOnly: true, busyTimeoutMs: 1000 });
+  if (!db) throw new Error('decision db unavailable');
+  return db;
+}
+
+/**
+ * PB-2.5: `--roster`/`--profile` 명시 시 roster 기반 동적 θ_sharp 산출.
+ * 둘 다 미지정이면 undefined → evaluateRoute/evaluateGate 기본 0.70 경로와 동일.
+ * `--project`는 roster 탐색의 `<repo>/.herdr/roster.json` 후보 디렉터리로도 쓰인다.
+ */
+function resolveSharpTheta(args: ParsedArgs): number | undefined {
+  const rosterPath = optionalFlag(args, 'roster');
+  const profileName = optionalFlag(args, 'profile');
+  if (rosterPath === undefined && profileName === undefined) return undefined;
+  const loaded = loadRosterConfig({
+    rosterPath: rosterPath ?? null,
+    repoDir: optionalFlag(args, 'project') ?? null,
+  });
+  const resolved = resolveRosterProfile(loaded.config, profileName ?? loaded.config.defaultProfile);
+  return computeDynamicSharpThreshold({ profile: resolved.profile }).threshold;
 }
 
 // ---------- route ----------
@@ -189,23 +254,19 @@ function cmdRoute(args: ParsedArgs, json: boolean): void {
   }
   const riskOverride = parseRisk(optionalFlag(args, 'risk'));
   const title = optionalFlag(args, 'title') ?? null;
+  const theta = resolveSharpTheta(args);
   const identity = resolveIdentity(optionalFlag(args, 'project'));
-  const db = openWriter();
+  const db = openWriter(dbFlag(args));
   try {
     settleOrphans(db);
-    const risk = escalateRisk(spec.defaultRisk, riskOverride);
-    const post = getPosterior(db, identity.projectId, spec.route, spec.toolClass);
-    const forced = evaluateForced(db, identity.projectId, spec.route, spec.toolClass, null);
-    let decision: 'sharp' | 'split';
-    if (forced.forcedSplit) {
-      decision = 'split';
-    } else {
-      // §2.0 sharp 패스트패스 4조건 (전부 만족 시에만)
-      decision =
-        spec.sharpEligible && !spec.requiresWrite && risk === 'low' && post.p >= 0.7 && post.consecutiveErrors < 2
-          ? 'sharp'
-          : 'split';
-    }
+    const ev = evaluateRoute(db, {
+      projectId: identity.projectId,
+      taskKind: spec.taskKind,
+      risk: riskOverride,
+      sharpThreshold: theta,
+    });
+    if (!ev) throw new UsageError(`invalid --task-kind "${taskKindRaw}"`); // spec 선행 검증으로 미도달
+    const { post, forced, risk, decision } = ev;
     const forkId = issueFork(db, {
       projectId: identity.projectId,
       projectLabel: identity.projectLabel,
@@ -233,11 +294,12 @@ function cmdRoute(args: ParsedArgs, json: boolean): void {
         basis: post.basis,
         samples: post.samples,
         consecutive_errors: post.consecutiveErrors,
-        session_consec_err: 0,
+        session_consec_err: forced.sessionConsecErr,
         decision,
         forced_split: forced.forcedSplit,
         forced_reason: forced.forcedReason,
         escalate_carbon: forced.escalateCarbon,
+        sharp_threshold: ev.sharpThreshold,
         ttl_ms: TTL_EXPLORE_MS,
         project_id: identity.projectId,
         sample_sources: sampleSources(db, identity.projectId, spec.route, spec.toolClass),
@@ -256,19 +318,27 @@ function cmdGate(args: ParsedArgs, json: boolean): void {
   const riskOverride = parseRisk(optionalFlag(args, 'risk'));
   const conversation = optionalFlag(args, 'conversation') ?? null;
   const forkOpt = optionalFlag(args, 'fork');
+  const theta = resolveSharpTheta(args);
   const identity = resolveIdentity(optionalFlag(args, 'project'));
-  const db = openWriter();
+  const db = openWriter(dbFlag(args));
   try {
     settleOrphans(db);
-    const post = getPosterior(db, identity.projectId, route, toolClass);
-    const forced = evaluateForced(db, identity.projectId, route, toolClass, conversation);
-    const decision: 'sharp' | 'split' = forced.forcedSplit ? 'split' : post.p >= 0.7 ? 'sharp' : 'split';
+    const ev = evaluateGate(db, {
+      projectId: identity.projectId,
+      route,
+      toolClass,
+      conversationId: conversation,
+      sharpThreshold: theta,
+    });
+    const { post, forced, decision } = ev;
     let forkId: string;
     if (forkOpt) {
       const fork = getFork(db, forkOpt);
       if (!fork) throw new UsageError(`fork not found: ${forkOpt}`);
-      if (fork.status !== 'open') throw new UsageError(`fork ${forkOpt} not open (status=${fork.status})`);
+      if (!isForkLiveStatus(fork.status)) throw new UsageError(`fork ${forkOpt} not open (status=${fork.status})`);
       forkId = forkOpt;
+      // PB-1: 열린 구간이 없으면(레거시 발행 fork 등) 현재 attempt의 wait 구간을 멱등 보장
+      ensureForkWaitInterval(db, forkId);
     } else {
       forkId = issueFork(db, {
         projectId: identity.projectId,
@@ -300,6 +370,7 @@ function cmdGate(args: ParsedArgs, json: boolean): void {
         forced_split: forced.forcedSplit,
         forced_reason: forced.forcedReason,
         escalate_carbon: forced.escalateCarbon,
+        sharp_threshold: ev.sharpThreshold,
         ttl_ms: TTL_CODING_MS,
         project_id: identity.projectId,
         sample_sources: sampleSources(db, identity.projectId, route, toolClass),
@@ -344,12 +415,12 @@ function cmdClose(args: ParsedArgs, json: boolean): void {
     throw new UsageError(`--by ${byRaw} not allowed for outcome=${outcome}`);
   }
   const reason = optionalFlag(args, 'reason') ?? null;
-  const db = openWriter();
+  const db = openWriter(dbFlag(args));
   try {
     settleOrphans(db);
     const fork = getFork(db, forkId);
     if (!fork) throw new UsageError(`fork not found: ${forkId}`);
-    if (fork.status !== 'open') throw new UsageError(`fork ${forkId} already closed (status=${fork.status})`);
+    if (!isForkLiveStatus(fork.status)) throw new UsageError(`fork ${forkId} already closed (status=${fork.status})`);
     const res = closeFork(db, forkId, outcome, byRaw, reason);
     emit(
       json,
@@ -366,12 +437,12 @@ function cmdClose(args: ParsedArgs, json: boolean): void {
 function cmdTouch(args: ParsedArgs, json: boolean): void {
   const forkId = requireFlag(args, 'fork');
   const ttlMs = optionalFlag(args, 'ttl-ms') !== undefined ? parseIntFlag(args, 'ttl-ms', 600000) : undefined;
-  const db = openWriter();
+  const db = openWriter(dbFlag(args));
   try {
     settleOrphans(db);
     const fork = getFork(db, forkId);
     if (!fork) throw new UsageError(`fork not found: ${forkId}`);
-    if (fork.status !== 'open') throw new UsageError(`fork ${forkId} not open (status=${fork.status})`);
+    if (!isForkLiveStatus(fork.status)) throw new UsageError(`fork ${forkId} not open (status=${fork.status})`);
     const res = touchFork(db, forkId, ttlMs);
     emit(json, () => `[touch] ${res.forkId} last_touch=${res.lastTouchMs} ttl=${res.ttlMs}`, {
       fork_id: res.forkId,
@@ -403,7 +474,7 @@ function cmdRecord(args: ParsedArgs, json: boolean): void {
   const dedupeKey = optionalFlag(args, 'dedupe') ?? null;
   const forkId = optionalFlag(args, 'fork') ?? null;
   const identity = resolveIdentity(optionalFlag(args, 'project'));
-  const db = openWriter();
+  const db = openWriter(dbFlag(args));
   try {
     settleOrphans(db);
     const res = recordToolOutcome(db, {
@@ -459,7 +530,7 @@ function cmdBackprop(args: ParsedArgs, json: boolean): number | void {
   const verdictFile = optionalFlag(args, 'verdict-file');
   const penalty = parseFloatFlag(args, 'penalty', 2.0);
   const reason = optionalFlag(args, 'reason') ?? null;
-  const db = openWriter();
+  const db = openWriter(dbFlag(args));
   try {
     settleOrphans(db);
     const fork = getFork(db, forkId);
@@ -521,7 +592,7 @@ function cmdBackprop(args: ParsedArgs, json: boolean): number | void {
         return 3;
       }
     }
-    if (fork.status !== 'open' && fork.status !== 'ok') {
+    if (!isForkLiveStatus(fork.status) && fork.status !== 'ok') {
       throw new UsageError(`fork ${forkId} cannot backprop (status=${fork.status})`);
     }
     const res = backpropFork(db, forkId, penalty, reason, { cause: 'gate_fail' });
@@ -540,10 +611,37 @@ function cmdBackprop(args: ParsedArgs, json: boolean): number | void {
   }
 }
 
+// ---------- attempt ----------
+
+/**
+ * `dg attempt --fork <id> [--bump-gen] [--json]` (PB-1 §3.5):
+ * 열린 fork의 attempt를 +1(`--bump-gen`이면 generation도 +1)하고 새 `wait` 구간을
+ * 연다 — 재시도 경계의 펜싱 토큰 갱신에 쓰인다.
+ */
+function cmdAttempt(args: ParsedArgs, json: boolean): void {
+  const forkId = requireFlag(args, 'fork');
+  const bumpGen = optionalFlag(args, 'bump-gen') === '1';
+  const db = openWriter(dbFlag(args));
+  try {
+    settleOrphans(db);
+    const fork = getFork(db, forkId);
+    if (!fork) throw new UsageError(`fork not found: ${forkId}`);
+    if (!isForkLiveStatus(fork.status)) throw new UsageError(`fork ${forkId} not open (status=${fork.status})`);
+    const res = bumpForkAttempt(db, forkId, { bumpGen });
+    emit(
+      json,
+      () => `[attempt] ${res.forkId} → gen=${res.generation} attempt=${res.attempt}${bumpGen ? ' (gen bumped)' : ''}`,
+      { fork_id: res.forkId, generation: res.generation, attempt: res.attempt }
+    );
+  } finally {
+    db.close();
+  }
+}
+
 // ---------- settle-orphans ----------
 
 function cmdSettleOrphans(args: ParsedArgs, json: boolean): void {
-  const db = openWriter();
+  const db = openWriter(dbFlag(args));
   try {
     const res = settleOrphans(db);
     emit(json, () => `[settle-orphans] settled=${res.settled}${res.forkIds.length ? ` (${res.forkIds.join(', ')})` : ''}`, {
@@ -588,6 +686,8 @@ function runWrappedChild(opts: {
   heartbeatMs: number;
   killGraceMs: number;
   onHeartbeat: () => void;
+  /** 스폰 직후 1회 호출 — fork_intervals `exec` 구간 시작 지점 (PB-1 §3.2) */
+  onSpawn?: () => void;
 }): Promise<WrapRunResult> {
   return new Promise((resolve) => {
     const startedAt = Date.now();
@@ -620,6 +720,11 @@ function runWrappedChild(opts: {
       detached: true,
       env: opts.env,
     });
+    try {
+      opts.onSpawn?.();
+    } catch {
+      /* 구간 기록 실패는 실행을 막지 않는다 — 커밋 시점에 열린 구간은 정리됨 */
+    }
 
     child.stdout?.on('data', (chunk: Buffer) => {
       const text = chunk.toString();
@@ -760,12 +865,12 @@ async function cmdWrap(args: ParsedArgs, json: boolean): Promise<number> {
   let forkId: string | null = null;
   let db: DatabaseSync | null = null;
   try {
-    db = openWriter();
+    db = openWriter(dbFlag(args));
     settleOrphans(db);
     if (forkOpt) {
       const fork = getFork(db, forkOpt);
       if (!fork) throw new UsageError(`fork not found: ${forkOpt}`);
-      if (fork.status !== 'open') throw new UsageError(`fork ${forkOpt} not open (status=${fork.status})`);
+      if (!isForkLiveStatus(fork.status)) throw new UsageError(`fork ${forkOpt} not open (status=${fork.status})`);
       forkId = forkOpt;
     } else {
       const post = getPosterior(db, identity.projectId, route, toolClass);
@@ -804,6 +909,14 @@ async function cmdWrap(args: ParsedArgs, json: boolean): Promise<number> {
     ? buildSanitizedChildEnv({ allowKeys: allowEnv })
     : process.env;
 
+  // PB-1 §3.2: 스폰 직후 `exec` 구간을 연다 — fk_fallback 또는 DB 무연결 시 생략
+  const execAttempt =
+    db !== null && !isFallbackFork && forkId !== null ? getForkGenAttempt(db, forkId)?.attempt ?? null : null;
+  const onSpawn = (): void => {
+    if (db === null || isFallbackFork || forkId === null || execAttempt === null) return;
+    recordForkIntervalStart(db, { forkId, attempt: execAttempt, phase: 'exec', nowMs: Date.now() });
+  };
+
   const run = await runWrappedChild({
     command,
     env: childEnv,
@@ -812,6 +925,7 @@ async function cmdWrap(args: ParsedArgs, json: boolean): Promise<number> {
     heartbeatMs,
     killGraceMs,
     onHeartbeat,
+    onSpawn,
   });
 
   // AND 게이트 출력 계약(§2.5): clean exit(0 + 자연 종료)에서만 계약 평가
@@ -935,7 +1049,7 @@ async function cmdWrap(args: ParsedArgs, json: boolean): Promise<number> {
 function cmdCompact(args: ParsedArgs, json: boolean): void {
   const maxEvents = parseIntFlag(args, 'max-events', 50_000);
   const days = parseIntFlag(args, 'days', 30);
-  const db = openWriter();
+  const db = openWriter(dbFlag(args));
   try {
     const res = compactDb(db, maxEvents, days);
     emit(
@@ -992,7 +1106,7 @@ function retroRecommendations(data: {
 function cmdRetro(args: ParsedArgs, json: boolean): void {
   const forkId = requireFlag(args, 'fork');
   const outPath = optionalFlag(args, 'out');
-  const db = openWriter();
+  const db = openWriter(dbFlag(args));
   try {
     const data = collectForkRetroData(db, forkId);
     if (!data) throw new UsageError(`fork not found: ${forkId}`);
@@ -1034,6 +1148,183 @@ function cmdRetro(args: ParsedArgs, json: boolean): void {
   }
 }
 
+// ---------- stats (PB-2.5: readOnly — settleOrphans 절대 금지) ----------
+
+/**
+ * `dg stats [--cost] [--timing] [--project <dir>] [--fork <id>] [--days 14] [--db <path>] [--json]`
+ * `--cost`/`--timing` 둘 다 미지정이면 둘 다 포함한다. 읽기전용 연결로만 열어
+ * v1 DB에서도 파일을 변경하지 않는다.
+ */
+function cmdStats(args: ParsedArgs, json: boolean): void {
+  const wantCost = optionalFlag(args, 'cost') === '1';
+  const wantTiming = optionalFlag(args, 'timing') === '1';
+  const includeCost = wantCost || !wantTiming;
+  const includeTiming = wantTiming || !wantCost;
+  const days = parseIntFlag(args, 'days', 14);
+  const forkId = optionalFlag(args, 'fork') ?? undefined;
+  const projectDir = optionalFlag(args, 'project');
+  const projectId = projectDir !== undefined ? resolveIdentity(projectDir).projectId : undefined;
+  const db = openReader(dbFlag(args));
+  try {
+    const cost = includeCost ? computeCostStats(db, { projectId, days }) : undefined;
+    const timing = includeTiming ? computeTimingStats(db, { projectId, forkId, days }) : undefined;
+    emit(
+      json,
+      () => {
+        const parts: string[] = [];
+        if (cost) {
+          const usd =
+            cost.total_usd_display === null ? 'unavailable' : `$${cost.total_usd_display.toFixed(4)}`;
+          parts.push(
+            `cost events=${cost.total_events} known_usd=${usd} unknown=${cost.unknown_events}${cost.schema_v1 ? ' (schema_v1)' : ''}`
+          );
+        }
+        if (timing) {
+          parts.push(
+            timing.intervals_unavailable
+              ? 'timing intervals_unavailable (v1 schema)'
+              : `timing exec=${timing.execution_ms}ms wait=${timing.wait_ms}ms wall=${timing.wall_ms}ms coverage=${timing.coverage_ratio.toFixed(3)}`
+          );
+        }
+        return `[stats] ${parts.join(' · ')}`;
+      },
+      {
+        cmd: 'stats',
+        project_id: projectId ?? null,
+        days,
+        fork_id: forkId ?? null,
+        cost: cost ?? null,
+        timing: timing ?? null,
+      }
+    );
+  } finally {
+    db.close();
+  }
+}
+
+// ---------- checkpoint / worktree (PB-2.5: B4 삭제 게이트 배선) ----------
+
+/** `dg checkpoint create|verify|restore` — 실패는 exit 1 (게이트 거부 exit 4는 worktree remove 전용) */
+function cmdCheckpoint(sub: string | undefined, args: ParsedArgs, json: boolean): number {
+  if (sub === 'create') {
+    const res = createWorktreeCheckpoint({
+      repoDir: optionalFlag(args, 'repo') ?? process.cwd(),
+      worktreeDir: requireFlag(args, 'worktree'),
+      runId: requireFlag(args, 'run-id'),
+      worktreeName: optionalFlag(args, 'name'),
+      checkpointRoot: optionalFlag(args, 'checkpoint-root'),
+    });
+    if (!res.saved) {
+      for (const e of res.errors) process.stderr.write(`[dg checkpoint] ${e}\n`);
+    }
+    emit(
+      json,
+      () => `[checkpoint create] ${res.saved ? `saved → ${res.checkpointDir}` : 'failed'}`,
+      { action: 'create', saved: res.saved, checkpoint_dir: res.checkpointDir ?? null, errors: res.errors }
+    );
+    return res.saved ? 0 : 1;
+  }
+  if (sub === 'verify') {
+    const res = verifyWorktreeCheckpoint(requireFlag(args, 'dir'));
+    if (!res.valid) {
+      for (const e of res.errors) process.stderr.write(`[dg checkpoint] ${e}\n`);
+    }
+    emit(json, () => `[checkpoint verify] ${res.valid ? 'valid' : 'invalid'}`, {
+      action: 'verify',
+      valid: res.valid,
+      errors: res.errors,
+    });
+    return res.valid ? 0 : 1;
+  }
+  if (sub === 'restore') {
+    const res = restoreWorktreeCheckpoint({
+      checkpointDir: requireFlag(args, 'dir'),
+      targetWorktreeDir: requireFlag(args, 'target'),
+    });
+    if (!res.restored) {
+      for (const e of res.errors) process.stderr.write(`[dg checkpoint] ${e}\n`);
+    }
+    emit(json, () => `[checkpoint restore] ${res.restored ? 'restored' : 'failed'}`, {
+      action: 'restore',
+      restored: res.restored,
+      errors: res.errors,
+    });
+    return res.restored ? 0 : 1;
+  }
+  throw new UsageError(`unknown checkpoint subcommand: ${sub ?? '(missing)'} (allowed: create|verify|restore)`);
+}
+
+/**
+ * `dg worktree remove` — `safeRemoveWorktree` 단일 진입만 경유(우회 경로 없음).
+ * 종료코드는 결과의 `exitCode` 그대로(체크포인트 미통과 시 4).
+ */
+function cmdWorktree(sub: string | undefined, args: ParsedArgs, json: boolean): number {
+  if (sub !== 'remove') {
+    throw new UsageError(`unknown worktree subcommand: ${sub ?? '(missing)'} (allowed: remove)`);
+  }
+  const res = safeRemoveWorktree({
+    repoDir: optionalFlag(args, 'repo') ?? process.cwd(),
+    worktreeDir: requireFlag(args, 'worktree'),
+    runId: optionalFlag(args, 'run-id') ?? `wt-rm-${Date.now()}`,
+    worktreeName: optionalFlag(args, 'name'),
+    checkpointRoot: optionalFlag(args, 'checkpoint-root'),
+    forceGitRemove: optionalFlag(args, 'force') === '1',
+  });
+  if (!res.removed) {
+    for (const e of res.errors) process.stderr.write(`[dg worktree] ${e}\n`);
+  }
+  emit(
+    json,
+    () =>
+      `[worktree remove] ${res.removed ? `removed (checkpoint → ${res.checkpointDir})` : `refused/failed (exit ${res.exitCode})`}`,
+    {
+      action: 'remove',
+      removed: res.removed,
+      exit_code: res.exitCode,
+      checkpoint_dir: res.checkpointDir ?? null,
+      errors: res.errors,
+    }
+  );
+  return res.exitCode;
+}
+
+// ---------- report (PB-2.5: readOnly — settleOrphans 절대 금지) ----------
+
+/**
+ * `dg report [--days 14] [--project <dir>] [--out <path>] [--repo <dir>] [--db <path>] [--json]`
+ * `openReportDb`(readOnly + query_only)로만 연다. `--out`은 allowlist 가드 통과
+ * 경로에만 기록하며 거부 시 파일·부모 디렉터리 모두 미생성 + stderr + exit 2.
+ */
+function cmdReport(args: ParsedArgs, json: boolean): number {
+  const days = parseIntFlag(args, 'days', 14);
+  const projectDir = optionalFlag(args, 'project');
+  const projectId = projectDir !== undefined ? resolveIdentity(projectDir).projectId : undefined;
+  const repoDir = optionalFlag(args, 'repo') ?? process.cwd();
+  const outPath = optionalFlag(args, 'out');
+  const db = openReportDb(dbFlag(args));
+  try {
+    const rep = generateRuleCandidateReport(db, { projectId: projectId ?? null, days });
+    const md = formatReportMarkdown(rep);
+    if (outPath !== undefined) {
+      const w = writeReportFileSafe({ outPath, repoDir, content: md });
+      if (!w.written) {
+        process.stderr.write(`[dg report] --out refused: ${outPath} (${w.reason ?? 'forbidden_out_path'})\n`);
+        return 2;
+      }
+      emit(
+        json,
+        () => `[report] written → ${w.resolvedPath}`,
+        { cmd: 'report', written: true, out: w.resolvedPath ?? null, report: rep }
+      );
+      return 0;
+    }
+    emit(json, () => md, { cmd: 'report', written: false, out: null, report: rep, markdown: md });
+    return 0;
+  } finally {
+    db.close();
+  }
+}
+
 // ---------- fallback & main ----------
 
 function fallbackJson(cmd: string, err: Error, args: ParsedArgs): Record<string, unknown> {
@@ -1055,6 +1346,9 @@ function fallbackJson(cmd: string, err: Error, args: ParsedArgs): Record<string,
   if (cmd === 'close') return { ...base, fork_id: fork ?? null, recorded: false };
   if (cmd === 'backprop') return { ...base, fork_id: fork ?? null, status: null };
   if (cmd === 'retro') return { ...base, fork_id: fork ?? null, written: false };
+  if (cmd === 'attempt') return { ...base, fork_id: fork ?? null, generation: null, attempt: null };
+  if (cmd === 'stats') return { ...base, cost: null, timing: null };
+  if (cmd === 'report') return { ...base, written: false };
   return fork ? { ...base, fork_id: fork } : base;
 }
 
@@ -1068,12 +1362,21 @@ const HELP = `dg — decision gate CLI (plan-r2.1 §4.7)
   dg record --route <r> --tool-class <c> --tool <name> --ok <0|1> [--weight 1.0] [--is-retry] [--conversation <id>] [--source <hook|agy_stream|transcript|rest_api|cli|wrap|ttl_orphan|neon_backprop>] [--target-hash <h>] [--error <snippet>] [--step <n>] [--command <text>] [--dedupe <key>] [--fork <id>] [--project <dir>] [--json]
   dg backprop --fork <id> [--penalty 2.0] [--reason <text>] [--json]
   dg backprop --fork <id> --verdict-file <p> [--expected-head <sha>] [--max-reworks 2] [--json]
+  dg attempt --fork <id> [--bump-gen] [--json]
   dg retro --fork <id> [--out <path>] [--json]
   dg settle-orphans [--json]
   dg wrap --route <r> --tool-class <c> [--fork <id>] [--source wrap] [--require-artifact <path>] [--require-nonempty] [--require-stdout-nonempty] [--stall-ms 120000] [--max-ms 1200000] [--heartbeat-ms 60000] [--kill-grace-ms 1000] [--expected-gen <n>] [--expected-attempt <n>] [--sanitize-env] [--allow-env K1,K2] [--json] -- <cmd…>
   dg compact [--max-events 50000] [--days 30] [--json]
+  dg stats [--cost] [--timing] [--project <dir>] [--fork <id>] [--days 14] [--db <path>] [--json]
+  dg checkpoint create --worktree <path> --run-id <id> [--repo <dir>] [--name <wtName>] [--checkpoint-root <dir>] [--json]
+  dg checkpoint verify --dir <checkpointDir> [--json]
+  dg checkpoint restore --dir <checkpointDir> --target <worktreeDir> [--json]
+  dg worktree remove --worktree <path> [--repo <dir>] [--run-id <id>] [--name <wtName>] [--checkpoint-root <dir>] [--force] [--json]
+  dg report [--days 14] [--project <dir>] [--out <path>] [--repo <dir>] [--db <path>] [--json]
 
 라우트 r: file_select|tool_select|retry_or_abort|delegate_swarm
+공용: --db <path>는 GEMINI_TRICK_DB_PATH보다 우선. --roster <path>/--profile <name> 명시 시
+route·gate에 roster 기반 동적 θ_sharp 적용 (미지정 시 0.70).
 DB 경로: GEMINI_TRICK_DB_PATH 환경변수 또는 기본 ~/.local/state/gemini-trick/decision.db`;
 
 function main(): void {
@@ -1083,14 +1386,16 @@ function main(): void {
     process.exit(argv.length === 0 ? 2 : 0);
   }
   const cmd = argv[0]!;
-  if (!['route', 'gate', 'close', 'touch', 'record', 'backprop', 'retro', 'settle-orphans', 'wrap', 'compact'].includes(cmd)) {
+  if (!['route', 'gate', 'close', 'touch', 'record', 'backprop', 'attempt', 'retro', 'settle-orphans', 'wrap', 'compact', 'stats', 'checkpoint', 'worktree', 'report'].includes(cmd)) {
     process.stderr.write(`unknown command: ${cmd}\n\n${HELP}\n`);
     process.exit(2);
   }
   let args: ParsedArgs;
   let json = false;
   try {
-    args = parseArgs(argv.slice(1));
+    // checkpoint/worktree는 2단 서브커맹 — 동사를 먼저 떼고 나머지를 플래그로 파싱한다
+    const sub = cmd === 'checkpoint' || cmd === 'worktree' ? argv[1] : undefined;
+    args = parseArgs(sub !== undefined ? argv.slice(2) : argv.slice(1));
     json = optionalFlag(args, 'json') === '1';
     switch (cmd) {
       case 'route':
@@ -1113,6 +1418,9 @@ function main(): void {
         if (typeof code === 'number') process.exit(code);
         break;
       }
+      case 'attempt':
+        cmdAttempt(args, json);
+        break;
       case 'retro':
         cmdRetro(args, json);
         break;
@@ -1136,6 +1444,18 @@ function main(): void {
       }
       case 'compact':
         cmdCompact(args, json);
+        break;
+      case 'stats':
+        cmdStats(args, json);
+        break;
+      case 'checkpoint':
+        process.exit(cmdCheckpoint(sub, args, json));
+        break;
+      case 'worktree':
+        process.exit(cmdWorktree(sub, args, json));
+        break;
+      case 'report':
+        process.exit(cmdReport(args, json));
         break;
     }
     process.exit(0);

@@ -13,7 +13,7 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import type { DecisionRoute } from '../types.ts';
-import { openDb, openDbSafe, resolveDbPath, resolveProjectIdentity } from './db.ts';
+import { hasTable, openDb, openDbSafe, resolveDbPath, resolveProjectIdentity } from './db.ts';
 import {
   getPosterior,
   hasHookCoverage,
@@ -76,6 +76,11 @@ export function readTelemetrySnapshot(dbPathInput?: string | null, cwd = process
   const db = openDbSafe(dbPath, { readOnly: true, busyTimeoutMs: 1000 });
   if (!db) return { routes: heuristicPriorRoutes(), dbPath, live: false };
   try {
+    // v1(v0)·v2 공통: stats_summary만 읽는다. 부분 생성·빈 DB에서는 읽기 가능
+    // 상태(live)를 유지하되 표본 0의 휴리스틱 prior를 반환한다 (PB-1 §3.4)
+    if (!hasTable(db, 'stats_summary')) {
+      return { routes: heuristicPriorRoutes(), dbPath, live: true };
+    }
     const { projectId } = resolveProjectIdentity(cwd);
     const routes = ROUTE_IDS.map((id) => {
       // 라우트 내 최다 표본 tool_class를 대표로 선택(동률면 tool_class 이름순)

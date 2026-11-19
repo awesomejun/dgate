@@ -46,6 +46,25 @@ export const ROLE_SLOT_INFO: Record<RoleSlot, RoleSlotInfo> = {
   advisor: { slot: 'advisor', herdrRole: 'carbon', contractFile: 'carbon.md' },
 };
 
+/** 비용 신뢰도 3값 (PB-2A) — 'unknown'은 절대 $0으로 합산하지 않는다 */
+export const COST_STATUSES = ['reported', 'estimated', 'unknown'] as const;
+export type CostStatus = (typeof COST_STATUSES)[number];
+
+/** 역할 슬롯의 선택적 비용 스펙 (PB-2A) — θ_sharp 동적 라우팅의 C_eff 입력 */
+export interface RolePricingSpec {
+  currency?: 'USD' | 'CNY';
+  /** 백만 토큰당 입력 단가 */
+  inputPer1M?: number;
+  /** 백만 토큰당 출력 단가 */
+  outputPer1M?: number;
+  /** 백만 토큰당 캐시 읽기 단가 */
+  cacheReadPer1M?: number;
+  /** 백만 토큰당 캐시 쓰기 단가 */
+  cacheWritePer1M?: number;
+  /** 단가 미상·구독 정액 시 상대 비용 가중치 (기본: explore=1.0, lead=5.0, coder=3.0, verifier=1.5, advisor=8.0) */
+  relativeCost?: number;
+}
+
 export interface RoleWorkerSpec {
   cli: WorkerCliKind;
   /** 실행 파일 절대경로. 미지정 시 `resolveWorkerBin`이 env·PATH·폴백 순으로 해석. */
@@ -65,6 +84,8 @@ export interface RoleWorkerSpec {
   extraArgs?: string[];
   /** 쿼터 버킷 (예: 'agy', 'devin', 'opencodex'). 미지정 시 cli 종류로 추론. */
   quotaBucket?: string;
+  /** 선택적 비용 스펙 — 미지정 시 슬롯 기본 상대비용으로 폴백 (PB-2A) */
+  pricing?: RolePricingSpec;
 }
 
 export interface RosterProfile {
@@ -140,11 +161,11 @@ function builtinQuotaSaver(): RosterProfile {
     description: '기본 프로필 — agy 상시 0, Lead/Verifier는 pi, Carbon(advisor)은 온디맨드 1회성',
     dailyTurnBudgets: { agy: 20 },
     roles: {
-      lead: { cli: 'pi', provider: 'opencodex', model: 'glm-zcode/glm-5.3', thinking: 'max' },
-      explore: { cli: 'pi', provider: 'opencodex', model: 'command-code/deepseek-deepseek-v4.1-flash', thinking: 'medium', readonly: true },
-      coder: { cli: 'devin', permissionMode: 'auto' },
-      verifier: { cli: 'pi', provider: 'opencodex', model: 'command-code/deepseek-deepseek-v4.1-flash', thinking: 'max', readonly: true },
-      advisor: { cli: 'agy', model: 'gemini-4-hydrogen-xhigh', readonly: true, onDemand: true },
+      lead: { cli: 'pi', provider: 'opencodex', model: 'glm-zcode/glm-5.3', thinking: 'max', pricing: { relativeCost: 5.0 } },
+      explore: { cli: 'pi', provider: 'opencodex', model: 'command-code/deepseek-deepseek-v4.1-flash', thinking: 'medium', readonly: true, pricing: { relativeCost: 1.0 } },
+      coder: { cli: 'devin', permissionMode: 'auto', pricing: { relativeCost: 3.0 } },
+      verifier: { cli: 'pi', provider: 'opencodex', model: 'command-code/deepseek-deepseek-v4.1-flash', thinking: 'max', readonly: true, pricing: { relativeCost: 1.5 } },
+      advisor: { cli: 'agy', model: 'gemini-4-hydrogen-xhigh', readonly: true, onDemand: true, pricing: { relativeCost: 8.0 } },
     },
   };
 }
@@ -155,11 +176,11 @@ function builtinAgyQuad(): RosterProfile {
     fallbackProfile: 'quota-saver',
     dailyTurnBudgets: { agy: 20 },
     roles: {
-      lead: { cli: 'agy', model: 'gemini-4-argon-high', permissionMode: 'auto' },
-      explore: { cli: 'pi', provider: 'opencodex', model: 'command-code/deepseek-deepseek-v4.1-flash', thinking: 'medium', readonly: true },
-      coder: { cli: 'devin', permissionMode: 'auto' },
-      verifier: { cli: 'agy', model: 'gemini-4-neon-high', readonly: true },
-      advisor: { cli: 'agy', model: 'gemini-4-carbon-high', readonly: true },
+      lead: { cli: 'agy', model: 'gemini-4-argon-high', permissionMode: 'auto', pricing: { relativeCost: 5.0 } },
+      explore: { cli: 'pi', provider: 'opencodex', model: 'command-code/deepseek-deepseek-v4.1-flash', thinking: 'medium', readonly: true, pricing: { relativeCost: 1.0 } },
+      coder: { cli: 'devin', permissionMode: 'auto', pricing: { relativeCost: 3.0 } },
+      verifier: { cli: 'agy', model: 'gemini-4-neon-high', readonly: true, pricing: { relativeCost: 1.5 } },
+      advisor: { cli: 'agy', model: 'gemini-4-carbon-high', readonly: true, pricing: { relativeCost: 8.0 } },
     },
   };
 }

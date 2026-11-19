@@ -28,15 +28,15 @@ import { spawnSync } from 'node:child_process';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { DatabaseSync } from 'node:sqlite';
-import { openDbSafe, resolveDbPath, resolveProjectIdentity } from '../src/decision/db.ts';
+import { getAgyBudget, openDbSafe, resolveDbPath, resolveProjectIdentity } from '../src/decision/db.ts';
 import {
   acquireScopeLease,
   escalateRisk,
-  evaluateForced,
-  getPosterior,
+  evaluateRoute,
   issueFork,
   priorP0,
   settleOrphans,
+  SHARP_P_THRESHOLD,
   taskKindSpec,
   TTL_EXPLORE_MS,
   type ForcedState,
@@ -44,6 +44,7 @@ import {
   type RiskLevel,
   type RouteId,
 } from '../src/decision/engine.ts';
+import { computeDynamicSharpThreshold } from '../src/decision/stats.ts';
 import {
   buildWorkerCommand,
   loadRosterConfig,
@@ -172,6 +173,8 @@ export interface DispatchPlan {
   rosterWarnings: string[];
   /** 역할 슬롯별 해석 결과 요약 (예: lead → `pi:glm-zcode/glm-5.3`) */
   roleSummary: Record<string, string>;
+  /** PB-2A — 프로필 비용·쿼터 기반 동적 sharp 임계치 θ_sharp */
+  sharp_threshold: number;
 }
 
 function emptyPlan(runId: string, dbPath: string): DispatchPlan {
@@ -204,6 +207,7 @@ function emptyPlan(runId: string, dbPath: string): DispatchPlan {
     rosterSourcePath: null,
     rosterWarnings: [],
     roleSummary: {},
+    sharp_threshold: SHARP_P_THRESHOLD,
   };
 }
 
@@ -258,6 +262,7 @@ export function planDispatch(input: PlanDispatchInput): DispatchPlan {
   let post: PosteriorResult = priorOnly(spec);
   let forced: ForcedState = NO_FORCED;
   let forkId: string | null = null;
+  let decision: 'sharp' | 'split' = 'split';
 
   let db: DatabaseSync | null = null;
   if (dryRun) {
@@ -269,22 +274,47 @@ export function planDispatch(input: PlanDispatchInput): DispatchPlan {
     db = openDbSafe(dbPath, { busyTimeoutMs: 5000 });
   }
 
+  // PB-2A: roster 프로필 비용 + agy_budget 오늘 사용량(읽기전용 조회, dry-run은 0)으로
+  // 동적 θ_sharp를 산출한다. 계산 실패는 fail-safe — 기본 0.70(= SHARP_P_THRESHOLD) 유지.
+  const bucketUsage: Record<string, number> = {};
+  if (db && !dryRun) {
+    try {
+      const budget = getAgyBudget(db);
+      if (budget) bucketUsage['agy'] = budget.turnsUsed;
+    } catch {
+      /* 예산 조회 실패 — 사용량 0(κ=1.0)으로 진행 */
+    }
+  }
+  const dyn = computeDynamicSharpThreshold({ profile: rosterProfile, bucketUsage });
+  const sharpThreshold = dyn.threshold;
+
   try {
     if (db) {
       if (!dryRun) settleOrphans(db);
-      post = getPosterior(db, identity.projectId, spec.route, spec.toolClass);
-      forced = evaluateForced(db, identity.projectId, spec.route, spec.toolClass, null);
+      const ev = evaluateRoute(db, {
+        projectId: identity.projectId,
+        taskKind: spec.taskKind,
+        risk,
+        sharpThreshold,
+      });
+      if (ev) {
+        post = ev.post;
+        forced = ev.forced;
+        decision = ev.decision;
+      }
     }
   } catch {
     db = null; // §3.5 휴리스틱 폴백 — post/forced는 prior 유지
   }
 
-  // §2.0 sharp 패스트패스 4조건 + 강제 split (dg.ts cmdRoute와 동일 판정)
-  const decision: 'sharp' | 'split' = forced.forcedSplit
-    ? 'split'
-    : spec.sharpEligible && !spec.requiresWrite && risk === 'low' && post.p >= 0.7 && post.consecutiveErrors < 2
-      ? 'sharp'
-      : 'split';
+  if (db === null) {
+    // §2.0 sharp 패스트패스 4조건 + 강제 split (dg.ts cmdRoute와 동일 판정)
+    decision = forced.forcedSplit
+      ? 'split'
+      : spec.sharpEligible && !spec.requiresWrite && risk === 'low' && post.p >= sharpThreshold && post.consecutiveErrors < 2
+        ? 'sharp'
+        : 'split';
+  }
 
   const idx = input.idx ?? 0;
   // 동시성 상한 (§6.4): 탐색 ≤4, 코딩 ≤2
@@ -439,6 +469,7 @@ export function planDispatch(input: PlanDispatchInput): DispatchPlan {
     summary[slot] = `${s.cli}:${s.model ?? '-'}`;
   }
   plan.roleSummary = summary;
+  plan.sharp_threshold = sharpThreshold;
   if (sessionName && !sessionNameOk(sessionName)) {
     plan.ok = false;
     plan.reason = `session name violates hc --name contract: ${sessionName}`;
@@ -492,7 +523,7 @@ if (isMainModule()) {
   if (flags.json === '1') {
     process.stdout.write(`${JSON.stringify(plan)}\n`);
   } else {
-    const head = `[dispatch] ${plan.taskKind ?? '?'} → ${(plan.decision ?? 'ERR').toString().toUpperCase()}${plan.deferred ? ' (deferred)' : ''} p=${plan.p?.toFixed(3) ?? '-'} fork=${plan.forkId ?? '-'}`;
+    const head = `[dispatch] ${plan.taskKind ?? '?'} → ${(plan.decision ?? 'ERR').toString().toUpperCase()}${plan.deferred ? ' (deferred)' : ''} p=${plan.p?.toFixed(3) ?? '-'} θ_sharp=${plan.sharp_threshold.toFixed(4)} fork=${plan.forkId ?? '-'}`;
     process.stdout.write(`${head}\n`);
     process.stdout.write(`  target_repo=${plan.targetRepo}\n`);
     process.stdout.write(`  roster_source=${plan.rosterSource}${plan.rosterSourcePath ? ` (${plan.rosterSourcePath})` : ''}\n`);

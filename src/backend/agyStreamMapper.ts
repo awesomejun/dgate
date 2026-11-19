@@ -165,20 +165,27 @@ export interface ToolDecision {
 /**
  * 도구 1건의 SSOT 실측 판정(p·basis·sharp/split·forcedSplit).
  * DB 미존재·오류 시 사전확률(p0, basis='prior') 폴백(§3.5).
+ *
+ * `opts.sharpThreshold`(PB-2A, A-2): 비용 인식 동적 θ_sharp를 전달 가능하다 —
+ * 로그 태그 정직성이 목적이며 미지정 시 0.70. TUI 표시 카운터
+ * (`syncRoutesFromSsot`의 splitCount/sharpCount)는 표시 기준 0.70을 유지하므로
+ * θ > 0.70 시 카운터와 로그가 발산할 수 있음을 명시한다.
  */
 export function evaluateToolDecision(
   toolName: string,
   args: Record<string, unknown> | undefined,
   conversationId: string | null,
-  cwd = process.cwd()
+  cwd = process.cwd(),
+  opts?: { sharpThreshold?: number }
 ): ToolDecision {
+  const theta = opts?.sharpThreshold ?? 0.7;
   const { route, toolClass } = classifyTool(toolName, args);
   const fallback = (): ToolDecision => {
     const p = priorP0(route, toolClass);
     return {
       route,
       toolClass,
-      tag: p >= 0.7 ? 'sharp' : 'split',
+      tag: p >= theta ? 'sharp' : 'split',
       p,
       basis: 'prior',
       forcedSplit: false,
@@ -190,7 +197,7 @@ export function evaluateToolDecision(
     const { projectId } = resolveProjectIdentity(cwd);
     const post = getPosterior(db, projectId, route, toolClass);
     const forced = evaluateForced(db, projectId, route, toolClass, conversationId);
-    const split = forced.forcedSplit || post.p < 0.7;
+    const split = forced.forcedSplit || post.p < theta;
     return {
       route,
       toolClass,

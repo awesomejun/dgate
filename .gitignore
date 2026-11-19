@@ -16,6 +16,8 @@ HANDOFF-NEON.md
 .herdr/advice/
 .herdr/verify/
 .herdr/roster.json
+.herdr/checkpoints/
+.herdr/report/
 
 # SQLite 결정 엔진 DB
 *.db

@@ -16,7 +16,7 @@
  */
 import { randomBytes } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import { GLOBAL_PROJECT_ID } from './db.ts';
+import { GLOBAL_PROJECT_ID, hasColumn, hasTable } from './db.ts';
 import { redactSecrets } from './redact.ts';
 import type { VerdictValidationResult } from './verdict.ts';
 
@@ -199,6 +199,146 @@ function parseForkMetadata(raw: string | null | undefined): ForkMetadata {
   } catch {
     return {};
   }
+}
+
+/**
+ * 사실상 "살아있는" fork 상태 — v2는 마이그레이션 백필로 `open`+`waiting_human`
+ * 메타를 `waiting_human` status로 승격할 수 있어 동치로 취급한다.
+ */
+export function isForkLiveStatus(status: string): boolean {
+  return status === 'open' || status === 'waiting_human';
+}
+
+/**
+ * 커넥션별 스키마 감지 캐시 — 마이그레이션은 openDb 시점에 완료되므로 핸들당 1회만 확인한다.
+ * v1 DB는 직접 연 raw 핸들 등 이론적 경로로만 존재하며, 이 경우 v2 컬럼 참조 SQL이
+ * 실패하지 않도록 모든 v2 접근을 이 플래그로 분기한다.
+ */
+const schemaCache = new WeakMap<DatabaseSync, { forksV2: boolean; intervals: boolean; eventsV2: boolean }>();
+function schemaOf(db: DatabaseSync): { forksV2: boolean; intervals: boolean; eventsV2: boolean } {
+  let s = schemaCache.get(db);
+  if (!s) {
+    s = {
+      forksV2: hasColumn(db, 'forks', 'generation'),
+      intervals: hasTable(db, 'fork_intervals'),
+      eventsV2: hasColumn(db, 'decision_events', 'cost_status'),
+    };
+    schemaCache.set(db, s);
+  }
+  return s;
+}
+
+/** generation/attempt 1급 컬럼 우선, v1은 metadata_json 폴백 — 컬럼·메타는 쓰기 시점에 동기화된다 */
+function genAttemptOf(row: {
+  generation?: number | null;
+  attempt?: number | null;
+  metadata_json: string | null;
+}): { gen: number; attempt: number } {
+  const meta = parseForkMetadata(row.metadata_json);
+  return {
+    gen: row.generation ?? meta.gen ?? 1,
+    attempt: row.attempt ?? meta.attempt ?? 1,
+  };
+}
+
+// ---------- fork_intervals (PB-1 §3.1~§3.2): exec·wait·human 단계 구간 ----------
+
+export type ForkIntervalPhase = 'exec' | 'wait' | 'human';
+
+export interface ForkIntervalArgs {
+  forkId: string;
+  attempt: number;
+  phase: ForkIntervalPhase;
+  nowMs: number;
+}
+
+function intervalsWritable(db: DatabaseSync, forkId: string): boolean {
+  // fk_fallback_*는 DB 연결 실패 합성 ID — 실제 forks 행이 없어 구간을 기록하지 않는다(§3.2)
+  return schemaOf(db).intervals && !forkId.startsWith('fk_fallback_');
+}
+
+/**
+ * 트랜잭션 내부 전용: 동일 (forkId, attempt)의 열린 구간을 먼저 닫고 새 구간을 연다.
+ * 열린 구간 ≤1은 부분 유니크 인덱스가 강제하며, 여기서는 정합 순서를 보장한다.
+ */
+function openForkIntervalInTx(db: DatabaseSync, args: ForkIntervalArgs): void {
+  if (!intervalsWritable(db, args.forkId)) return;
+  db.prepare(
+    `UPDATE fork_intervals SET ended_at_ms = MAX(started_at_ms, ?)
+      WHERE fork_id = ? AND attempt = ? AND ended_at_ms IS NULL`
+  ).run(args.nowMs, args.forkId, args.attempt);
+  db.prepare(
+    `INSERT INTO fork_intervals (fork_id, attempt, phase, started_at_ms) VALUES (?, ?, ?, ?)`
+  ).run(args.forkId, args.attempt, args.phase, args.nowMs);
+}
+
+/** 트랜잭션 내부 전용: 해당 fork의 모든 열린 구간(attempt 무관)을 닫는다 — 종결·범프 공통 */
+function closeOpenForkIntervalsInTx(db: DatabaseSync, forkId: string, nowMs: number): void {
+  if (!intervalsWritable(db, forkId)) return;
+  db.prepare(
+    `UPDATE fork_intervals SET ended_at_ms = MAX(started_at_ms, ?)
+      WHERE fork_id = ? AND ended_at_ms IS NULL`
+  ).run(nowMs, forkId);
+}
+
+/** fork의 현재 gen/attempt (컬럼 우선, v1 메타 폴백) — 행이 없으면 null */
+export function getForkGenAttempt(
+  db: DatabaseSync,
+  forkId: string
+): { gen: number; attempt: number } | null {
+  const row = db.prepare('SELECT * FROM forks WHERE fork_id = ?').get(forkId) as
+    | { generation?: number | null; attempt?: number | null; metadata_json: string | null }
+    | undefined;
+  if (!row) return null;
+  return genAttemptOf(row);
+}
+
+/** 자식 스폰 등 외부 시점의 구간 시작 래퍼 — 자체 BEGIN IMMEDIATE로 단독 커밋한다 */
+export function recordForkIntervalStart(db: DatabaseSync, args: ForkIntervalArgs): void {
+  if (!intervalsWritable(db, args.forkId)) return;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    openForkIntervalInTx(db, args);
+    db.exec('COMMIT');
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      /* 무시 */
+    }
+    throw err;
+  }
+}
+
+/** 외부 호출용 구간 종료 래퍼 — fork의 모든 열린 구간을 닫는다 */
+export function recordForkIntervalEnd(db: DatabaseSync, forkId: string, nowMs?: number): void {
+  if (!intervalsWritable(db, forkId)) return;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    closeOpenForkIntervalsInTx(db, forkId, nowMs ?? Date.now());
+    db.exec('COMMIT');
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      /* 무시 */
+    }
+    throw err;
+  }
+}
+
+/** 열린 구간이 없으면 현재 attempt의 `wait` 구간을 멱등 보장한다 — `dg gate --fork`에서 호출 */
+export function ensureForkWaitInterval(db: DatabaseSync, forkId: string, nowMs?: number): void {
+  if (!intervalsWritable(db, forkId)) return;
+  const ga = getForkGenAttempt(db, forkId);
+  if (!ga) return;
+  const open = db
+    .prepare(
+      `SELECT 1 AS one FROM fork_intervals WHERE fork_id = ? AND attempt = ? AND ended_at_ms IS NULL LIMIT 1`
+    )
+    .get(forkId, ga.attempt) as { one: number } | undefined;
+  if (open) return;
+  recordForkIntervalStart(db, { forkId, attempt: ga.attempt, phase: 'wait', nowMs: nowMs ?? Date.now() });
 }
 
 export function isRouteId(v: string): v is RouteId {
@@ -436,6 +576,13 @@ export interface RecordInput {
   commandLine?: string | null;
   /** 실패 원인 분류 (§3.1-B) — config_error/interrupted는 EWMA·카운터 격리 */
   cause?: FailureCause;
+  /** v2 토큰·비용 컬럼(컬럼 존재 시에만 저장 — PB-1 §3.3, 기존 호출부는 전부 optional) */
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  cacheReadTokens?: number | null;
+  cacheWriteTokens?: number | null;
+  costUsd?: number | null;
+  costStatus?: 'reported' | 'estimated' | 'unknown' | null;
   nowMs?: number;
 }
 
@@ -500,28 +647,97 @@ function updateStatsInTx(
   }
 }
 
+/**
+ * decision_events 공통 삽입 — v2 컬럼(cause·토큰·비용)이 존재하면 함께 저장하고,
+ * v1 DB에는 v1 14컬럼 INSERT만 사용한다. `cost_status`는 NOT NULL이므로 v2에서
+ * 항상 값(기본 'unknown')을 명시한다. 반환은 `changes`(dedupe 멱등성 검사용).
+ */
+function insertEventRow(db: DatabaseSync, e: {
+  dedupeKey?: string | null;
+  forkId?: string | null;
+  projectId: string;
+  conversationId?: string | null;
+  source: EventSource;
+  route: RouteId;
+  toolName: string;
+  toolClass: string;
+  ok: boolean;
+  weight?: number;
+  isRetry?: boolean;
+  targetHash?: string | null;
+  errorSnippet?: string | null;
+  cause?: FailureCause | null;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  cacheReadTokens?: number | null;
+  cacheWriteTokens?: number | null;
+  costUsd?: number | null;
+  costStatus?: 'reported' | 'estimated' | 'unknown' | null;
+  nowMs: number;
+}): number {
+  const v2 = schemaOf(db).eventsV2;
+  const baseCols =
+    'dedupe_key, fork_id, project_id, conversation_id, source, route, tool_name, tool_class, ok, weight, is_retry, target_hash, error_snippet, created_at_ms';
+  const vals: (string | number | null)[] = [
+    e.dedupeKey ?? null,
+    e.forkId ?? null,
+    e.projectId,
+    e.conversationId ?? null,
+    e.source,
+    e.route,
+    e.toolName,
+    e.toolClass,
+    e.ok ? 1 : 0,
+    e.weight ?? 1,
+    e.isRetry ? 1 : 0,
+    e.targetHash ?? null,
+    e.errorSnippet ?? null,
+    e.nowMs,
+  ];
+  let sql: string;
+  if (v2) {
+    vals.push(
+      e.cause ?? null,
+      e.inputTokens ?? null,
+      e.outputTokens ?? null,
+      e.cacheReadTokens ?? null,
+      e.cacheWriteTokens ?? null,
+      e.costUsd ?? null,
+      e.costStatus ?? 'unknown'
+    );
+    sql = `INSERT OR IGNORE INTO decision_events (${baseCols}, cause, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, cost_status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+  } else {
+    sql = `INSERT OR IGNORE INTO decision_events (${baseCols}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+  }
+  const res = db.prepare(sql).run(...vals);
+  return Number(res.changes);
+}
+
 function insertEventInTx(db: DatabaseSync, input: RecordInput, route: RouteId, isRetry: boolean, nowMs: number): void {
-  db.prepare(
-    `INSERT OR IGNORE INTO decision_events
-       (dedupe_key, fork_id, project_id, conversation_id, source, route, tool_name, tool_class,
-        ok, weight, is_retry, target_hash, error_snippet, created_at_ms)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    input.dedupeKey ?? null,
-    input.forkId ?? null,
-    input.projectId,
-    input.conversationId ?? null,
-    input.source ?? 'cli',
+  insertEventRow(db, {
+    dedupeKey: input.dedupeKey ?? null,
+    forkId: input.forkId ?? null,
+    projectId: input.projectId,
+    conversationId: input.conversationId ?? null,
+    source: input.source ?? 'cli',
     route,
-    input.toolName,
-    input.toolClass,
-    input.ok ? 1 : 0,
-    input.weight ?? 1,
-    isRetry ? 1 : 0,
-    input.targetHash ?? null,
-    input.errorSnippet ?? null,
-    nowMs
-  );
+    toolName: input.toolName,
+    toolClass: input.toolClass,
+    ok: input.ok,
+    weight: input.weight ?? 1,
+    isRetry,
+    targetHash: input.targetHash ?? null,
+    errorSnippet: input.errorSnippet ?? null,
+    cause: input.cause ?? null,
+    inputTokens: input.inputTokens ?? null,
+    outputTokens: input.outputTokens ?? null,
+    cacheReadTokens: input.cacheReadTokens ?? null,
+    cacheWriteTokens: input.cacheWriteTokens ?? null,
+    costUsd: input.costUsd ?? null,
+    costStatus: input.costStatus ?? null,
+    nowMs,
+  });
 }
 
 function updateCursorInTx(db: DatabaseSync, input: RecordInput, isRetry: boolean, nowMs: number): void {
@@ -705,9 +921,107 @@ export function evaluateForced(
   };
 }
 
+// ---------- sharp/split 판정 (PB-2A: 동적 θ_sharp 지원) ----------
+
+export interface GateEvalInput {
+  projectId: string;
+  route: RouteId;
+  toolClass: string;
+  conversationId?: string | null;
+  /** 비용 인식 동적 임계치(stats.ts computeDynamicSharpThreshold 산출). 미지정 시 SHARP_P_THRESHOLD(0.70) */
+  sharpThreshold?: number;
+}
+
+export interface GateEvalResult {
+  decision: 'sharp' | 'split';
+  p: number;
+  basis: DecisionBasis;
+  samples: number;
+  consecutiveErrors: number;
+  forcedSplit: boolean;
+  forcedReason: string | null;
+  escalateCarbon: boolean;
+  sharpThreshold: number;
+  post: PosteriorResult;
+  forced: ForcedState;
+}
+
+/**
+ * `dg gate` 판정 — forcedSplit 우선, 아니면 `p >= θ_sharp`.
+ * `sharpThreshold` 미지정 시 기존 상수 경로와 비트 단위로 동일하다.
+ */
+export function evaluateGate(db: DatabaseSync, input: GateEvalInput): GateEvalResult {
+  const theta = input.sharpThreshold ?? SHARP_P_THRESHOLD;
+  const post = getPosterior(db, input.projectId, input.route, input.toolClass);
+  const forced = evaluateForced(db, input.projectId, input.route, input.toolClass, input.conversationId ?? null);
+  const decision: 'sharp' | 'split' = forced.forcedSplit ? 'split' : post.p >= theta ? 'sharp' : 'split';
+  return {
+    decision,
+    p: post.p,
+    basis: post.basis,
+    samples: post.samples,
+    consecutiveErrors: forced.keyConsecutiveErrors,
+    forcedSplit: forced.forcedSplit,
+    forcedReason: forced.forcedReason,
+    escalateCarbon: forced.escalateCarbon,
+    sharpThreshold: theta,
+    post,
+    forced,
+  };
+}
+
+export interface RouteEvalInput {
+  projectId: string;
+  taskKind: string;
+  risk?: RiskLevel;
+  conversationId?: string | null;
+  /** 비용 인식 동적 임계치. 미지정 시 SHARP_P_THRESHOLD(0.70) */
+  sharpThreshold?: number;
+}
+
+export interface RouteEvalResult extends GateEvalResult {
+  spec: TaskKindSpec;
+  risk: RiskLevel;
+}
+
+/**
+ * `dg route` 판정 — §2.0 sharp 패스트패스 4조건(sharpEligible·!requiresWrite·
+ * risk==='low'·consecutiveErrors<2) + `p >= θ_sharp`. 4조건 중 p 조건만 치환된다.
+ * 부정한 taskKind면 null.
+ */
+export function evaluateRoute(db: DatabaseSync, input: RouteEvalInput): RouteEvalResult | null {
+  const spec = taskKindSpec(input.taskKind);
+  if (!spec) return null;
+  const theta = input.sharpThreshold ?? SHARP_P_THRESHOLD;
+  const risk = escalateRisk(spec.defaultRisk, input.risk);
+  const post = getPosterior(db, input.projectId, spec.route, spec.toolClass);
+  const forced = evaluateForced(db, input.projectId, spec.route, spec.toolClass, input.conversationId ?? null);
+  const decision: 'sharp' | 'split' = forced.forcedSplit
+    ? 'split'
+    : spec.sharpEligible && !spec.requiresWrite && risk === 'low' && post.p >= theta && post.consecutiveErrors < FORCED_SPLIT_ERRORS
+      ? 'sharp'
+      : 'split';
+  return {
+    spec,
+    risk,
+    decision,
+    p: post.p,
+    basis: post.basis,
+    samples: post.samples,
+    consecutiveErrors: forced.keyConsecutiveErrors,
+    forcedSplit: forced.forcedSplit,
+    forcedReason: forced.forcedReason,
+    escalateCarbon: forced.escalateCarbon,
+    sharpThreshold: theta,
+    post,
+    forced,
+  };
+}
+
 export interface ForkRow {
   fork_id: string;
   project_id: string;
+  project_label: string;
   conversation_id: string | null;
   route: RouteId;
   tool_class: string;
@@ -715,7 +1029,20 @@ export interface ForkRow {
   forced_split: number;
   p_at_gate: number;
   basis_at_gate: DecisionBasis;
-  status: 'open' | 'ok' | 'fail' | 'abandoned' | 'rerouted' | 'backprop_fail';
+  /** v2 1급 컬럼 — v1 DB에서는 컬럼 부재로 undefined (메타 폴백 경로가 정본) */
+  generation?: number;
+  attempt?: number;
+  lease_owner?: string | null;
+  lease_expires_ms?: number | null;
+  status:
+    | 'open'
+    | 'ok'
+    | 'fail'
+    | 'abandoned'
+    | 'rerouted'
+    | 'backprop_fail'
+    | 'interrupted'
+    | 'waiting_human';
   closed_by: string | null;
   neon_verdict: string | null;
   ttl_ms: number;
@@ -747,34 +1074,89 @@ export interface IssueForkInput {
   nowMs?: number;
 }
 
-/** Fork 발행(§4.7): `fk_<12hex>` ID로 `status='open'`, `gen=1, attempt=1` 메타 초기화 */
+/**
+ * Fork 발행(§4.7 + PB-1): `fk_<12hex>` ID로 `status='open'`, `gen=1, attempt=1`
+ * 메타 초기화. v2는 generation/attempt 1급 컬럼과 리스 쌍(owner+expires 동시,
+ * CHECK `(lease_owner IS NULL) = (lease_expires_ms IS NULL)`)을 함께 쓰고,
+ * fork 생성과 같은 트랜잭션에서 `wait` 구간을 연다.
+ */
 export function issueFork(db: DatabaseSync, input: IssueForkInput): string {
   const forkId = `fk_${randomBytes(6).toString('hex')}`;
   const nowMs = input.nowMs ?? Date.now();
   const metadataObj: ForkMetadata = { gen: 1, attempt: 1, ...(input.metadata ?? {}) };
   if (input.title != null) metadataObj.title = redactSecrets(input.title);
   const metadata = JSON.stringify(metadataObj);
-  db.prepare(
-    `INSERT INTO forks
-       (fork_id, project_id, project_label, conversation_id, route, tool_class, decision,
-        forced_split, p_at_gate, basis_at_gate, status, ttl_ms, created_at_ms, last_touch_ms, metadata_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)`
-  ).run(
-    forkId,
-    input.projectId,
-    input.projectLabel,
-    input.conversationId ?? null,
-    input.route,
-    input.toolClass,
-    input.decision,
-    input.forcedSplit ? 1 : 0,
-    input.pAtGate,
-    input.basisAtGate,
-    input.ttlMs ?? TTL_EXPLORE_MS,
-    nowMs,
-    nowMs,
-    metadata
-  );
+  const leaseOwner =
+    typeof metadataObj.lease_owner === 'string' && metadataObj.lease_owner !== ''
+      ? metadataObj.lease_owner
+      : null;
+  const leaseUntil =
+    typeof metadataObj.lease_until_ms === 'number' && Number.isFinite(metadataObj.lease_until_ms)
+      ? Math.floor(metadataObj.lease_until_ms)
+      : null;
+  // 리스는 쌍 단위 — 절반만 있으면 CHECK 위반 방지를 위해 둘 다 NULL
+  const leaseOk = leaseOwner !== null && leaseUntil !== null;
+  const v2 = schemaOf(db).forksV2;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    if (v2) {
+      db.prepare(
+        `INSERT INTO forks
+           (fork_id, project_id, project_label, conversation_id, route, tool_class, decision,
+            forced_split, p_at_gate, basis_at_gate, generation, attempt, lease_owner, lease_expires_ms,
+            status, ttl_ms, created_at_ms, last_touch_ms, metadata_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, 'open', ?, ?, ?, ?)`
+      ).run(
+        forkId,
+        input.projectId,
+        input.projectLabel,
+        input.conversationId ?? null,
+        input.route,
+        input.toolClass,
+        input.decision,
+        input.forcedSplit ? 1 : 0,
+        input.pAtGate,
+        input.basisAtGate,
+        leaseOk ? leaseOwner : null,
+        leaseOk ? leaseUntil : null,
+        input.ttlMs ?? TTL_EXPLORE_MS,
+        nowMs,
+        nowMs,
+        metadata
+      );
+    } else {
+      db.prepare(
+        `INSERT INTO forks
+           (fork_id, project_id, project_label, conversation_id, route, tool_class, decision,
+            forced_split, p_at_gate, basis_at_gate, status, ttl_ms, created_at_ms, last_touch_ms, metadata_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)`
+      ).run(
+        forkId,
+        input.projectId,
+        input.projectLabel,
+        input.conversationId ?? null,
+        input.route,
+        input.toolClass,
+        input.decision,
+        input.forcedSplit ? 1 : 0,
+        input.pAtGate,
+        input.basisAtGate,
+        input.ttlMs ?? TTL_EXPLORE_MS,
+        nowMs,
+        nowMs,
+        metadata
+      );
+    }
+    openForkIntervalInTx(db, { forkId, attempt: 1, phase: 'wait', nowMs });
+    db.exec('COMMIT');
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      /* 무시 */
+    }
+    throw err;
+  }
   return forkId;
 }
 
@@ -796,7 +1178,7 @@ export function settleOrphans(
     const stale = db
       .prepare(
         `SELECT fork_id, project_id, project_label, route, tool_class, metadata_json, created_at_ms FROM forks
-         WHERE status = 'open' AND (? - COALESCE(last_touch_ms, created_at_ms)) > ttl_ms`
+         WHERE status IN ('open','waiting_human') AND (? - COALESCE(last_touch_ms, created_at_ms)) > ttl_ms`
       )
       .all(nowMs) as {
       fork_id: string;
@@ -816,16 +1198,23 @@ export function settleOrphans(
       }
       const res = db
         .prepare(
-          `UPDATE forks SET status = 'abandoned', closed_by = 'ttl', closed_at_ms = ? WHERE fork_id = ? AND status = 'open'`
+          `UPDATE forks SET status = 'abandoned', closed_by = 'ttl', closed_at_ms = ? WHERE fork_id = ? AND status IN ('open','waiting_human')`
         )
         .run(nowMs, row.fork_id);
       if (Number(res.changes) !== 1) continue; // 이미 타 프로세스가 닫은 fork — 유령 표본 차단
+      closeOpenForkIntervalsInTx(db, row.fork_id, nowMs);
       updateStatsInTx(db, row.project_id, row.project_label, row.route, row.tool_class, false, 1.0, null, nowMs);
-      db.prepare(
-        `INSERT INTO decision_events
-           (fork_id, project_id, source, route, tool_name, tool_class, ok, weight, is_retry, created_at_ms)
-         VALUES (?, ?, 'ttl_orphan', ?, 'ttl_settle', ?, 0, 1.0, 0, ?)`
-      ).run(row.fork_id, row.project_id, row.route, row.tool_class, nowMs);
+      insertEventRow(db, {
+        forkId: row.fork_id,
+        projectId: row.project_id,
+        source: 'ttl_orphan',
+        route: row.route,
+        toolName: 'ttl_settle',
+        toolClass: row.tool_class,
+        ok: false,
+        weight: 1.0,
+        nowMs,
+      });
       settledIds.push(row.fork_id);
     }
     db.exec('COMMIT');
@@ -880,25 +1269,23 @@ export function closeFork(
 ): CloseForkResult {
   const pre = getFork(db, forkId);
   if (!pre) throw new Error(`fork not found: ${forkId}`);
-  if (pre.status !== 'open') throw new Error(`fork ${forkId} already closed (status=${pre.status})`);
+  if (!isForkLiveStatus(pre.status)) throw new Error(`fork ${forkId} already closed (status=${pre.status})`);
   const nowMs = opts.nowMs ?? Date.now();
   const recordStats = opts.recordStats !== false;
 
   db.exec('BEGIN IMMEDIATE');
   try {
     const cur = db
-      .prepare(`SELECT status, metadata_json, project_id, route, tool_class FROM forks WHERE fork_id = ?`)
-      .get(forkId) as
-      | { status: string; metadata_json: string | null; project_id: string; route: RouteId; tool_class: string }
-      | undefined;
+      .prepare(`SELECT * FROM forks WHERE fork_id = ?`)
+      .get(forkId) as ForkRow | undefined;
     const pAfter = () => getPosterior(db, pre.project_id, pre.route, pre.tool_class).p;
-    if (!cur || cur.status !== 'open') {
+    if (!cur || !isForkLiveStatus(cur.status)) {
       db.exec('ROLLBACK');
       return { forkId, status: cur?.status ?? 'unknown', closedBy, recorded: false, pAfter: pAfter(), committed: false, reason: 'stale_or_closed' };
     }
     const meta = parseForkMetadata(cur.metadata_json);
-    const curGen = meta.gen ?? 1;
-    const curAttempt = meta.attempt ?? 1;
+    // 펜싱은 1급 컬럼 우선, v1은 메타 폴백 (§3.2)
+    const { gen: curGen, attempt: curAttempt } = genAttemptOf(cur);
     if (opts.expectedGen !== undefined && curGen !== opts.expectedGen) {
       db.exec('ROLLBACK');
       return { forkId, status: cur.status, closedBy, recorded: false, pAfter: pAfter(), committed: false, reason: 'stale_generation' };
@@ -914,20 +1301,28 @@ export function closeFork(
     const res = db
       .prepare(
         `UPDATE forks SET status = ?, closed_by = ?, closed_at_ms = ?, metadata_json = ?
-         WHERE fork_id = ? AND status = 'open'`
+         WHERE fork_id = ? AND status IN ('open','waiting_human')`
       )
       .run(outcome, closedBy, nowMs, JSON.stringify(merged), forkId);
     if (Number(res.changes) !== 1) {
       db.exec('ROLLBACK');
       return { forkId, status: 'open', closedBy, recorded: false, pAfter: pAfter(), committed: false, reason: 'stale_or_closed' };
     }
+    closeOpenForkIntervalsInTx(db, forkId, nowMs);
     if (recordStats && outcome !== 'rerouted') {
       updateStatsInTx(db, cur.project_id, getProjectLabel(db, cur.project_id), cur.route, cur.tool_class, outcome === 'ok', 1, null, nowMs);
-      db.prepare(
-        `INSERT INTO decision_events
-           (fork_id, project_id, source, route, tool_name, tool_class, ok, weight, is_retry, created_at_ms)
-         VALUES (?, ?, 'cli', ?, 'dg_close', ?, ?, 1.0, 0, ?)`
-      ).run(forkId, cur.project_id, cur.route, cur.tool_class, outcome === 'ok' ? 1 : 0, nowMs);
+      insertEventRow(db, {
+        forkId,
+        projectId: cur.project_id,
+        source: 'cli',
+        route: cur.route,
+        toolName: 'dg_close',
+        toolClass: cur.tool_class,
+        ok: outcome === 'ok',
+        weight: 1.0,
+        cause: opts.cause ?? null,
+        nowMs,
+      });
     }
     db.exec('COMMIT');
     return { forkId, status: outcome, closedBy, recorded: recordStats && outcome !== 'rerouted', pAfter: pAfter(), committed: true };
@@ -957,10 +1352,68 @@ export function touchFork(
 ): { forkId: string; lastTouchMs: number; ttlMs: number } {
   const fork = getFork(db, forkId);
   if (!fork) throw new Error(`fork not found: ${forkId}`);
-  if (fork.status !== 'open') throw new Error(`fork ${forkId} not open (status=${fork.status})`);
+  if (!isForkLiveStatus(fork.status)) throw new Error(`fork ${forkId} not open (status=${fork.status})`);
   const newTtl = ttlMs ?? fork.ttl_ms;
   db.prepare('UPDATE forks SET last_touch_ms = ?, ttl_ms = ? WHERE fork_id = ?').run(nowMs, newTtl, forkId);
   return { forkId, lastTouchMs: nowMs, ttlMs: newTtl };
+}
+
+/**
+ * Attempt/Generation 범프(PB-1 §3.2): `open`/`waiting_human` fork의 열린 구간을
+ * 닫고 `attempt+1`(`bumpGen` 시 `generation`도 +1)을 1급 컬럼·메타에 동기화한 뒤
+ * 새 attempt의 `wait` 구간을 연다 — 모두 단일 BEGIN IMMEDIATE 안에서.
+ * v1 DB는 컬럼이 없으므로 메타만 갱신한다(반환값은 논리값으로 동일).
+ */
+export function bumpForkAttempt(
+  db: DatabaseSync,
+  forkId: string,
+  opts: { bumpGen?: boolean; nowMs?: number } = {}
+): { forkId: string; generation: number; attempt: number } {
+  const nowMs = opts.nowMs ?? Date.now();
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const cur = db.prepare(`SELECT * FROM forks WHERE fork_id = ?`).get(forkId) as ForkRow | undefined;
+    if (!cur) {
+      db.exec('ROLLBACK');
+      throw new Error(`fork not found: ${forkId}`);
+    }
+    if (!isForkLiveStatus(cur.status)) {
+      db.exec('ROLLBACK');
+      throw new Error(`fork ${forkId} cannot bump attempt (status=${cur.status})`);
+    }
+    const { gen, attempt } = genAttemptOf(cur);
+    const newGen = gen + (opts.bumpGen ? 1 : 0);
+    const newAtt = attempt + 1;
+    closeOpenForkIntervalsInTx(db, forkId, nowMs);
+    const merged: ForkMetadata = { ...parseForkMetadata(cur.metadata_json), gen: newGen, attempt: newAtt };
+    const res = schemaOf(db).forksV2
+      ? db
+          .prepare(
+            `UPDATE forks SET generation = ?, attempt = ?, metadata_json = ?, last_touch_ms = ?
+             WHERE fork_id = ? AND status IN ('open','waiting_human')`
+          )
+          .run(newGen, newAtt, JSON.stringify(merged), nowMs, forkId)
+      : db
+          .prepare(
+            `UPDATE forks SET metadata_json = ?, last_touch_ms = ?
+             WHERE fork_id = ? AND status IN ('open','waiting_human')`
+          )
+          .run(JSON.stringify(merged), nowMs, forkId);
+    if (Number(res.changes) !== 1) {
+      db.exec('ROLLBACK');
+      throw new Error(`fork ${forkId} stale_or_closed`);
+    }
+    openForkIntervalInTx(db, { forkId, attempt: newAtt, phase: 'wait', nowMs });
+    db.exec('COMMIT');
+    return { forkId, generation: newGen, attempt: newAtt };
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      /* 무시 */
+    }
+    throw err;
+  }
 }
 
 export interface BackpropResult {
@@ -989,7 +1442,7 @@ export function backpropFork(
 ): BackpropResult {
   const pre = getFork(db, forkId);
   if (!pre) throw new Error(`fork not found: ${forkId}`);
-  if (pre.status !== 'open' && pre.status !== 'ok') {
+  if (!isForkLiveStatus(pre.status) && pre.status !== 'ok') {
     throw new Error(`fork ${forkId} cannot backprop (status=${pre.status})`);
   }
   const nowMs = opts.nowMs ?? Date.now();
@@ -1001,7 +1454,7 @@ export function backpropFork(
       | { status: string; metadata_json: string | null; project_id: string; route: RouteId; tool_class: string }
       | undefined;
     const pAfter = () => getPosterior(db, pre.project_id, pre.route, pre.tool_class).p;
-    if (!cur || (cur.status !== 'open' && cur.status !== 'ok')) {
+    if (!cur || (!isForkLiveStatus(cur.status) && cur.status !== 'ok')) {
       db.exec('ROLLBACK');
       return { forkId, status: cur?.status ?? 'unknown', neonVerdict: null, weightApplied: 0, pAfter: pAfter(), committed: false, reason: 'stale_or_closed' };
     }
@@ -1013,19 +1466,27 @@ export function backpropFork(
       .prepare(
         `UPDATE forks SET status = 'backprop_fail', closed_by = 'verifier', neon_verdict = 'fail',
            closed_at_ms = COALESCE(closed_at_ms, ?), metadata_json = ?
-         WHERE fork_id = ? AND status IN ('open','ok')`
+         WHERE fork_id = ? AND status IN ('open','ok','waiting_human')`
       )
       .run(nowMs, JSON.stringify(merged), forkId);
     if (Number(res.changes) !== 1) {
       db.exec('ROLLBACK');
       return { forkId, status: cur.status, neonVerdict: null, weightApplied: 0, pAfter: pAfter(), committed: false, reason: 'stale_or_closed' };
     }
+    closeOpenForkIntervalsInTx(db, forkId, nowMs);
     updateStatsInTx(db, cur.project_id, getProjectLabel(db, cur.project_id), cur.route, cur.tool_class, false, penalty, null, nowMs);
-    db.prepare(
-      `INSERT INTO decision_events
-         (fork_id, project_id, source, route, tool_name, tool_class, ok, weight, is_retry, created_at_ms)
-       VALUES (?, ?, 'neon_backprop', ?, 'neon_verifier', ?, 0, ?, 0, ?)`
-    ).run(forkId, cur.project_id, cur.route, cur.tool_class, penalty, nowMs);
+    insertEventRow(db, {
+      forkId,
+      projectId: cur.project_id,
+      source: 'neon_backprop',
+      route: cur.route,
+      toolName: 'neon_verifier',
+      toolClass: cur.tool_class,
+      ok: false,
+      weight: penalty,
+      cause: opts.cause ?? null,
+      nowMs,
+    });
     db.exec('COMMIT');
     return { forkId, status: 'backprop_fail', neonVerdict: 'fail', weightApplied: penalty, pAfter: pAfter(), committed: true };
   } catch (err) {
@@ -1075,8 +1536,17 @@ export function compactDb(
         .run(cutoff14, maxEvents);
       deleted += Number(r2.changes);
     }
+    if (schemaOf(db).intervals) {
+      // forks 행 삭제에 앞서 대응 구간 정리 — fork_intervals에는 FK가 없어 고아 방지는 호출자 책임 (§1.6)
+      db.prepare(
+        `DELETE FROM fork_intervals WHERE fork_id IN (
+           SELECT fork_id FROM forks
+           WHERE status NOT IN ('open','waiting_human') AND closed_at_ms IS NOT NULL AND closed_at_ms < ?)`
+      ).run(cutoff30);
+      db.prepare('DELETE FROM fork_intervals WHERE fork_id NOT IN (SELECT fork_id FROM forks)').run();
+    }
     const r3 = db
-      .prepare('DELETE FROM forks WHERE status != \'open\' AND closed_at_ms IS NOT NULL AND closed_at_ms < ?')
+      .prepare("DELETE FROM forks WHERE status NOT IN ('open','waiting_human') AND closed_at_ms IS NOT NULL AND closed_at_ms < ?")
       .run(cutoff30);
     db.exec('COMMIT');
     db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
@@ -1144,6 +1614,13 @@ export interface CommitWrapInput {
   expectedAttempt?: number;
   recordStats?: boolean;
   conversationId?: string | null;
+  /** v2 토큰·비용 컬럼 — 컬럼 존재 시에만 저장, 기존 호출부는 전부 optional */
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  cacheReadTokens?: number | null;
+  cacheWriteTokens?: number | null;
+  costUsd?: number | null;
+  costStatus?: 'reported' | 'estimated' | 'unknown' | null;
   nowMs?: number;
 }
 
@@ -1171,31 +1648,20 @@ export function commitWrapOutcome(db: DatabaseSync, input: CommitWrapInput): Com
   db.exec('BEGIN IMMEDIATE');
   try {
     const cur = db
-      .prepare(
-        `SELECT status, metadata_json, project_id, project_label, route, tool_class FROM forks WHERE fork_id = ?`
-      )
-      .get(input.forkId) as
-      | {
-          status: string;
-          metadata_json: string | null;
-          project_id: string;
-          project_label: string;
-          route: RouteId;
-          tool_class: string;
-        }
-      | undefined;
+      .prepare(`SELECT * FROM forks WHERE fork_id = ?`)
+      .get(input.forkId) as ForkRow | undefined;
     if (!cur) {
       db.exec('ROLLBACK');
       return { committed: false, closed: false, recorded: false, outcome: 'unknown', reason: 'not_found', pAfter: 0 };
     }
     const pAfter = () => getPosterior(db, cur.project_id, cur.route, cur.tool_class).p;
-    if (cur.status !== 'open') {
+    if (!isForkLiveStatus(cur.status)) {
       db.exec('ROLLBACK');
       return { committed: false, closed: false, recorded: false, outcome: cur.status, reason: 'stale_or_closed', pAfter: pAfter() };
     }
     const meta = parseForkMetadata(cur.metadata_json);
-    const curGen = meta.gen ?? 1;
-    const curAttempt = meta.attempt ?? 1;
+    // 펜싱·dedupe 기준은 1급 컬럼 우선, v1은 메타 폴백 (§3.2)
+    const { gen: curGen, attempt: curAttempt } = genAttemptOf(cur);
     if (input.expectedGen !== undefined && curGen !== input.expectedGen) {
       db.exec('ROLLBACK');
       return { committed: false, closed: false, recorded: false, outcome: 'open', reason: 'stale_generation', pAfter: pAfter() };
@@ -1212,41 +1678,43 @@ export function commitWrapOutcome(db: DatabaseSync, input: CommitWrapInput): Com
     const res = db
       .prepare(
         `UPDATE forks SET status = ?, closed_by = 'worker', closed_at_ms = ?, metadata_json = ?
-         WHERE fork_id = ? AND status = 'open'`
+         WHERE fork_id = ? AND status IN ('open','waiting_human')`
       )
       .run(input.outcome, nowMs, JSON.stringify(merged), input.forkId);
     if (Number(res.changes) !== 1) {
       db.exec('ROLLBACK');
       return { committed: false, closed: false, recorded: false, outcome: 'open', reason: 'stale_or_closed', pAfter: pAfter() };
     }
+    closeOpenForkIntervalsInTx(db, input.forkId, nowMs);
 
     let recorded = false;
     if (!selfInvoke) {
       const dedupeKey = `wrap:${input.forkId}:a${curAttempt}`;
-      const evRes = db
-        .prepare(
-          `INSERT OR IGNORE INTO decision_events
-             (dedupe_key, fork_id, project_id, conversation_id, source, route, tool_name, tool_class,
-              ok, weight, is_retry, error_snippet, created_at_ms)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1.0, 0, ?, ?)`
-        )
-        .run(
-          dedupeKey,
-          input.forkId,
-          cur.project_id,
-          input.conversationId ?? null,
-          input.source ?? 'wrap',
-          cur.route,
-          input.toolName ?? 'dg_wrap',
-          cur.tool_class,
-          input.outcome === 'ok' ? 1 : 0,
-          formatErrorSnippet(input.cause, input.errorSnippet),
-          nowMs
-        );
+      const evChanges = insertEventRow(db, {
+        dedupeKey,
+        forkId: input.forkId,
+        projectId: cur.project_id,
+        conversationId: input.conversationId ?? null,
+        source: input.source ?? 'wrap',
+        route: cur.route,
+        toolName: input.toolName ?? 'dg_wrap',
+        toolClass: cur.tool_class,
+        ok: input.outcome === 'ok',
+        weight: 1.0,
+        errorSnippet: formatErrorSnippet(input.cause, input.errorSnippet),
+        cause: input.cause,
+        inputTokens: input.inputTokens ?? null,
+        outputTokens: input.outputTokens ?? null,
+        cacheReadTokens: input.cacheReadTokens ?? null,
+        cacheWriteTokens: input.cacheWriteTokens ?? null,
+        costUsd: input.costUsd ?? null,
+        costStatus: input.costStatus ?? null,
+        nowMs,
+      });
       // 표본 기록은 이벤트가 실제로 1건 삽입됐을 때만 — dedupe 충돌·비표본 결과 차단
       const skipStats =
         input.outcome === 'rerouted' || isAuditOnlyCause(input.cause) || !recordStats;
-      if (Number(evRes.changes) === 1 && !skipStats) {
+      if (evChanges === 1 && !skipStats) {
         updateStatsInTx(
           db, cur.project_id, cur.project_label, cur.route, cur.tool_class,
           input.outcome === 'ok', 1.0, null, nowMs
@@ -1269,7 +1737,12 @@ export function commitWrapOutcome(db: DatabaseSync, input: CommitWrapInput): Com
 /**
  * `waiting_human` 메타 상태 마킹(§2.2 Phase A): fork 상태는 유지한 채
  * `metadata_json.waiting_human=true`를 세팅한다 — settleOrphans가 최대
- * `WAITING_HUMAN_MAX_MS`(7일)까지 TTL 정산을 면제한다. `open`/`ok`만 허용.
+ * `WAITING_HUMAN_MAX_MS`(7일)까지 TTL 정산을 면제한다. `open`/`waiting_human`/
+ * `ok`만 허용.
+ * PB-1 주의: 런타임은 status를 `open`으로 유지한다(`waiting_human` status는
+ * 마이그레이션 백필이 레거시 행에만 부여). 열린 구간이면 `human` 단계 구간으로
+ * 전환해 대기 시간을 fork_intervals에 남긴다 — `ok` fork는 종결 상태이므로
+ * 메타만 갱신한다.
  */
 export function markForkWaitingHuman(
   db: DatabaseSync,
@@ -1280,13 +1753,13 @@ export function markForkWaitingHuman(
   db.exec('BEGIN IMMEDIATE');
   try {
     const cur = db
-      .prepare(`SELECT status, metadata_json FROM forks WHERE fork_id = ?`)
-      .get(forkId) as { status: string; metadata_json: string | null } | undefined;
+      .prepare(`SELECT * FROM forks WHERE fork_id = ?`)
+      .get(forkId) as ForkRow | undefined;
     if (!cur) {
       db.exec('ROLLBACK');
       return { marked: false, reason: 'not_found' };
     }
-    if (cur.status !== 'open' && cur.status !== 'ok') {
+    if (!isForkLiveStatus(cur.status) && cur.status !== 'ok') {
       db.exec('ROLLBACK');
       return { marked: false, reason: 'stale_or_closed' };
     }
@@ -1298,11 +1771,16 @@ export function markForkWaitingHuman(
     };
     if (opts.reworkCount !== undefined) merged.rework_count = opts.reworkCount;
     const res = db
-      .prepare(`UPDATE forks SET metadata_json = ? WHERE fork_id = ? AND status IN ('open','ok')`)
+      .prepare(`UPDATE forks SET metadata_json = ? WHERE fork_id = ? AND status IN ('open','ok','waiting_human')`)
       .run(JSON.stringify(merged), forkId);
     if (Number(res.changes) !== 1) {
       db.exec('ROLLBACK');
       return { marked: false, reason: 'stale_or_closed' };
+    }
+    // 열려 있는 fork(open/waiting_human)만 human 구간으로 전환 — ok는 종결이라 구간 없음
+    if (isForkLiveStatus(cur.status)) {
+      const { attempt } = genAttemptOf(cur);
+      openForkIntervalInTx(db, { forkId, attempt, phase: 'human', nowMs });
     }
     db.exec('COMMIT');
     return { marked: true };
@@ -1363,7 +1841,7 @@ export function applyVerdictToFork(
     if (fork.status === 'ok') {
       return { action: 'pass', exitCode: 0, committed: true, reason: 'idempotent' };
     }
-    if (fork.status !== 'open') {
+    if (!isForkLiveStatus(fork.status)) {
       return { action: 'escalate_human', exitCode: 3, committed: false, reason: `fork status ${fork.status}` };
     }
     const res = closeFork(db, input.forkId, 'ok', 'verifier', vReason || 'verdict pass', { cause: 'ok_pass', nowMs });
@@ -1377,7 +1855,7 @@ export function applyVerdictToFork(
     if (fork.status === 'backprop_fail') {
       return { action: 'backprop_fail', exitCode: 0, committed: true, reason: 'idempotent' };
     }
-    if (fork.status !== 'open' && fork.status !== 'ok') {
+    if (!isForkLiveStatus(fork.status) && fork.status !== 'ok') {
       return { action: 'escalate_human', exitCode: 3, committed: false, reason: `fork status ${fork.status}` };
     }
     const res = backpropFork(db, input.forkId, 2.0, vReason || 'verdict fail', { cause: 'gate_fail', nowMs });
@@ -1387,24 +1865,13 @@ export function applyVerdictToFork(
     return { action: 'backprop_fail', exitCode: 0, committed: true, pAfter: res.pAfter };
   }
 
-  // rework — 예산 검사·count 증분·페널티 표본을 단일 트랜잭션으로
+  // rework — 예산 검사·count 증분·페널티 표본·attempt 범프를 단일 트랜잭션으로
   const maxReworks = input.maxReworks ?? 2;
   db.exec('BEGIN IMMEDIATE');
   try {
     const cur = db
-      .prepare(
-        `SELECT status, metadata_json, project_id, project_label, route, tool_class FROM forks WHERE fork_id = ?`
-      )
-      .get(input.forkId) as
-      | {
-          status: string;
-          metadata_json: string | null;
-          project_id: string;
-          project_label: string;
-          route: RouteId;
-          tool_class: string;
-        }
-      | undefined;
+      .prepare(`SELECT * FROM forks WHERE fork_id = ?`)
+      .get(input.forkId) as ForkRow | undefined;
     if (!cur) {
       db.exec('ROLLBACK');
       return { action: 'escalate_human', exitCode: 3, committed: false, reason: 'fork_not_found' };
@@ -1420,21 +1887,32 @@ export function applyVerdictToFork(
       });
       return { action: 'escalate_human', exitCode: 3, committed: marked.marked, reason: 'rework budget exhausted', waitingHuman: marked.marked };
     }
-    if (cur.status !== 'open' && cur.status !== 'ok') {
+    if (!isForkLiveStatus(cur.status) && cur.status !== 'ok') {
       db.exec('ROLLBACK');
       return { action: 'escalate_human', exitCode: 3, committed: false, reason: `fork status ${cur.status}` };
     }
+    const { attempt: curAttempt } = genAttemptOf(cur);
+    const openish = isForkLiveStatus(cur.status);
     const merged: ForkMetadata = {
       ...meta,
       rework_count: reworkCount + 1,
       cause: 'gate_fail',
+      // open 계열은 재시도를 위해 attempt+1 (컬럼·메타 동기화) — 재시도 fork 유지
+      ...(openish ? { attempt: curAttempt + 1 } : {}),
       ...(vReason ? { rework_reason: redactSecrets(vReason).slice(0, ERROR_SNIPPET_MAX_CHARS) } : {}),
     };
-    // open이면 재작업을 위해 fork 유지, ok면 backprop_fail로 전이 — 둘 다 w=1.0 페널티
-    const res = cur.status === 'open'
-      ? db
-          .prepare(`UPDATE forks SET metadata_json = ? WHERE fork_id = ? AND status = 'open'`)
-          .run(JSON.stringify(merged), input.forkId)
+    // open 계열이면 재작업을 위해 fork 유지 + attempt 범프, ok면 backprop_fail로 전이 — 둘 다 w=1.0 페널티
+    const res = openish
+      ? schemaOf(db).forksV2
+        ? db
+            .prepare(
+              `UPDATE forks SET metadata_json = ?, attempt = attempt + 1
+               WHERE fork_id = ? AND status IN ('open','waiting_human')`
+            )
+            .run(JSON.stringify(merged), input.forkId)
+        : db
+            .prepare(`UPDATE forks SET metadata_json = ? WHERE fork_id = ? AND status IN ('open','waiting_human')`)
+            .run(JSON.stringify(merged), input.forkId)
       : db
           .prepare(
             `UPDATE forks SET status = 'backprop_fail', closed_by = 'verifier', neon_verdict = 'fail',
@@ -1446,11 +1924,25 @@ export function applyVerdictToFork(
       db.exec('ROLLBACK');
       return { action: 'escalate_human', exitCode: 3, committed: false, reason: 'stale_or_closed' };
     }
-    db.prepare(
-      `INSERT INTO decision_events
-         (fork_id, project_id, source, route, tool_name, tool_class, ok, weight, is_retry, created_at_ms)
-       VALUES (?, ?, 'neon_backprop', ?, 'neon_verifier', ?, 0, 1.0, 0, ?)`
-    ).run(input.forkId, cur.project_id, cur.route, cur.tool_class, nowMs);
+    if (openish) {
+      // 재시도 경계: 구형 구간(현 attempt)을 닫고 새 attempt의 wait 구간을 연다 (§3.2)
+      closeOpenForkIntervalsInTx(db, input.forkId, nowMs);
+      openForkIntervalInTx(db, { forkId: input.forkId, attempt: curAttempt + 1, phase: 'wait', nowMs });
+    } else {
+      closeOpenForkIntervalsInTx(db, input.forkId, nowMs);
+    }
+    insertEventRow(db, {
+      forkId: input.forkId,
+      projectId: cur.project_id,
+      source: 'neon_backprop',
+      route: cur.route,
+      toolName: 'neon_verifier',
+      toolClass: cur.tool_class,
+      ok: false,
+      weight: 1.0,
+      cause: 'gate_fail',
+      nowMs,
+    });
     updateStatsInTx(db, cur.project_id, cur.project_label, cur.route, cur.tool_class, false, 1.0, null, nowMs);
     db.exec('COMMIT');
     const post = getPosterior(db, cur.project_id, cur.route, cur.tool_class);
@@ -1530,22 +2022,32 @@ export function acquireScopeLease(
 ): ScopeLeaseResult {
   const nowMs = input.nowMs ?? Date.now();
   const live = input.liveSessions !== undefined ? new Set(input.liveSessions) : null;
-  const rows = db
-    .prepare(`SELECT metadata_json FROM forks WHERE status = 'open'`)
-    .all() as { metadata_json: string | null }[];
+  // v2는 lease_owner/lease_expires_ms 1급 컬럼이 정본, v1은 metadata_json (§3.2)
+  const v2 = schemaOf(db).forksV2;
+  const rows = v2
+    ? (db
+        .prepare(
+          `SELECT metadata_json, lease_owner, lease_expires_ms FROM forks WHERE status IN ('open','waiting_human')`
+        )
+        .all() as { metadata_json: string | null; lease_owner: string | null; lease_expires_ms: number | null }[])
+    : (db
+        .prepare(`SELECT metadata_json FROM forks WHERE status = 'open'`)
+        .all() as { metadata_json: string | null; lease_owner?: undefined; lease_expires_ms?: undefined }[]);
   for (const row of rows) {
     const meta = parseForkMetadata(row.metadata_json);
     if (meta.repo_scope !== input.repoScope) continue;
-    if (meta.lease_owner == null) continue; // 스코프 기록은 있으나 점유자 미지정
-    if (meta.lease_owner === input.leaseOwner) continue; // 자기 자신은 충돌 아님
-    const until = typeof meta.lease_until_ms === 'number' ? meta.lease_until_ms : 0;
+    const owner = v2 ? (row.lease_owner ?? meta.lease_owner ?? null) : (meta.lease_owner ?? null);
+    if (owner == null) continue; // 스코프 기록은 있으나 점유자 미지정
+    if (owner === input.leaseOwner) continue; // 자기 자신은 충돌 아님
+    const rawUntil = v2 ? (row.lease_expires_ms ?? meta.lease_until_ms) : meta.lease_until_ms;
+    const until = typeof rawUntil === 'number' ? rawUntil : 0;
     if (until <= nowMs) continue; // lease 만료 → 탈취 가능
-    if (live !== null && !live.has(meta.lease_owner)) continue; // 소유 세션 사망 확인 → 탈취
+    if (live !== null && !live.has(owner)) continue; // 소유 세션 사망 확인 → 탈취
     if (live === null) continue; // 생존 검증 수단 없음 → 점유로 보지 않음 (fail-open)
     return {
       acquired: false,
-      holder: meta.lease_owner,
-      reason: `scope lease held by ${meta.lease_owner} until ${new Date(until).toISOString()}`,
+      holder: owner,
+      reason: `scope lease held by ${owner} until ${new Date(until).toISOString()}`,
     };
   }
   return { acquired: true };
