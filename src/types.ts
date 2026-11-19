@@ -110,6 +110,8 @@ export interface AppState {
   // 세션 메타
   cwd: string;
   sessionId: number;
+  /** `--repo <dir>` 스코프 지정 시 레포 표시명(예: 'Gemini_trick'). 미지정 null — watch 헤더는 '전체' 표기 */
+  repoScopeLabel?: string | null;
   /** 활성 roster.json 역할·모델 바인딩 라벨 (리드·탐색·코더·검증·자문) */
   rosterLabels: RosterDisplayLabels;
   modelFlag: string;
@@ -159,6 +161,13 @@ export interface AppState {
 
   // Workers 스웜 패널
   cards: SwarmCard[];
+  /**
+   * 라이브 hc 워커 카드(Live TUI Sync v2) — `--watch` 실시간 동기화 결과 표시용.
+   * 길이 가변(0~N)이므로 트랜스크립트 3슬롯 계약을 쓰는 `cards`를 대체하지 않고
+   * 별도 슬롯에 담는다. 렌더는 `liveWorkers?.length > 0`일 때 이 값을 우선 보여주고,
+   * 없으면 기존 `cards`로 폴백한다.
+   */
+  liveWorkers?: SwarmCard[];
   workers: SwarmWorker[];
 
   // 세션 기록

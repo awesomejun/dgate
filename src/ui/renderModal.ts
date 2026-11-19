@@ -195,31 +195,71 @@ function renderSwarmModal(buf: CellBuffer, rect: Rect, state: AppState): void {
 
   cy++;
   if (cy < rect.y + rect.h - 3) {
-    buf.writeText(ix, cy++, '대표 워커 태스크 현황', THEME.blue, THEME.bgModal, true, iw);
-    const sample = state.workers.slice(0, Math.max(1, rect.y + rect.h - 2 - cy));
-    for (const w of sample) {
-      const barW = 14;
-      const prefix = `#${String(w.id).padStart(2, '0')} ${padRightWidth(w.role, 8)} ${padRightWidth(w.target, 28)} `;
-      buf.writeText(ix, cy, prefix, THEME.fgSoft, THEME.bgModal, false, iw);
-      const bx = ix + 41;
-      if (bx + barW + 6 < rect.x + rect.w - 2) {
-        buf.drawProgressBar(
-          bx,
-          cy,
-          barW,
-          w.progress / 100,
-          w.status === 'done' ? THEME.green : THEME.blue,
-          THEME.bgBlueTrack
-        );
-        buf.writeText(
-          bx + barW + 1,
-          cy,
-          padLeftWidth(`${w.progress}%`, 4),
-          w.status === 'done' ? THEME.green : THEME.muted,
-          THEME.bgModal
-        );
+    // 라이브 hc 워커가 관측 중이면 그 카드를 우선 노출 — 없으면 기존 매트릭스 대표 태스크 유지
+    const liveCards = state.liveWorkers && state.liveWorkers.length > 0 ? state.liveWorkers : null;
+    buf.writeText(
+      ix,
+      cy++,
+      liveCards ? `라이브 hc 워커 (${liveCards.length})` : '대표 워커 태스크 현황',
+      THEME.blue,
+      THEME.bgModal,
+      true,
+      iw
+    );
+    if (liveCards) {
+      const maxRows = Math.max(1, rect.y + rect.h - 2 - cy);
+      for (const c of liveCards.slice(0, Math.floor(maxRows / 2))) {
+        buf.writeText(ix, cy, `◉ ${truncateWidth(c.name, 34, '…')}`, THEME.fgSoft, THEME.bgModal, false, iw);
+        const barW = 14;
+        const bx = ix + 36;
+        if (bx + barW + 6 < rect.x + rect.w - 2) {
+          buf.drawProgressBar(
+            bx,
+            cy,
+            barW,
+            c.progress / 100,
+            c.status === 'done' ? THEME.green : THEME.blue,
+            THEME.bgBlueTrack
+          );
+          buf.writeText(
+            bx + barW + 1,
+            cy,
+            padLeftWidth(`${c.progress}%`, 4),
+            c.status === 'done' ? THEME.green : THEME.muted,
+            THEME.bgModal
+          );
+        }
+        cy++;
+        if (cy < rect.y + rect.h - 2) {
+          buf.writeText(ix + 2, cy++, truncateWidth(c.description, iw - 2, '…'), THEME.muted, THEME.bgModal, false, iw - 2);
+        }
       }
-      cy++;
+    } else {
+      const sample = state.workers.slice(0, Math.max(1, rect.y + rect.h - 2 - cy));
+      for (const w of sample) {
+        const barW = 14;
+        const prefix = `#${String(w.id).padStart(2, '0')} ${padRightWidth(w.role, 8)} ${padRightWidth(w.target, 28)} `;
+        buf.writeText(ix, cy, prefix, THEME.fgSoft, THEME.bgModal, false, iw);
+        const bx = ix + 41;
+        if (bx + barW + 6 < rect.x + rect.w - 2) {
+          buf.drawProgressBar(
+            bx,
+            cy,
+            barW,
+            w.progress / 100,
+            w.status === 'done' ? THEME.green : THEME.blue,
+            THEME.bgBlueTrack
+          );
+          buf.writeText(
+            bx + barW + 1,
+            cy,
+            padLeftWidth(`${w.progress}%`, 4),
+            w.status === 'done' ? THEME.green : THEME.muted,
+            THEME.bgModal
+          );
+        }
+        cy++;
+      }
     }
   }
 }

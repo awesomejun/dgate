@@ -11,6 +11,12 @@ import {
   detectWatchedLeadLabel,
   findLatestTranscriptPath,
 } from './backend/transcriptMapper.ts';
+import {
+  createLiveRosterSyncer,
+  type LiveRosterSyncer,
+  type LiveWorkerInfo,
+  type MergedLiveRoster,
+} from './backend/liveWorkerSync.ts';
 import { parseKeyEvents, TerminalScreen, type KeyEvent } from './core/terminal.ts';
 import {
   applyDemoTime,
@@ -47,6 +53,8 @@ interface CliOptions {
   watchMode: boolean;
   watchDir: string | null;
   watchDb: string | null;
+  /** `--repo <dir>`(별칭 `--project`) — 관측 스코프를 특정 레포로 한정 */
+  repoDir: string | null;
   follow: boolean;
   replayMs: number;
   initialTime: number;
@@ -75,6 +83,7 @@ function parseArgs(argv: string[]): CliOptions {
     watchMode: false,
     watchDir: null,
     watchDb: null,
+    repoDir: null,
     follow: false,
     replayMs: 0,
     initialTime: 0,
@@ -121,6 +130,13 @@ function parseArgs(argv: string[]): CliOptions {
         // N8: SQLite 결정 DB 읽기전용 구독 경로. 우선순위 --watch-db > DGATE_DB_PATH > DECISION_ORCHESTRATOR_DB_PATH > GEMINI_TRICK_DB_PATH(레거시) > 기본 경로
         const p = argv[++i];
         if (p && !p.startsWith('-')) opts.watchDb = p;
+        break;
+      }
+      case '--repo':
+      case '--project': {
+        // 관측 스코프를 특정 레포로 한정 — 헤더 repo=<이름> 표기, 해당 레포 워커·통계만 표시
+        const p = argv[++i];
+        if (p && !p.startsWith('-')) opts.repoDir = p;
         break;
       }
       case '--stream':
@@ -237,6 +253,8 @@ DGATE TUI (Lead · Decision Gate · Workers · Verifier · Advisor)
   --watch-db <path>      SQLite 결정 DB(decision.db) 읽기전용 구독 경로 지정 (N8)
                          우선순위: --watch-db > DGATE_DB_PATH > DECISION_ORCHESTRATOR_DB_PATH > GEMINI_TRICK_DB_PATH(레거시)
                                   > ~/.local/state/dgate/decision.db
+  --repo, --project <dir> 관측 스코프를 특정 프로젝트(레포)로 한정 — 헤더에 repo=<이름> 표기,
+                         해당 레포의 활성 hc 워커·결정 통계만 표시 (기본: 전체 레포 관측)
   --live, --agy          실제 Antigravity(agy) / Gemini API 백엔드 에이전트 루프 연결 실행
   --demo                 gemini_sub_neon.html의 40초 멀티 에이전트 시나리오 데모 실행 (기본값)
   --stream               표준 입력(stdin)으로부터 JSONL(또는 agy stream-json) 실시간 렌더링
@@ -283,10 +301,16 @@ function main(): void {
   state.paused = opts.paused;
   state.modal = opts.modalOverride;
 
+  // `--repo <dir>`: 관측 스코프를 특정 레포로 한정 — 헤더 표기·텔레메트리 projectId·live 워커 필터에 사용
+  const repoFilterDir = opts.repoDir ? path.resolve(opts.repoDir) : null;
+  if (repoFilterDir) {
+    state.repoScopeLabel = path.basename(repoFilterDir) || repoFilterDir;
+  }
+
   // 활성 roster.json 역할·모델 바인딩 반영 — 실패 시 createInitialState의
   // 내장(builtin) 라벨을 그대로 유지하는 안전 폴백.
   try {
-    const loaded = loadRosterConfig({ repoDir: opts.watchDir ?? process.cwd() });
+    const loaded = loadRosterConfig({ repoDir: repoFilterDir ?? opts.watchDir ?? process.cwd() });
     const resolved = resolveRosterProfile(loaded.config, loaded.config.defaultProfile);
     applyRosterToState(state, resolved.name, loaded.source, resolved.profile);
   } catch {
@@ -306,8 +330,11 @@ function main(): void {
   const rosterLead = state.rosterLabels.lead;
   const rosterModelName = state.modelName;
   const rosterModelFlag = state.modelFlag;
+  // live 로스터 동기화기가 watchedLead를 존중해 lead 슬롯을 덮지 않게 하는 추적 변수
+  let watchedLeadLabel: string | null = null;
   const applyWatchedLeadLabel = (transcriptPath: string | null): void => {
     const detected = detectWatchedLeadLabel(transcriptPath);
+    watchedLeadLabel = detected?.leadBadge ?? null;
     state.rosterLabels.lead = detected?.leadBadge ?? rosterLead;
     state.modelName = detected?.modelName ?? rosterModelName;
     state.modelFlag = detected?.modelFlag ?? rosterModelFlag;
@@ -322,7 +349,11 @@ function main(): void {
     fs.existsSync(decisionDbPath)
   ) {
     try {
-      const snapshot = readTelemetrySnapshot(decisionDbPath, opts.watchDir ?? process.cwd());
+      // `--repo` 지정 시 해당 레포의 projectId로 스코프(경유 cwd → 내부 projectId 환산)
+      const snapshot = readTelemetrySnapshot(
+        decisionDbPath,
+        repoFilterDir ?? opts.watchDir ?? process.cwd()
+      );
       state.routes = snapshot.routes;
       const splitCount = snapshot.routes.filter((r) => r.forcedSplit === true || r.p < 0.7).length;
       state.sharpCount = snapshot.routes.length - splitCount;
@@ -404,6 +435,7 @@ function main(): void {
 
   let stopFileWatcher: (() => void) | null = null;
   let checkNewSessionTimer: ReturnType<typeof setInterval> | null = null;
+  let liveSyncer: LiveRosterSyncer | null = null;
   let extraTtyStream: tty.ReadStream | null = null;
   let busServer: QuadBusServer | null = null;
   let busClient: QuadBusClient | null = null;
@@ -417,6 +449,7 @@ function main(): void {
     if (busClient) busClient.close();
     if (stopFileWatcher) stopFileWatcher();
     if (checkNewSessionTimer) clearInterval(checkNewSessionTimer);
+    if (liveSyncer) liveSyncer.stop();
     if (extraTtyStream) {
       try {
         extraTtyStream.setRawMode(false);
@@ -441,6 +474,138 @@ function main(): void {
     if (busServer) {
       busServer.broadcast({ type: 'state', state });
     }
+  };
+
+  // ---- Live 워커 로스터 동기화 (--watch) — 활성 hc 워커 배지·[repo] 태그·1줄 활동 ----
+  const SLOT_LOG_COLOR = {
+    lead: 'blue',
+    explore: 'blue',
+    coder: 'blue',
+    verifier: 'neon',
+    advisor: 'purple',
+  } as const;
+  const MATRIX_ROLE_BY_SLOT = {
+    lead: 'index',
+    explore: 'search',
+    coder: 'grep',
+    verifier: 'verify',
+    advisor: 'audit',
+  } as const;
+
+  // 로그 중복 제거용 직전 워커 상태(주소 키)
+  const prevLiveWorkers = new Map<
+    string,
+    {
+      activity: string;
+      finished: boolean;
+      name: string;
+      repoTag: string;
+      shortModel: string;
+      slot: LiveWorkerInfo['slot'];
+    }
+  >();
+
+  const liveRosterStateSignature = (): string =>
+    JSON.stringify([
+      state.rosterLabels,
+      state.modelName,
+      state.modelFlag,
+      state.neonModelName,
+      state.neonModelFlag,
+      state.swarmActive,
+      state.liveWorkers,
+      state.workers,
+      state.logs.length,
+    ]);
+
+  const appendLiveWorkerLog = (w: LiveWorkerInfo, suffix?: string): void => {
+    const base = `[${w.repoTag}] ${w.name} (${w.shortModel})`;
+    appendLog(
+      state,
+      w.name,
+      SLOT_LOG_COLOR[w.slot],
+      suffix ? `${base} — ${suffix}` : `${base} — ${w.activity}`
+    );
+  };
+
+  const applyLiveRosterUpdate = (merged: MergedLiveRoster): void => {
+    const prevSig = liveRosterStateSignature();
+    state.rosterLabels = merged.labels;
+    state.neonModelName = merged.verifierModelName;
+    state.neonModelFlag = merged.verifierModelFlag;
+    // lead는 라이브 리드 워커가 있을 때만(관측 중 세션 배지 우선) 반영
+    const hasLiveLead = merged.workers.some((w) => w.slot === 'lead');
+    if (hasLiveLead && !watchedLeadLabel) {
+      state.modelName = merged.leadModelName;
+      state.modelFlag = merged.leadModelFlag;
+    }
+
+    // Workers 카드 — 제목: [repoTag] name · shortModel (repo 스코프 시 태그 생략), 본문: 1줄 활동.
+    // 가변 길이 라이브 목록은 state.liveWorkers로 — state.cards는 transcriptMapper가 쓰는
+    // 고정 3슬롯(tool 카테고리) 계약이므로 절대 덮어쓰지 않는다(레이아웃·렌더는 liveWorkers 우선).
+    const scoped = Boolean(repoFilterDir);
+    state.liveWorkers = merged.workers.map((w) => ({
+      name: scoped ? `${w.name} · ${w.shortModel}` : `[${w.repoTag}] ${w.name} · ${w.shortModel}`,
+      model: w.shortModel,
+      progress: w.status === 'done' ? 100 : 0,
+      description: w.activity,
+      status: w.status === 'done' ? ('done' as const) : ('running' as const),
+    }));
+    state.swarmActive = merged.activeWorkerCount;
+
+    // 워커 매트릭스(s 모달) 앞 슬롯에도 live 상태 반영
+    for (let i = 0; i < state.workers.length; i++) {
+      const w = merged.workers[i];
+      const cur = state.workers[i]!;
+      if (w) {
+        state.workers[i] = {
+          ...cur,
+          role: MATRIX_ROLE_BY_SLOT[w.slot],
+          target: scoped ? w.name : `[${w.repoTag}] ${w.name}`,
+          progress: w.status === 'done' ? 100 : 0,
+          status: w.status === 'done' ? 'done' : 'running',
+        };
+      } else if (cur.status !== 'idle') {
+        state.workers[i] = { ...cur, progress: 0, status: 'idle' };
+      }
+    }
+
+    // 중복 제거된 세션 로그 — 등장·활동 변화·완료/종료 시에만 1줄씩
+    const seen = new Set<string>();
+    for (const w of merged.workers) {
+      seen.add(w.address);
+      const prev = prevLiveWorkers.get(w.address);
+      const finished = w.status === 'done';
+      if (!prev) {
+        appendLiveWorkerLog(w);
+      } else if (finished && !prev.finished) {
+        appendLiveWorkerLog(w, '완료');
+      } else if (w.activity !== prev.activity) {
+        appendLiveWorkerLog(w);
+      }
+      prevLiveWorkers.set(w.address, {
+        activity: w.activity,
+        finished,
+        name: w.name,
+        repoTag: w.repoTag,
+        shortModel: w.shortModel,
+        slot: w.slot,
+      });
+    }
+    for (const [addr, prev] of [...prevLiveWorkers]) {
+      if (!seen.has(addr)) {
+        prevLiveWorkers.delete(addr);
+        appendLog(
+          state,
+          prev.name,
+          SLOT_LOG_COLOR[prev.slot],
+          `[${prev.repoTag}] ${prev.name} (${prev.shortModel}) — 종료`
+        );
+      }
+    }
+
+    // 실제 변경 시에만 재렌더 (매 틱 방송 중복 억제)
+    if (liveRosterStateSignature() !== prevSig) renderNow();
   };
 
   // 선행 버그 #1 수정: liveHooks를 Hub IPC 등록 이전에 선언해 핸들러에서 참조 가능하게 함
@@ -531,6 +696,13 @@ function main(): void {
     }
 
     if (opts.watchMode) {
+      // Live 워커 로스터 동기화(v2) — roster 핫리로드 + 활성 hc 워커 배지·[repo] 태그·1줄 활동
+      liveSyncer = createLiveRosterSyncer({
+        repoDir: repoFilterDir ?? opts.watchDir ?? process.cwd(),
+        repoFilterDir,
+        getWatchedLead: () => watchedLeadLabel,
+        onUpdate: (merged) => applyLiveRosterUpdate(merged),
+      });
       checkNewSessionTimer = setInterval(() => {
         const latest = findLatestTranscriptPath(opts.watchDir ?? undefined);
         if (latest && latest !== opts.filePath) {

@@ -8,7 +8,7 @@ import {
 } from '../core/width.ts';
 import { LOG_FILTER_LABELS, TRIGGER_LABELS, effortToGauge, getFilteredLogs, sortRoutesForDisplay } from '../state/store.ts';
 import { THEME, lerpColor, resolveColorKey, type RGB } from '../theme.ts';
-import type { AppState } from '../types.ts';
+import type { AppState, SwarmCard } from '../types.ts';
 import { computeLayout, type CompactLayout, type FullLayout } from './layout.ts';
 import { renderModalOverlay } from './renderModal.ts';
 
@@ -87,6 +87,11 @@ function renderFullLayout(buf: CellBuffer, state: AppState, L: FullLayout): void
   renderFooter(buf, state, L.padX, L.footerY, L.cols - L.padX * 2);
 }
 
+/** Workers 패널 카드 소스 — 라이브 hc 워커 카드가 있으면 우선, 없으면 기존 3슬롯 cards로 폴백. */
+function workerCardsOf(state: AppState): SwarmCard[] {
+  return state.liveWorkers && state.liveWorkers.length > 0 ? state.liveWorkers : state.cards;
+}
+
 function renderHeader(
   buf: CellBuffer,
   state: AppState,
@@ -119,18 +124,9 @@ function renderHeader(
     buf.writeText(x + leftW + 1, y, modeBadge, modeBadgeFg, THEME.bg, true, width - leftW - 1);
     leftW += 1 + badgeW;
   }
-  if (width - leftW > 8) {
-    buf.writeText(
-      x + leftW,
-      y,
-      ` · profile=${state.rosterLabels.profileName}`,
-      THEME.muted,
-      THEME.bg,
-      false,
-      width - leftW
-    );
-  }
 
+  // 우측 카운터 폭을 먼저 계산한다 — 프로필/스코프 문자열이 이 영역을 침범하면
+  // 120열에서 `repo=LEAD BUILDS…` 처럼 라벨이 덮여 보인다(헤더 충돌 방지).
   const compactBadges = width < 96;
   const b1 = compactBadges ? `LEAD[${state.argonBuilds}]` : `LEAD BUILDS [${state.argonBuilds}]`;
   const b2 = compactBadges
@@ -148,8 +144,28 @@ function renderHeader(
     stringWidth(b4) +
     gap.length * 3;
   const startRight = x + width - totalRightW;
+  const countersDrawn = startRight > x + 24 + leftW;
 
-  if (startRight > x + 24 + leftW) {
+  if (width - leftW > 8) {
+    // 관측 스코프 표기 — --repo 지정 시 repo=<이름>, watch 전역 관측 시 '전체'
+    const repoScope = state.repoScopeLabel
+      ? `repo=${state.repoScopeLabel}`
+      : state.mode === 'watch'
+        ? '전체'
+        : null;
+    // 카운터가 그려지는 폭에서는 최대폭을 width-leftW-countersW-2로 제한해 절대 겹치지 않게 한다.
+    const scopeMaxW = countersDrawn
+      ? Math.max(0, width - leftW - totalRightW - 2)
+      : Math.max(0, width - leftW);
+    let scopeText = ` · profile=${state.rosterLabels.profileName}${repoScope ? ` · ${repoScope}` : ''}`;
+    if (stringWidth(scopeText) > scopeMaxW && repoScope) {
+      // 공간이 부족하면 프로필명을 버리고라도 repo 스코프는 온전히 노출한다.
+      scopeText = ` · ${repoScope}`;
+    }
+    buf.writeText(x + leftW, y, scopeText, THEME.muted, THEME.bg, false, scopeMaxW);
+  }
+
+  if (countersDrawn) {
     buf.writeSegments(startRight, y, [
       { text: b1, fg: THEME.orange, bg: THEME.bg, bold: true },
       { text: gap, fg: THEME.muted, bg: THEME.bg },
@@ -743,9 +759,11 @@ function renderSwarmSection(buf: CellBuffer, state: AppState, L: FullLayout): vo
 
   const focused = state.focus === 'swarm';
   const errAdvisory = state.activeTrigger === 1;
+  // 라이브 동기화 중이면 가변 길이 라이브 워커 카드를, 아니면 트랜스크립트 3슬롯 cards를
+  const workerCards = workerCardsOf(state);
 
   L.cards.forEach((cardRect, idx) => {
-    const card = state.cards[idx];
+    const card = workerCards[idx];
     if (!card) return;
 
     const cardAdvisoryGlow = errAdvisory && idx === 0;
@@ -1151,7 +1169,7 @@ function renderCompactLayout(buf: CellBuffer, state: AppState, L: CompactLayout)
     const ix = B.x + 2;
     const iw = B.w - 4;
     let cy = B.y + 1;
-    for (const c of state.cards) {
+    for (const c of workerCardsOf(state)) {
       if (cy >= B.y + B.h - 1) break;
       buf.writeText(ix, cy, padRightWidth(c.name, 10), THEME.blue, THEME.bg, true);
       buf.drawProgressBar(ix + 11, cy, Math.max(10, iw - 28), c.progress / 100, THEME.blue, THEME.bgBlueTrack);
