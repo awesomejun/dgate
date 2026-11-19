@@ -8,6 +8,7 @@ import {
 } from './backend/agentRunner.ts';
 import {
   attachTranscriptWatcher,
+  detectWatchedLeadLabel,
   findLatestTranscriptPath,
 } from './backend/transcriptMapper.ts';
 import { parseKeyEvents, TerminalScreen, type KeyEvent } from './core/terminal.ts';
@@ -300,6 +301,18 @@ function main(): void {
     state.effort = opts.effort;
   }
 
+  // watch 모드 진실성: 관측 중인 transcript의 실제 호스트(Antigravity/Claude/Codex)를
+  // Lead 카드 라벨로 반영한다. 미인식 경로면 roster.json 라벨을 복원한다.
+  const rosterLead = state.rosterLabels.lead;
+  const rosterModelName = state.modelName;
+  const rosterModelFlag = state.modelFlag;
+  const applyWatchedLeadLabel = (transcriptPath: string | null): void => {
+    const detected = detectWatchedLeadLabel(transcriptPath);
+    state.rosterLabels.lead = detected?.leadBadge ?? rosterLead;
+    state.modelName = detected?.modelName ?? rosterModelName;
+    state.modelFlag = detected?.modelFlag ?? rosterModelFlag;
+  };
+
   // N8: --watch-db > DGATE_DB_PATH > DECISION_ORCHESTRATOR_DB_PATH > GEMINI_TRICK_DB_PATH(레거시) > 기본 경로
   // 우선순위로 SQLite 결정 DB 읽기전용 구독.
   // W1은 최초 1회 로드만 수행한다(주기 구독 훅은 W2-B가 src/state에 추가).
@@ -351,6 +364,7 @@ function main(): void {
     if (!opts.filePath) {
       opts.filePath = findLatestTranscriptPath(opts.watchDir ?? undefined);
     }
+    applyWatchedLeadLabel(opts.filePath);
     if (opts.filePath && (opts.snapshotPlain || opts.snapshotAnsi)) {
       const stop = attachTranscriptWatcher(opts.filePath, state, () => {});
       stop();
@@ -506,6 +520,7 @@ function main(): void {
       opts.filePath = findLatestTranscriptPath(opts.watchDir ?? undefined);
     }
     if (opts.filePath) {
+      applyWatchedLeadLabel(opts.filePath);
       stopFileWatcher = attachTranscriptWatcher(opts.filePath, state, renderNow);
       state.cwd = formatCompactPath(path.dirname(path.dirname(path.dirname(opts.filePath))));
       const sessShort = state.conversationId ? state.conversationId.slice(0, 8) : 'active';
@@ -520,6 +535,7 @@ function main(): void {
         const latest = findLatestTranscriptPath(opts.watchDir ?? undefined);
         if (latest && latest !== opts.filePath) {
           opts.filePath = latest;
+          applyWatchedLeadLabel(latest);
           if (stopFileWatcher) stopFileWatcher();
           const sessShort = path.basename(path.dirname(path.dirname(latest))).slice(0, 8);
           flashStatus(state, `새 활성 세션 감지 및 자동 전환: ${sessShort}`);

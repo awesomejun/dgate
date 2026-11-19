@@ -12,6 +12,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
+import { detectWatchedLeadLabel } from '../src/backend/transcriptMapper.ts';
 import { applyDemoTime, createDemoController } from '../src/state/demoEngine.ts';
 import { createInitialState, formatRoleBadge } from '../src/state/store.ts';
 import { renderFrame } from '../src/ui/renderApp.ts';
@@ -211,4 +212,80 @@ test('8. help 모달 — 쉬운 한국어 안내 + 고급 터미널 명령 하�
   assert.ok(text.includes('이 화면은 뭔가요?'), 'plain-Korean role clarity header');
   assert.ok(text.includes('AI 채팅창에서'), 'work request points to the AI chat window');
   assert.ok(text.includes('고급 · 터미널 직접 제어'), 'CLI details kept under the advanced section');
+});
+
+test('9. detectWatchedLeadLabel — antigravity/claude/codex/미인식 경로 판정', () => {
+  assert.deepEqual(
+    detectWatchedLeadLabel(
+      '/home/tester/.gemini/antigravity-cli/brain/abc123/.system_generated/logs/transcript.jsonl'
+    ),
+    {
+      leadBadge: 'Antigravity (현재 세션)',
+      modelName: 'antigravity-main',
+      modelFlag: 'live session: Antigravity',
+    }
+  );
+  // .gemini/*/brain/ 패턴(IDE antigravity 루트)도 Antigravity로 인식
+  assert.equal(
+    detectWatchedLeadLabel('/tmp/.gemini/antigravity/brain/sess9/logs/transcript.jsonl')?.leadBadge,
+    'Antigravity (현재 세션)'
+  );
+  assert.deepEqual(detectWatchedLeadLabel('/tmp/claude/projects/sess/transcript.jsonl'), {
+    leadBadge: 'Claude Code (현재 세션)',
+    modelName: 'claude-main',
+    modelFlag: 'live session: Claude Code',
+  });
+  assert.deepEqual(detectWatchedLeadLabel('/tmp/codex/sessions/rollout-1.jsonl'), {
+    leadBadge: 'Codex (현재 세션)',
+    modelName: 'codex-main',
+    modelFlag: 'live session: Codex',
+  });
+  assert.equal(detectWatchedLeadLabel('/tmp/other-tool/session.jsonl'), null);
+  assert.equal(detectWatchedLeadLabel(null), null);
+});
+
+test('10. cli --watch --snapshot — Lead 카드는 관측 세션 호스트, Workers/Verifier는 roster 유지', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), `rlbl-watch-${process.pid}-`));
+  try {
+    const txDir = path.join(
+      base,
+      '.gemini',
+      'antigravity-cli',
+      'brain',
+      'sess0001',
+      '.system_generated',
+      'logs'
+    );
+    fs.mkdirSync(txDir, { recursive: true });
+    const txPath = path.join(txDir, 'transcript.jsonl');
+    fs.writeFileSync(txPath, '');
+    const res = spawnSync(
+      process.execPath,
+      [CLI_PATH, '--watch', txPath, '--snapshot', '--cols', '148', '--rows', '43'],
+      { env: cliEnv(base), encoding: 'utf8', stdin: 'ignore' }
+    );
+    assert.equal(res.status, 0, res.stderr);
+    assert.ok(
+      res.stdout.includes('Lead · Antigravity (현재 세션)'),
+      'watched session host shown on Lead card'
+    );
+    assert.ok(
+      res.stdout.includes('live session: Antigravity'),
+      'model flag honestly shows the watched session'
+    );
+    assert.ok(
+      !res.stdout.includes('Lead · pi:glm-5.3'),
+      'headless roster lead label must not masquerade as the watched lead'
+    );
+    assert.ok(
+      res.stdout.includes('Verifier · pi:deepseek-v4.1-flash'),
+      'verifier keeps real roster worker model'
+    );
+    assert.ok(
+      res.stdout.includes('Workers · pi:deepseek-v4.1-flash / devin'),
+      'workers keep real roster worker models'
+    );
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
 });

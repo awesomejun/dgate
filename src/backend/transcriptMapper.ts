@@ -513,6 +513,45 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
   }
 }
 
+export interface WatchedLeadLabel {
+  leadBadge: string;
+  modelName: string;
+  modelFlag: string;
+}
+
+/**
+ * watch 모드에서 tail 중인 transcript 경로로 실제 관측 대상 호스트를 식별한다.
+ * roster.json의 헤드리스 lead 바인딩과 실제 감시 중인 세션 주체가 다를 수 있으므로
+ * Lead 카드는 관측 세션 호스트를 정직하게 표시해야 한다(미인식 시 null → roster 유지).
+ */
+export function detectWatchedLeadLabel(
+  transcriptPath: string | null
+): WatchedLeadLabel | null {
+  if (!transcriptPath) return null;
+  if (/antigravity/i.test(transcriptPath) || /\.gemini\/.*\/brain\//i.test(transcriptPath)) {
+    return {
+      leadBadge: 'Antigravity (현재 세션)',
+      modelName: 'antigravity-main',
+      modelFlag: 'live session: Antigravity',
+    };
+  }
+  if (/claude/i.test(transcriptPath)) {
+    return {
+      leadBadge: 'Claude Code (현재 세션)',
+      modelName: 'claude-main',
+      modelFlag: 'live session: Claude Code',
+    };
+  }
+  if (/codex/i.test(transcriptPath)) {
+    return {
+      leadBadge: 'Codex (현재 세션)',
+      modelName: 'codex-main',
+      modelFlag: 'live session: Codex',
+    };
+  }
+  return null;
+}
+
 /**
  * transcript.jsonl 경로 탐색 — CLI(`antigravity-cli`)와 GUI(`antigravity`) 두 brain
  * 루트를 모두 스캔해 mtime이 가장 최신인 세션의 transcript를 반환합니다(§5.1-3).
