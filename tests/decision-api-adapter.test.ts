@@ -58,14 +58,22 @@ interface MockResponse {
   echoKey?: boolean;
 }
 
-function decisionsBody(noul: number, riskTier: 'low' | 'medium' | 'high', inputTokens = 200): Record<string, unknown> {
+function decisionsBody(
+  noul: number,
+  riskTier: 'low' | 'medium' | 'high',
+  inputTokens = 200,
+  usageShape: 'usage' | 'usage_metadata' = 'usage'
+): Record<string, unknown> {
   return {
     model: 'gemini-decision-1',
     answers: {
       should_fast_path: { noul, confidence: 0.94, reasoning: 'mock' },
       risk_tier: { choice: riskTier, reasoning: 'mock' },
     },
-    usage_metadata: { input_tokens: inputTokens, output_tokens: 0 },
+    // 공식 REST 응답은 usage.total_input_tokens — usage_metadata.input_tokens는 레거시 호환
+    ...(usageShape === 'usage'
+      ? { usage: { total_input_tokens: inputTokens, output_tokens: 0 } }
+      : { usage_metadata: { input_tokens: inputTokens, output_tokens: 0 } }),
   };
 }
 
@@ -304,9 +312,15 @@ test('2. shadow — POST /v1beta/decisions + 헤더 키 + context 리댁션 + �
     assert.equal(req.headers['x-goog-api-key'], TEST_KEY);
     const body = JSON.parse(req.body) as Record<string, unknown>;
     assert.equal(body.model, 'gemini-decision-1');
-    const q = body.questions as Record<string, { type: string }>;
+    const q = body.questions as Record<string, { type: string; criteria?: Record<string, string> }>;
     assert.equal(q.should_fast_path?.type, 'noul');
     assert.equal(q.risk_tier?.type, 'choice');
+    // noul criteria는 공식 키 true_description/false_description ('true'/'false' 금지 — live 400 확인)
+    const sfpCriteria = q.should_fast_path?.criteria ?? {};
+    assert.ok(sfpCriteria.true_description, 'criteria.true_description 필수');
+    assert.ok(sfpCriteria.false_description, 'criteria.false_description 필수');
+    assert.equal('true' in sfpCriteria, false, 'criteria.true 키 금지');
+    assert.equal('false' in sfpCriteria, false, 'criteria.false 키 금지');
     const input = String(body.input);
     assert.ok(!input.includes(CONTEXT_SECRET), 'context 시크릿은 전송 전 리댁션');
     assert.ok(input.includes('route: file_select'));
@@ -678,6 +692,42 @@ test('8. dg report --json — shadow 집계 노출 + DB 불변', async () => {
     assert.equal(repMd.status, 0, repMd.stderr);
     const md = fs.readFileSync(mdPath, 'utf8');
     assert.ok(md.includes('## Decision API Shadow 요약'));
+  } finally {
+    await mock.close();
+    cleanupEnv(e);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// ⑨ usage shape 호환 — 공식 usage.total_input_tokens + 레거시 usage_metadata.input_tokens
+// ---------------------------------------------------------------------------
+
+test('9. usage shape — 공식 usage.total_input_tokens(기본) + 레거시 usage_metadata.input_tokens 모두 파싱', async () => {
+  const e = makeEnv();
+  let shape: 'usage' | 'usage_metadata' = 'usage';
+  const mock = await startMock(() => ({ body: decisionsBody(0.8, 'low', 150, shape) }));
+  try {
+    // ① 공식 shape — usage.total_input_tokens
+    const official = await dgJson(
+      ['route', '--task-kind', 'explore_read', '--project', e.projDir],
+      apiEnv(e, mock, 'shadow')
+    );
+    let audit = official.decision_api as Record<string, unknown>;
+    assert.equal(audit.ok, true);
+    assert.equal(audit.input_tokens, 150, 'usage.total_input_tokens 파싱');
+    assert.equal(audit.cost_status, 'estimated');
+
+    // ② 레거시 shape — usage_metadata.input_tokens
+    shape = 'usage_metadata';
+    const legacy = await dgJson(
+      ['route', '--task-kind', 'explore_read', '--project', e.projDir],
+      apiEnv(e, mock, 'shadow')
+    );
+    audit = legacy.decision_api as Record<string, unknown>;
+    assert.equal(audit.ok, true);
+    assert.equal(audit.input_tokens, 150, 'usage_metadata.input_tokens 파싱');
+    assert.equal(audit.cost_status, 'estimated');
+    assert.equal(mock.requests.length, 2);
   } finally {
     await mock.close();
     cleanupEnv(e);

@@ -133,8 +133,9 @@ const DECISION_QUESTIONS = {
     instructions:
       'Estimate the probability that this step succeeds cleanly on a single-turn fast-path without multi-step orchestration.',
     criteria: {
-      true: 'Simple, bounded, read-only or low-risk operation with high likelihood of first-try success.',
-      false:
+      true_description:
+        'Simple, bounded, read-only or low-risk operation with high likelihood of first-try success.',
+      false_description:
         'Ambiguous, write-heavy, high-risk, multi-file, or error-prone operation requiring structured planning or verification.',
     },
   },
@@ -204,8 +205,13 @@ function parseDecisionApiAnswers(data: unknown): {
     typeof conf === 'number' && Number.isFinite(conf) && conf >= 0 && conf <= 1 ? conf : null;
   const rt = asRecord(answers?.risk_tier);
   const riskTier = isRiskTier(rt?.choice) ? rt.choice : null;
-  const usage = asRecord(root?.usage_metadata);
-  const it = usage?.input_tokens;
+  const usage = asRecord(root?.usage);
+  const usageMeta = asRecord(root?.usage_metadata);
+  const it =
+    usage?.total_input_tokens ??
+    usage?.input_tokens ??
+    usageMeta?.input_tokens ??
+    usageMeta?.total_input_tokens;
   const inputTokens = typeof it === 'number' && Number.isInteger(it) && it >= 0 ? it : null;
   const costUsd = inputTokens !== null ? Number(((inputTokens * INPUT_TOKEN_PRICE_PER_M) / 1_000_000).toFixed(8)) : null;
   return {
