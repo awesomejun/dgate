@@ -49,6 +49,19 @@
 - 워커로 사용할 로컬 CLI 에이전트 중 최소 1종 (`pi` / `agy` / `devin` / `claude` — 없으면 `--dry-run` 계획 검증만 가능)
 - (선택) `hc`·`herdr-app` — 세션 기동·4분할 관제 화면용
 
+### 단독 실행 (외부 도구·API 키 없이 3줄 시작)
+
+**Node.js >= 22.6 하나만 있으면 된다.** npm 의존성 0개, 외부 스킬·워커 CLI·API 키 전부 불필요 — clone 후 바로:
+
+```bash
+node ./src/decision/dg.ts route --task-kind explore_read          # dg route — sharp/split 라우팅 판정 (LLM 0턴)
+node ./src/decision/dg.ts wrap --route tool_select --tool-class shell_exec -- echo hi  # dg wrap — 명령 감시 래핑
+node ./src/decision/dg.ts stats --cost --timing && node ./src/decision/dg.ts report    # dg stats / report — 비용·타이밍 통계, 규칙 후보 리포트
+```
+
+- (선택) 실시간 TUI 모니터: `node ./src/cli.ts --watch-db ~/.local/state/gemini-trick/decision.db --watch`
+- (선택) 에이전트 스킬로 연동하려면: [skills/decision-orchestrator/SKILL.md](skills/decision-orchestrator/SKILL.md)
+
 ### 빠른 시작
 
 ```bash

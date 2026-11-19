@@ -7,19 +7,29 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
 
 로컬 SQLite WAL 통계(`EWMA Beta`) + 선택적 `gemini-decision-1` API + `herdr/hc` 멀티 CLI 워커 배차 엔진을 대화 중 일관되게 호출하기 위한 얇은 운영 스킬이다.
 
+## 0. 단독 실행 원칙 (Zero External Dependency)
+
+- **필수 요구사항은 `Node.js >= 22.6` + 이 저장소뿐이다.** npm 의존성 0개 — `npm install` 없이 `node` 하나로 `dg` 전 기능이 동작한다.
+- 이 문서에 등장하는 모든 외부 도구·서비스는 **전부 선택(OPTIONAL)**이다: `todo-flow`, `mistology`, `effort-router`, `neverstuck`, `GEMINI_DECISION_API_KEY`(Decision API), `hc`/멀티 CLI 워커. **설치돼 있지 않으면 해당 단계를 조용히 스킵한다** — 없다고 실패하거나 중단하지 않는다.
+- 워커 CLI는 `roster.json`에서 자유롭게 교체한다. `claude`/`codex`/`gemini`/`pi`/`devin` 등 로컬에 있는 아무 CLI나 바인딩할 수 있고, 하나도 없으면 `--dry-run` 리허설과 `dg stats`/`report` 같은 로컬 전용 기능만 사용한다.
+- **경로 변수**: 아래 예시의 `$DECISION_ORCHESTRATOR_ROOT`는 이 저장소를 clone한 루트를 가리킨다. 예: `export DECISION_ORCHESTRATOR_ROOT=/path/to/decision-orchestrator`
+
 ## 1. 기존 스킬과의 역할 경계 (중복 금지)
 
 이 스킬은 **실행·배차·런타임 안전·통계 인프라**만 담당한다. 아래 4개 스킬과 역할을 섞지 않는다.
 
 | 단계 | 담당 스킬 / 도구 | 이 레이어가 하는 일 |
 |---|---|---|
-| ① 요구사항·완료조건 | **`todo-flow`** (`todo`) | 할 일 트랙 문서, 중복 검사, Acceptance 조건 정의 |
-| ② 과거 실수·결합 브리핑 | **`mistology`** | 착수 전 `mistology search -b`, 완료 전 `mistology impact`, 검증된 실수 `mistology new` / 표준 `canon` |
-| ③ 티어·단계 계획 | **`effort-router`** | `S/M/L/XL/보안감사` 티어 판정, 계획→검토→구현→리뷰 단계, 증거번들(`state.json`) |
+| ① 요구사항·완료조건 | **`todo-flow`** (`todo`) *(선택)* | 할 일 트랙 문서, 중복 검사, Acceptance 조건 정의 |
+| ② 과거 실수·결합 브리핑 | **`mistology`** *(선택)* | 착수 전 `mistology search -b`, 완료 전 `mistology impact`, 검증된 실수 `mistology new` / 표준 `canon` |
+| ③ 티어·단계 계획 | **`effort-router`** *(선택)* | `S/M/L/XL/보안감사` 티어 판정, 계획→검토→구현→리뷰 단계, 증거번들(`state.json`) |
 | ④ **멀티 CLI 배차·안전·통계** | **`decision-orchestrator`** (본 스킬) | **`sharp`/`split` 확률 게이트**, `roster.json` 기반 `hc` 워커(`pi`/`devin`/`agy`) 배차, `dg wrap` 감시, 체크포인트 삭제 게이트, `dg stats`/`report` |
-| ⑤ 반복 막힘 탈출 | **`neverstuck`** | `forced_split`(연속 실패) 또는 3회+ 실패 시 원인 진단·가설·프롬프트 재설계 |
+| ⑤ 반복 막힘 탈출 | **`neverstuck`** *(선택)* | `forced_split`(연속 실패) 또는 3회+ 실패 시 원인 진단·가설·프롬프트 재설계 |
+
+> ①②③⑤의 외부 스킬은 전부 선택이다 — 미설치 시 해당 단계를 조용히 스킵하고 ④(본 스킬)만 단독 실행한다.
 
 ### `effort-router`와의 충돌 방지 규칙
+*(선택 — `effort-router`가 설치된 경우에만 적용, 없으면 이 절 전체 스킵)*
 - **티어·단계·리뷰 규범**은 `effort-router`를 따른다(본 스킬이 티어를 재판정하지 않는다).
 - **외부 CLI 워커(`hc run` · `pi`/`devin`/`agy`) 배차, `sharp` 읽기전용 패스트패스, 워크트리 체크포인트, 런타임 실패율 통계**는 본 스킬(`dispatch.ts`/`dg.ts`)이 담당한다.
 - `effort-router`의 `jev`와 본 스킬의 `gemini-decision-1`(`DECISION_API`)을 **같은 단계에서 이중 호출하지 않는다**: 단일 세션 단계 판단은 `effort-router`, `hc` 멀티워커 배차·통계 게이트는 `decision-orchestrator`를 쓴다.
@@ -28,18 +38,18 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
 
 ## 2. 표준 실행 흐름 (5단계)
 
-1. **착수 전 브리핑 (`mistology`)** — 코드 수정/디버깅 전, 해당 저장소에 `mistology`가 있으면 1회 조회:
+1. **착수 전 브리핑 (`mistology`)** *(선택 — 설치된 경우에만 실행, 없으면 스킵)* — 코드 수정/디버깅 전, 해당 저장소에 `mistology`가 있으면 1회 조회:
    ```bash
    mistology search -b "<대상 파일·심볼·작업 의도>"
    ```
 2. **작업 라우팅·배차 (`dispatch.ts` / `dg route`)** — 기본은 로컬 통계(`DECISION_API=off`, 0원). 비교 검증 시에만 `--decision-api shadow` 사용:
    ```bash
    # 리허설 (DB 미오염, 모델·API 호출 0회)
-   node ~/Projects/Gemini_trick/scripts/herdr-quad-launch.ts \
+   node $DECISION_ORCHESTRATOR_ROOT/scripts/herdr-quad-launch.ts \
      --mode orchestrate --repo <TARGET_REPO> --dry-run
 
    # 실제 디스패치 계획 + fork 발급 (shadow 옵션)
-   node ~/Projects/Gemini_trick/scripts/dispatch.ts \
+   node $DECISION_ORCHESTRATOR_ROOT/scripts/dispatch.ts \
      --task-kind <explore_read|code_search|single_edit|multi_edit|test_or_deploy> \
      --repo <TARGET_REPO> [--decision-api shadow] [--context "<작업 요약>"] --json
    ```
@@ -48,7 +58,7 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
    - **하드 가드 불변**: `requires_write=true`, `forced_split=true`, `--risk medium|high`는 API 응답으로 절대 우회할 수 없다.
 3. **워커 감시 실행 (`dg wrap`)** — 워커 명령을 `dg wrap`으로 감싸 멈춤(`--stall-ms`)·하트비트·산출물·통계를 자동 기록:
    ```bash
-   node ~/Projects/Gemini_trick/src/decision/dg.ts wrap \
+   node $DECISION_ORCHESTRATOR_ROOT/src/decision/dg.ts wrap \
      --route <file_select|tool_select|retry_or_abort|delegate_swarm> \
      --tool-class <file_read|code_search|file_edit|shell_exec|swarm_dispatch> \
      --fork <FORK_ID> --project <TARGET_REPO> --require-stdout-nonempty -- <CMD...>
@@ -56,32 +66,32 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
 4. **검증·체크포인트·정리**:
    - 구조화 판정 반영(검증 실패/HEAD 불일치 시 `exit 3` 차단): `dg backprop --fork <FORK_ID> --verdict-file <PATH> --expected-head <SHA>`
    - 워크트리 삭제 전 체크포인트 강제(실패 시 `exit 4`·워크트리 보존): `dg worktree remove --worktree <PATH> --fork <FORK_ID>`
-   - 커밋 전 결합 모듈 점검: `mistology impact`
-5. **피드백 루프 (`dg report` → `mistology` / `neverstuck`)**:
-   - `forced_split: true` 또는 연속 실패 발생 시: `dg retro --fork <FORK_ID>`로 실패 요약 생성 → 3회+ 반복이면 **`neverstuck`** 프로토콜로 전환.
-   - 주기적 회고: `dg report --project <TARGET_REPO>`에서 반복 실패 후보(`tool_repetition`, `failure_causes`)를 확인하고, **실제 원인과 수정이 검증된 건만** `mistology new` / `mistology canon`으로 승격.
+   - 커밋 전 결합 모듈 점검: `mistology impact` *(선택 — 설치된 경우에만 실행, 없으면 스킵)*
+5. **피드백 루프 (`dg report` → `mistology` / `neverstuck`)** — `dg` 부분은 로컬 전용, 외부 스킬 연동은 선택:
+   - `forced_split: true` 또는 연속 실패 발생 시: `dg retro --fork <FORK_ID>`로 실패 요약 생성 → 3회+ 반복이면 **`neverstuck`** 프로토콜로 전환 *(선택 — 설치된 경우에만 실행, 없으면 스킵)*.
+   - 주기적 회고: `dg report --project <TARGET_REPO>`에서 반복 실패 후보(`tool_repetition`, `failure_causes`)를 확인하고, **실제 원인과 수정이 검증된 건만** `mistology new` / `mistology canon`으로 승격 *(선택 — 설치된 경우에만 실행, 없으면 스킵)*.
 
 ---
 
 ## 3. 시각 모니터링 및 점검 명령
 
 - **실시간 TUI 대시보드**:
-  - 백그라운드 모니터 세션 접속: `hc attach dg-monitor` (나오기: `Ctrl+\`)
-  - 직접 실행: `node ~/Projects/Gemini_trick/src/cli.ts --watch-db ~/.local/state/gemini-trick/decision.db --watch`
+  - 백그라운드 모니터 세션 접속 *(선택 — `hc` 설치 시)*: `hc attach dg-monitor` (나오기: `Ctrl+\`)
+  - 직접 실행: `node $DECISION_ORCHESTRATOR_ROOT/src/cli.ts --watch-db ~/.local/state/gemini-trick/decision.db --watch`
 - **비용·타이밍 통계 (읽기전용)**:
   ```bash
-  node ~/Projects/Gemini_trick/src/decision/dg.ts stats --cost --timing [--project <TARGET_REPO>]
+  node $DECISION_ORCHESTRATOR_ROOT/src/decision/dg.ts stats --cost --timing [--project <TARGET_REPO>]
   ```
 - **규칙 후보 + Decision API Shadow 비교 리포트 (읽기전용)**:
   ```bash
-  node ~/Projects/Gemini_trick/src/decision/dg.ts report [--project <TARGET_REPO>]
+  node $DECISION_ORCHESTRATOR_ROOT/src/decision/dg.ts report [--project <TARGET_REPO>]
   ```
-- **실행 중 워커 목록**: `hc ls`
+- **실행 중 워커 목록** *(선택 — `hc` 설치 시)*: `hc ls`
 
 ---
 
 ## 4. 안전·보안 가드레일
 
-- **키 관리**: `GEMINI_DECISION_API_KEY`는 `~/.config/herdr-quad/secrets.env`(`chmod 600`, `~/.zshrc` 자동 로드)에서만 읽는다. 저장소 내 커밋·출력 금지.
+- **키 관리** *(선택 — Decision API 사용 시에만)*: `GEMINI_DECISION_API_KEY`는 `~/.config/herdr-quad/secrets.env`(`chmod 600`, `~/.zshrc` 자동 로드)에서만 읽는다. 저장소 내 커밋·출력 금지.
 - **기본 무과금**: `DECISION_API` 기본값은 `off`. `on` 모드 전환이나 실 유료 워커 대량 투입, `git commit`/`push`는 사용자 승인 후 실행한다.
-- **`agy` 쿼터 절약**: 전역 `~/.config/herdr-quad/roster.json` 기본 프로필(`quota-saver`, 상시 `agy` 0턴)을 유지한다.
+- **`agy` 쿼터 절약** *(선택 — `agy` 워커 사용 시)*: 전역 `~/.config/herdr-quad/roster.json` 기본 프로필(`quota-saver`, 상시 `agy` 0턴)을 유지한다.
