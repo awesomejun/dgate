@@ -2,6 +2,7 @@
   "name": "dgate",
   "version": "0.1.0",
   "description": "Model-agnostic local SQLite Decision Gate & Multi-Agent Orchestration Engine + TUI",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "dg": "./src/decision/dg.ts",

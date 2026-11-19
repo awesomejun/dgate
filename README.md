@@ -1,6 +1,6 @@
 # dgate — 실측 통계 기반 멀티 에이전트 오케스트레이터
 
-5개 역할 슬롯(lead·explore·coder·verifier·advisor)에 임의의 로컬 CLI 에이전트(`pi`·`agy`·`devin`·`claude`)를 바인딩해, **실측 통계 기반 Decision Gate**가 저비용 경로와 리드 승격 경로를 자동 분기하는 오케스트레이션 시스템이다. 핵심 목적:
+5개 역할 슬롯(lead·explore·coder·verifier·advisor)에 임의의 로컬 CLI 에이전트(claude·codex·devin·pi·gemini·agy 및 cli: "custom"으로 임의 로컬 CLI 전부 지원)를 바인딩해, **실측 통계 기반 Decision Gate**가 저비용 경로와 리드 승격 경로를 자동 분기하는 오케스트레이션 시스템이다. 핵심 목적:
 
 - **비용·리드 턴 절감** — 통계적으로 안정된 조사 태스크는 Pre-Lead 라우터가 읽기전용 워커로 직행시켜 리드 LLM 턴을 0으로 만든다.
 - **모델 가변성** — 어떤 모델을 어느 역할에 쓸지는 `roster.json` 설정 파일 하나로 교체한다. 코드 수정 불필요.
@@ -31,7 +31,7 @@
                     └────────────────────────────────────────────┘
 ```
 
-- **Layer 0 (`dg` Pre-Lead Router)** — 태스크 종류 7종(`explore_read`·`code_search`·`single_edit` 등)별 사전확률과 실측 사후확률을 비교해 `sharp`(읽기전용 `pi` 워커 직행, 리드 턴 0) 또는 `split`(리드 승격)을 판정한다. LLM 호출 없이 순수 통계 판정이다.
+- **Layer 0 (`dg` Pre-Lead Router)** — 태스크 종류 7종(`explore_read`·`code_search`·`single_edit` 등)별 사전확률과 실측 사후확률을 비교해 `sharp`(읽기전용 탐색 워커 직행(기본 pi 등 roster 설정 CLI), 리드 턴 0) 또는 `split`(리드 승격)을 판정한다. LLM 호출 없이 순수 통계 판정이다.
 - **Layer 1 (Lead)** — `split`된 태스크의 계획을 수립하고 Layer 2 워커 브리프를 발행한다. `HERDR_DB_WRITE=1`로 결정 통계를 기록한다.
 - **Layer 2 (Swarm)** — 읽기전용 탐색 워커(동시 최대 4)와 `git worktree`에서 격리된 코딩 워커(동시 최대 2, 서로 다른 파일 영역)가 병렬 작업한다.
 - **Layer 3 (독립 검증자)** — 리드와 이종 모델·읽기전용 권한으로 검증한다. 판정 SSOT는 구조화 verdict JSON(`.herdr/verify/<fork_id>-verdict.json`)이고, 리드가 `dg backprop --verdict-file`로 pass/rework/fail/human을 원본 fork에 fail-closed 반영한다(§5).
@@ -46,7 +46,7 @@
 ### 요구사항
 
 - **Node.js 22.6+** (`node:sqlite` 내장 모듈 필요 — 외부 npm 의존성 0개, `npm install` 불필요)
-- 워커로 사용할 로컬 CLI 에이전트 중 최소 1종 (`pi` / `agy` / `devin` / `claude` — 없으면 `--dry-run` 계획 검증만 가능)
+- 워커로 사용할 로컬 CLI 에이전트 중 최소 1종 (claude / codex / devin / pi / gemini / agy 또는 cli: "custom"으로 임의 터미널 CLI — 없으면 `--dry-run` 및 로컬 dg 통계·체크포인트 단독 사용)
 - (선택) `hc`·`herdr-app` — 세션 기동·4분할 관제 화면용
 
 ### 단독 실행 (외부 도구·API 키 없이 3줄 시작)
@@ -134,6 +134,11 @@ cp .herdr/roster.example.json ~/.config/herdr-quad/roster.json
 ```
 
 - 미지정 필드는 내장 기본값을 상속한다(부분 오버라이드 허용).
+- `"cli": "custom"` — 임의의 로컬 터미널 CLI를 워커로 바인딩한다 (예: codex / opencode / aider 등 무엇이든). `bin`에 명령을, `extraArgs`에 고정 인자를 지정한다:
+
+```jsonc
+"coder": { "cli": "custom", "bin": "aider", "extraArgs": ["--no-auto-commits"] }
+```
 - `bin`은 포터블한 명령 이름(`"pi"` 등)을 권장한다. 절대경로가 필요할 때만 명시.
 - 실행 파일 해석 순서: `bin` 필드 → 환경변수 → `PATH` 탐색 → 관례적 설치 위치(`~/.bun/bin/pi`, `~/.local/bin/agy`).
 - `pricing.relativeCost`(선택) — 역할별 상대비용 가중치. `dg route`/`dg gate`에 `--roster`/`--profile`을 주면 상수 0.70 대신 비용 인식 동적 `θ_sharp`를 산출한다(§5). 미지정 시 슬롯 기본값.
@@ -145,7 +150,7 @@ cp .herdr/roster.example.json ~/.config/herdr-quad/roster.json
 | `DGATE_DB_PATH` | 결정 엔진 SQLite DB 경로 (기본 `~/.local/state/dgate/decision.db`, 레거시 별칭 `DECISION_ORCHESTRATOR_DB_PATH`·`GEMINI_TRICK_DB_PATH`) |
 | `HERDR_ROSTER_PATH` | roster.json 경로 오버라이드 |
 | `PI_BIN` / `HERDR_PI_BIN` | `pi` 실행 파일 경로 오버라이드 |
-| `AGY_BIN` / `DEVIN_BIN` / `HC_BIN` / `CLAUDE_BIN` | 각 CLI 실행 파일 경로 오버라이드 |
+| `AGY_BIN` / `DEVIN_BIN` / `HC_BIN` / `CLAUDE_BIN` | 각 CLI 실행 파일 경로 오버라이드. `"cli": "custom"`은 자체 `bin` 필드(미지정 시 `PATH` 탐색)로 실행 파일을 해석하므로 별도 환경변수가 필요 없다 |
 | `HERDR_AGY_TURN_BUDGET` | agy 일일 턴 예산 (기본 20 — 초과 시 프로필 자동 강등) |
 | `DECISION_API` | Decision API 모드 — `off`(기본, 네트워크 0) / `shadow`(병행 평가·로컬 불변) / `on`(콜드스타트 `basis:prior`만 API 판정 적용) |
 | `GEMINI_DECISION_API_KEY` | Decision API 인증 키 — `x-goog-api-key` 헤더로만 전송(URL `?key=` 미사용). 부재·공백 시 `shadow`/`on`도 `off`로 강등 |
@@ -254,8 +259,9 @@ node ./src/decision/dg.ts <command> [flags]
 
 ```bash
 npm run demo          # 40초 데모 시나리오 (모델 호출 없음)
-npm run live          # 실제 agy/Gemini API 연동 라이브 모드
-npm run watch         # 실행 중인 agy 세션 트랜스크립트 실시간 관제
+npm run live          # 대화형 라이브 모드
+npm run watch         # 실행 중인 세션 트랜스크립트·결정 DB 실시간 관제
+node ./src/cli.ts --watch --repo /path/to/your-project            # 저장소 단위 모니터 (--repo <dir>)
 npm run snapshot      # 현재 상태 정적 스냅샷 출력
 agy --output-format stream-json --print "…" | node ./src/cli.ts --stream   # JSONL 파이프 관제
 ```
@@ -266,7 +272,8 @@ agy --output-format stream-json --print "…" | node ./src/cli.ts --stream   # J
 
 ## 라이선스·크레딧
 
-- **TUI 원조** — 관제 TUI는 [leecg39/Gemini_trick](https://github.com/leecg39/Gemini_trick)에서 왔다. 본 저장소는 그 오케스트레이션 후속으로, Decision Gate·roster·읽기전용 격리 계약을 통합해 일반화했다. 참고로 원조 저장소에는 현재 LICENSE 파일이 명시돼 있지 않으며, 본 저장소는 원조의 라이선스 조건을 따른다.
+- **라이선스** — 이 저장소는 [MIT License](LICENSE)로 배포된다.
+- **TUI 원조** — 관제 TUI는 [leecg39/Gemini_trick](https://github.com/leecg39/Gemini_trick)에서 왔다. 본 저장소는 그 오케스트레이션 후속으로, Decision Gate·roster·읽기전용 격리 계약을 통합해 일반화했다. 참고로 원조 저장소에는 현재 명시된 LICENSE 파일이 없다.
 - **설계 영감** — LoopForge의 실행 가드레일·체크포인트·텔레메트리 패턴에서 설계 영감을 받았다.
 - **선택 동반 스킬** (각 저장소 라이선스 지배):
   - [chldbwnstm/mistology](https://github.com/chldbwnstm/mistology)
