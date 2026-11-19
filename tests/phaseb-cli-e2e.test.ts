@@ -45,7 +45,7 @@ interface DgResult {
 
 function dg(args: string[], env?: NodeJS.ProcessEnv): DgResult {
   const res = spawnSync(process.execPath, [DG_PATH, ...args], {
-    env: env ?? { ...process.env, GEMINI_TRICK_DB_PATH: UNUSED_DB },
+    env: env ?? { ...process.env, GEMINI_TRICK_DB_PATH: UNUSED_DB, DGATE_DB_PATH: undefined, DECISION_ORCHESTRATOR_DB_PATH: undefined },
     encoding: 'utf8',
     timeout: 30_000,
   });
@@ -333,7 +333,7 @@ test('④ dg report --out — src/·.agents/ 거부 exit 2 + 파일 미생성 / 
 test('⑤ dg route --roster/--profile → 동적 θ_sharp ≈ 0.7692 / 미지정 시 0.70 유지', () => {
   const base = mkBase('pbe2e-theta');
   try {
-    const env = { ...process.env, GEMINI_TRICK_DB_PATH: path.join(base, 'rt.db') };
+    const env = { ...process.env, GEMINI_TRICK_DB_PATH: path.join(base, 'rt.db'), DGATE_DB_PATH: undefined, DECISION_ORCHESTRATOR_DB_PATH: undefined };
     const r = dgJson(
       ['route', '--task-kind', 'explore_read', '--roster', ROSTER_EXAMPLE, '--profile', 'claude-hybrid'],
       env

@@ -673,7 +673,7 @@ Herdr App 창을 자동으로 4분할하여 Argon, Carbon, Neon, Hydrogen 패널
   --roster <path>            역할↔모델 roster.json (우선순위: --roster > HERDR_ROSTER_PATH > <repo>/.herdr/roster.json > ~/.config/herdr-quad/roster.json > 내장)
   --profile <name>           오케스트레이션 프로필 (기본: roster defaultProfile — 내장 quota-saver)
   --run-id <id>              세션 접미 RUN_ID (기본: generateRunId() 6자리 hex)
-  --db <path>                결정 DB 경로 (기본: DECISION_ORCHESTRATOR_DB_PATH > GEMINI_TRICK_DB_PATH(레거시) > ~/.local/state/decision-orchestrator/decision.db)
+  --db <path>                결정 DB 경로 (기본: DGATE_DB_PATH > DECISION_ORCHESTRATOR_DB_PATH > GEMINI_TRICK_DB_PATH(레거시) > ~/.local/state/dgate/decision.db)
   --show-workers             워커 세션을 2x2 패인으로 표시 (orchestrate)
   --prompt, -p <text>        초기 프롬프트 (지정 시 --live 자동 전환)
   --folder <path>            작업 디렉터리 (--repo 별칭)

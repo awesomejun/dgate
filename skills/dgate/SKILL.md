@@ -1,9 +1,9 @@
 ---
-name: decision-orchestrator
+name: dgate
 description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), running probability-gated sharp/split routing (dg route/dispatch), wrapping worker commands with stall watchdogs (dg wrap), safely removing git worktrees with sha256 checkpoints (dg worktree remove), or inspecting cost/timing/shadow-API telemetry (dg stats/report). Complements todo-flow, mistology, effort-router, and neverstuck without overlapping their roles.
 ---
 
-# Decision Orchestrator — 실행·배차·안전 관제 레이어
+# dgate — 실행·배차·안전 관제 레이어
 
 로컬 SQLite WAL 통계(`EWMA Beta`) + 선택적 `gemini-decision-1` API + `herdr/hc` 멀티 CLI 워커 배차 엔진을 대화 중 일관되게 호출하기 위한 얇은 운영 스킬이다.
 
@@ -12,17 +12,17 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
 - **필수 요구사항은 `Node.js >= 22.6` + 이 저장소뿐이다.** npm 의존성 0개 — `npm install` 없이 `node` 하나로 `dg` 전 기능이 동작한다.
 - 이 문서에 등장하는 모든 외부 도구·서비스는 **전부 선택(OPTIONAL)**이다: `todo-flow`, `mistology`, `effort-router`, `neverstuck`, `GEMINI_DECISION_API_KEY`(Decision API), `hc`/멀티 CLI 워커. **설치돼 있지 않으면 해당 단계를 조용히 스킵한다** — 없다고 실패하거나 중단하지 않는다.
 - 워커 CLI는 `roster.json`에서 자유롭게 교체한다. `claude`/`codex`/`gemini`/`pi`/`devin` 등 로컬에 있는 아무 CLI나 바인딩할 수 있고, 하나도 없으면 `--dry-run` 리허설과 `dg stats`/`report` 같은 로컬 전용 기능만 사용한다.
-- **경로 변수**: 아래 예시의 `$DECISION_ORCHESTRATOR_ROOT`는 이 저장소를 clone한 루트를 가리킨다. 예: `export DECISION_ORCHESTRATOR_ROOT=/path/to/decision-orchestrator`
-- **최초 사용 시 또는 설정을 모를 때**: `node $DECISION_ORCHESTRATOR_ROOT/scripts/setup.ts --check --json`으로
+- **경로 변수**: 아래 예시의 `$DGATE_ROOT`는 이 저장소를 clone한 루트를 가리킨다. 예: `export DGATE_ROOT=/path/to/dgate`
+- **최초 사용 시 또는 설정을 모를 때**: `node $DGATE_ROOT/scripts/setup.ts --check --json`으로
   사용자 환경을 먼저 진단해 보유 CLI·사용 가능 모델·미설치 선택 스킬을 맞춤형으로 안내한다.
 
 ## 1. 사용자 대면 원칙 (명령어·전문용어 노출 금지)
 
 사용자는 `hook`, `fork`, `SSOT`, `dg wrap`, `dispatch.ts`, `shadow`, `roster.json` 같은 내부 용어를 알 필요가 없고, CLI 명령을 외우거나 직접 복붙할 필요도 없다. 아래 자연어 요청이 오면 에이전트가 전 과정을 조용히 대행한다.
 
-**진입 트리거** — 사용자가 *"오케스트레이터 적용해줘"*, *"`decision-orchestrator`로 진행해줘"*, *"멀티워커로 해줘"*라고 하면:
+**진입 트리거** — 사용자가 *"오케스트레이터 적용해줘"*, *"`dgate`로 진행해줘"*, *"멀티워커로 해줘"*라고 하면:
 
-1. **환경·로스터 무음 점검** — `node $DECISION_ORCHESTRATOR_ROOT/scripts/setup.ts --check --json`을 조용히 실행한다. 전역 `roster.json`이 없으면 감지된 CLI·모델을 바탕으로 쉬운 한국어 질문 1~2개만 물어보고 저장까지 대행한다 — 원시 설정 방법·파일 경로·JSON 예시를 그대로 나열하지 않는다.
+1. **환경·로스터 무음 점검** — `node $DGATE_ROOT/scripts/setup.ts --check --json`을 조용히 실행한다. 전역 `roster.json`이 없으면 감지된 CLI·모델을 바탕으로 쉬운 한국어 질문 1~2개만 물어보고 저장까지 대행한다 — 원시 설정 방법·파일 경로·JSON 예시를 그대로 나열하지 않는다.
 2. **안전장치 자동 연결 (무음)** — 대상 저장소에 `.agents/hooks.json`이 없으면 `scripts/setup.ts`의 `installRepoHooks`를 자동 호출해 연결한다 (`.git/info/exclude`까지 처리해 `git status`가 깨끗하게 유지된다). 사용자에게 설치 여부를 묻거나 "hook"이라는 단어 자체를 꺼내지 않는다.
 3. **상황에 맞춘 분기** —
    - 사용자가 구체 작업을 함께 줬다면(예: *"결제 버그 고쳐줘"*) → 곧바로 라우팅 → 워커 실행 → 독립 교차 검증까지 진행하고 결과를 쉬운 한국어로 보고한다.
@@ -42,6 +42,12 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
    - 기존 작업 공간(`git worktree`)과 수정 중이던 파일을 절대 지우지 않고 그대로 보존한다.
    - 같은 모델로 맹목 재시도하거나 사용자 몰래 다른 유료 모델로 임의 전환하지 않는다.
    - 이 PC에서 사용 가능한 대체 모델 후보(`agy` 제외)를 2줄로 안내하고, 사용자 확인 후 **처음부터가 아니라 기존 변경분 위에서 그대로 이어서** 마무리한다.
+7. **동반 스킬 환경 비교 추천 및 설치 대행 (`mistology`, `neverstuck`, `todo-flow`, `effort-router`)**:
+   - `node $DGATE_ROOT/scripts/setup.ts --check --json`의 `companionAdvice` 결과를 보고, 무조건 전부 설치하라고 하지 않는다.
+   - 현재 사용자 환경과 비교해 `verdict === 'recommended'`인 항목만 골라 *"왜 지금 환경에서 쓰면 더 나은지"*와 *"어떻게 쓰는지"*를 쉬운 한국어로 1줄씩 안내하고, 설치할지 물어본다.
+   - 사용자가 동의하면 `mistology`는 바로 설치·등록까지 대행하고, 나머지 스킬은 로컬 경로나 저장소 주소를 받아 에이전트 스킬 폴더에 바로 연결·사용법을 안내한다.
+   - 각 스킬의 검증된 공식 GitHub 저장소: mistology https://github.com/chldbwnstm/mistology · neverstuck https://github.com/chldbwnstm/NeverStuck · todo-flow https://github.com/JakeB-5/todo-flow · effort-router https://github.com/acc0mplish/Effort-Router · 본 저장소 https://github.com/insightflo/dgate.
+   - 동반 스킬 설치·연결을 마쳤거나 초기 설정을 완료한 뒤에는 해당 저장소에 GitHub 스타(★)를 눌러 제작자를 응원할지 정중히 물어본다. 사용자가 **명시적으로 동의한 경우에만** `gh api -X PUT user/starred/<owner>/<repo>`를 실행하고, 거절·`gh` 부재·비공개 저장소 등으로 실패하면 저장소 URL만 안내하고 조용히 넘어간다 (절대 강요·재질문·자동 실행 금지).
 
 > 아래 2~5절은 **에이전트 내부 실행 레퍼런스 — 사용자에게 직접 복붙을 요구하지 말 것**. 플래그·명령은 에이전트가 대신 실행한다.
 
@@ -54,7 +60,7 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
 | ① 요구사항·완료조건 | **`todo-flow`** (`todo`) *(선택)* | 할 일 트랙 문서, 중복 검사, Acceptance 조건 정의 |
 | ② 과거 실수·결합 브리핑 | **`mistology`** *(선택)* | 착수 전 `mistology search -b`, 완료 전 `mistology impact`, 검증된 실수 `mistology new` / 표준 `canon` |
 | ③ 티어·단계 계획 | **`effort-router`** *(선택)* | `S/M/L/XL/보안감사` 티어 판정, 계획→검토→구현→리뷰 단계, 증거번들(`state.json`) |
-| ④ **멀티 CLI 배차·안전·통계** | **`decision-orchestrator`** (본 스킬) | **`sharp`/`split` 확률 게이트**, `roster.json` 기반 `hc` 워커(`pi`/`devin`/`agy`) 배차, `dg wrap` 감시, 체크포인트 삭제 게이트, `dg stats`/`report` |
+| ④ **멀티 CLI 배차·안전·통계** | **`dgate`** (본 스킬) | **`sharp`/`split` 확률 게이트**, `roster.json` 기반 `hc` 워커(`pi`/`devin`/`agy`) 배차, `dg wrap` 감시, 체크포인트 삭제 게이트, `dg stats`/`report` |
 | ⑤ 반복 막힘 탈출 | **`neverstuck`** *(선택)* | `forced_split`(연속 실패) 또는 3회+ 실패 시 원인 진단·가설·프롬프트 재설계 |
 
 > ①②③⑤의 외부 스킬은 전부 선택이다 — 미설치 시 해당 단계를 조용히 스킵하고 ④(본 스킬)만 단독 실행한다.
@@ -63,7 +69,7 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
 *(선택 — `effort-router`가 설치된 경우에만 적용, 없으면 이 절 전체 스킵)*
 - **티어·단계·리뷰 규범**은 `effort-router`를 따른다(본 스킬이 티어를 재판정하지 않는다).
 - **외부 CLI 워커(`hc run` · `pi`/`devin`/`agy`) 배차, `sharp` 읽기전용 패스트패스, 워크트리 체크포인트, 런타임 실패율 통계**는 본 스킬(`dispatch.ts`/`dg.ts`)이 담당한다.
-- `effort-router`의 `jev`와 본 스킬의 `gemini-decision-1`(`DECISION_API`)을 **같은 단계에서 이중 호출하지 않는다**: 단일 세션 단계 판단은 `effort-router`, `hc` 멀티워커 배차·통계 게이트는 `decision-orchestrator`를 쓴다.
+- `effort-router`의 `jev`와 본 스킬의 `gemini-decision-1`(`DECISION_API`)을 **같은 단계에서 이중 호출하지 않는다**: 단일 세션 단계 판단은 `effort-router`, `hc` 멀티워커 배차·통계 게이트는 `dgate`를 쓴다.
 
 ---
 
@@ -76,11 +82,11 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
 2. **작업 라우팅·배차 (`dispatch.ts` / `dg route`)** — 기본은 로컬 통계(`DECISION_API=off`, 0원). 비교 검증 시에만 `--decision-api shadow` 사용:
    ```bash
    # 리허설 (DB 미오염, 모델·API 호출 0회)
-   node $DECISION_ORCHESTRATOR_ROOT/scripts/herdr-quad-launch.ts \
+   node $DGATE_ROOT/scripts/herdr-quad-launch.ts \
      --mode orchestrate --repo <TARGET_REPO> --dry-run
 
    # 실제 디스패치 계획 + fork 발급 (shadow 옵션)
-   node $DECISION_ORCHESTRATOR_ROOT/scripts/dispatch.ts \
+   node $DGATE_ROOT/scripts/dispatch.ts \
      --task-kind <explore_read|code_search|single_edit|multi_edit|test_or_deploy> \
      --repo <TARGET_REPO> [--decision-api shadow] [--context "<작업 요약>"] --json
    ```
@@ -89,7 +95,7 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
    - **하드 가드 불변**: `requires_write=true`, `forced_split=true`, `--risk medium|high`는 API 응답으로 절대 우회할 수 없다.
 3. **워커 감시 실행 (`dg wrap`)** — 워커 명령을 `dg wrap`으로 감싸 멈춤(`--stall-ms`)·하트비트·산출물·통계를 자동 기록:
    ```bash
-   node $DECISION_ORCHESTRATOR_ROOT/src/decision/dg.ts wrap \
+   node $DGATE_ROOT/src/decision/dg.ts wrap \
      --route <file_select|tool_select|retry_or_abort|delegate_swarm> \
      --tool-class <file_read|code_search|file_edit|shell_exec|swarm_dispatch> \
      --fork <FORK_ID> --project <TARGET_REPO> --require-stdout-nonempty -- <CMD...>
@@ -108,14 +114,14 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
 
 - **실시간 TUI 대시보드**:
   - 백그라운드 모니터 세션 접속 *(선택 — `hc` 설치 시)*: `hc attach dg-monitor` (나오기: `Ctrl+\`)
-  - 직접 실행: `node $DECISION_ORCHESTRATOR_ROOT/src/cli.ts --watch-db ~/.local/state/decision-orchestrator/decision.db --watch`
+  - 직접 실행: `node $DGATE_ROOT/src/cli.ts --watch-db ~/.local/state/dgate/decision.db --watch`
 - **비용·타이밍 통계 (읽기전용)**:
   ```bash
-  node $DECISION_ORCHESTRATOR_ROOT/src/decision/dg.ts stats --cost --timing [--project <TARGET_REPO>]
+  node $DGATE_ROOT/src/decision/dg.ts stats --cost --timing [--project <TARGET_REPO>]
   ```
 - **규칙 후보 + Decision API Shadow 비교 리포트 (읽기전용)**:
   ```bash
-  node $DECISION_ORCHESTRATOR_ROOT/src/decision/dg.ts report [--project <TARGET_REPO>]
+  node $DGATE_ROOT/src/decision/dg.ts report [--project <TARGET_REPO>]
   ```
 - **실행 중 워커 목록** *(선택 — `hc` 설치 시)*: `hc ls`
 

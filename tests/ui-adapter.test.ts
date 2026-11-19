@@ -97,7 +97,7 @@ test('sortRoutesForDisplay: forcedSplit 최우선 → p<0.70 차우선 → 원�
 test('--demo 격리: applyDemoTime·syncStateFromDecisionDb(demo)·--demo --snapshot 모두 DB 파일을 만들지 않는다', () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), `w2bdemo-${process.pid}-`));
   const dbPath = path.join(base, 'decision.db');
-  const env = { ...process.env, GEMINI_TRICK_DB_PATH: dbPath };
+  const env = { ...process.env, GEMINI_TRICK_DB_PATH: dbPath, DGATE_DB_PATH: undefined, DECISION_ORCHESTRATOR_DB_PATH: undefined };
 
   try {
     // 1) 데모 엔진 순수 계산 — DB 접근 없음

@@ -1,11 +1,11 @@
 {
-  "name": "decision-orchestrator",
+  "name": "dgate",
   "version": "0.1.0",
   "description": "Model-agnostic local SQLite Decision Gate & Multi-Agent Orchestration Engine + TUI",
   "type": "module",
   "bin": {
     "dg": "./src/decision/dg.ts",
-    "decision-orchestrator": "./src/cli.ts"
+    "dgate": "./src/cli.ts"
   },
   "scripts": {
     "start": "node ./src/cli.ts --live",

@@ -46,7 +46,7 @@ function makeEnv(): TestEnv {
   const dbPath = path.join(base, 'decision.db');
   const projDir = path.join(base, 'proj');
   fs.mkdirSync(projDir, { recursive: true });
-  return { base, dbPath, projDir, env: { ...process.env, GEMINI_TRICK_DB_PATH: dbPath } };
+  return { base, dbPath, projDir, env: { ...process.env, GEMINI_TRICK_DB_PATH: dbPath, DGATE_DB_PATH: undefined, DECISION_ORCHESTRATOR_DB_PATH: undefined } };
 }
 
 function cleanupEnv(e: TestEnv): void {
@@ -182,7 +182,7 @@ test('6. launcher: quota-saver orchestrate --dry-run 계약', () => {
   const e = makeEnv();
   try {
     const neverDb = path.join(e.base, 'never-created.db');
-    const env = { ...process.env, GEMINI_TRICK_DB_PATH: neverDb, HERDR_AGY_TURN_BUDGET: '20' };
+    const env = { ...process.env, GEMINI_TRICK_DB_PATH: neverDb, DGATE_DB_PATH: undefined, DECISION_ORCHESTRATOR_DB_PATH: undefined, HERDR_AGY_TURN_BUDGET: '20' };
     const res = spawnSync(
       process.execPath,
       [LAUNCHER_PATH, '--mode', 'orchestrate', '--profile', 'quota-saver', '--dry-run'],
@@ -223,7 +223,7 @@ test('6. launcher: quota-saver orchestrate --dry-run 계약', () => {
 test('7. launcher: agy-quad dry-run + agy_budget 강등', () => {
   const e = makeEnv();
   try {
-    const env = { ...process.env, GEMINI_TRICK_DB_PATH: e.dbPath, HERDR_AGY_TURN_BUDGET: '20' };
+    const env = { ...process.env, GEMINI_TRICK_DB_PATH: e.dbPath, DGATE_DB_PATH: undefined, DECISION_ORCHESTRATOR_DB_PATH: undefined, HERDR_AGY_TURN_BUDGET: '20' };
     const res = spawnSync(
       process.execPath,
       [LAUNCHER_PATH, '--mode', 'orchestrate', '--profile', 'agy-quad', '--dry-run'],

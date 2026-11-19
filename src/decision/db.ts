@@ -7,8 +7,8 @@
  *
  * 외부 연결:
  * - `engine.ts`·`dg.ts`·`telemetry.ts`가 `openDb`/`openDbSafe`로 연결을 얻는다.
- * - `cli.ts --watch-db`가 `resolveDbPath`로 우선순위(`--watch-db` > `DECISION_ORCHESTRATOR_DB_PATH`
- *   > `GEMINI_TRICK_DB_PATH`(레거시 별칭) > XDG 기본 경로)를 해석한다(N8).
+ * - `cli.ts --watch-db`가 `resolveDbPath`로 우선순위(`--watch-db` > `DGATE_DB_PATH`
+ *   > `DECISION_ORCHESTRATOR_DB_PATH` > `GEMINI_TRICK_DB_PATH`(레거시 별칭) > XDG 기본 경로)를 해석한다(N8).
  *
  * 주의:
  * - `DatabaseSync`의 `timeout` 옵션은 정수만 허용한다(실수 전달 시 오류 — §0 실측).
@@ -28,15 +28,17 @@ export const GLOBAL_PROJECT_ID = '__GLOBAL__';
 export function defaultDbPath(): string {
   const xdg = process.env.XDG_STATE_HOME;
   const base = xdg && xdg.trim() ? xdg : path.join(os.homedir(), '.local', 'state');
-  return path.join(base, 'decision-orchestrator', 'decision.db');
+  return path.join(base, 'dgate', 'decision.db');
 }
 
 /**
- * DB 경로 우선순위: explicit(`--watch-db` 등) > `DECISION_ORCHESTRATOR_DB_PATH`
- * > `GEMINI_TRICK_DB_PATH`(레거시 별칭) > XDG 기본 경로.
+ * DB 경로 우선순위: explicit(`--watch-db` 등) > `DGATE_DB_PATH`
+ * > `DECISION_ORCHESTRATOR_DB_PATH` > `GEMINI_TRICK_DB_PATH`(레거시 별칭) > XDG 기본 경로.
  */
 export function resolveDbPath(explicit?: string | null): string {
   if (explicit && explicit.trim()) return explicit;
+  const dgate = process.env.DGATE_DB_PATH;
+  if (dgate && dgate.trim()) return dgate;
   const env = process.env.DECISION_ORCHESTRATOR_DB_PATH;
   if (env && env.trim()) return env;
   const legacy = process.env.GEMINI_TRICK_DB_PATH;

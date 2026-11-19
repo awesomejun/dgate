@@ -35,6 +35,8 @@ function runHook(mode: 'guard' | 'collect', stdin: string, envExtra: Record<stri
   delete env.HERDR_DELEGATE_MODE;
   delete env.HERDR_DB_WRITE;
   delete env.GEMINI_TRICK_DB_PATH;
+  delete env.DGATE_DB_PATH;
+  delete env.DECISION_ORCHESTRATOR_DB_PATH;
   for (const [k, v] of Object.entries(envExtra)) {
     if (v === undefined) delete env[k];
     else env[k] = v;

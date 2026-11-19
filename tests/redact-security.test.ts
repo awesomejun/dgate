@@ -33,13 +33,21 @@ function makeEnv(): TestEnv {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), `pra1-${process.pid}-`));
   const dbPath = path.join(base, 'decision.db');
   const prevDb = process.env.GEMINI_TRICK_DB_PATH;
+  const prevDgateDb = process.env.DGATE_DB_PATH;
+  const prevDoDb = process.env.DECISION_ORCHESTRATOR_DB_PATH;
   process.env.GEMINI_TRICK_DB_PATH = dbPath;
+  delete process.env.DGATE_DB_PATH;
+  delete process.env.DECISION_ORCHESTRATOR_DB_PATH;
   return {
     base,
     dbPath,
     restore() {
       if (prevDb === undefined) delete process.env.GEMINI_TRICK_DB_PATH;
       else process.env.GEMINI_TRICK_DB_PATH = prevDb;
+      if (prevDgateDb === undefined) delete process.env.DGATE_DB_PATH;
+      else process.env.DGATE_DB_PATH = prevDgateDb;
+      if (prevDoDb === undefined) delete process.env.DECISION_ORCHESTRATOR_DB_PATH;
+      else process.env.DECISION_ORCHESTRATOR_DB_PATH = prevDoDb;
       fs.rmSync(base, { recursive: true, force: true });
     },
   };
@@ -182,6 +190,8 @@ test('3. buildSanitizedChildEnv: 민감 키 제거 + allowKeys·HERDR_*·DB 경�
     HERDR_DB_WRITE: '1',
     HERDR_AGY_STALL_MS: '120000',
     DECISION_READONLY: '1',
+    DGATE_DB_PATH: '/tmp/d.db',
+    DECISION_ORCHESTRATOR_DB_PATH: '/tmp/o.db',
     GEMINI_TRICK_DB_PATH: '/tmp/x.db',
     AGY_BIN: '/usr/local/bin/agy',
     NORMAL_FLAG: 'keepme',
@@ -205,6 +215,8 @@ test('3. buildSanitizedChildEnv: 민감 키 제거 + allowKeys·HERDR_*·DB 경�
     'HERDR_DB_WRITE',
     'HERDR_AGY_STALL_MS',
     'DECISION_READONLY',
+    'DGATE_DB_PATH',
+    'DECISION_ORCHESTRATOR_DB_PATH',
     'GEMINI_TRICK_DB_PATH',
     'AGY_BIN',
     'NORMAL_FLAG',

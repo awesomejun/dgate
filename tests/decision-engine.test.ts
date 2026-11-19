@@ -34,7 +34,7 @@ function makeEnv(): TestEnv {
   const dbPath = path.join(base, 'decision.db');
   const projDir = path.join(base, 'proj');
   fs.mkdirSync(projDir, { recursive: true });
-  return { base, dbPath, projDir, env: { ...process.env, GEMINI_TRICK_DB_PATH: dbPath } };
+  return { base, dbPath, projDir, env: { ...process.env, GEMINI_TRICK_DB_PATH: dbPath, DGATE_DB_PATH: undefined, DECISION_ORCHESTRATOR_DB_PATH: undefined } };
 }
 
 function cleanupEnv(e: TestEnv): void {
@@ -666,6 +666,8 @@ test('14. cli.ts --snapshot 정상 exit 0 + quadBus 원자적 쓰기·동일 페
   // (a) 스냅샷 회귀 (선행 버그 1·4 수정 후에도 데모 렌더 정상)
   const snapEnv = { ...process.env } as NodeJS.ProcessEnv;
   delete snapEnv.GEMINI_TRICK_DB_PATH;
+  delete snapEnv.DGATE_DB_PATH;
+  delete snapEnv.DECISION_ORCHESTRATOR_DB_PATH;
   const snap = spawnSync(
     process.execPath,
     [CLI_PATH, '--snapshot', '--time', '10', '--cols', '148', '--rows', '43'],

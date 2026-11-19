@@ -117,7 +117,7 @@ function parseArgs(argv: string[]): CliOptions {
         opts.watchDir = argv[++i] ?? null;
         break;
       case '--watch-db': {
-        // N8: SQLite 결정 DB 읽기전용 구독 경로. 우선순위 --watch-db > DECISION_ORCHESTRATOR_DB_PATH > 기본 경로
+        // N8: SQLite 결정 DB 읽기전용 구독 경로. 우선순위 --watch-db > DGATE_DB_PATH > DECISION_ORCHESTRATOR_DB_PATH > GEMINI_TRICK_DB_PATH(레거시) > 기본 경로
         const p = argv[++i];
         if (p && !p.startsWith('-')) opts.watchDb = p;
         break;
@@ -224,7 +224,7 @@ function parseArgs(argv: string[]): CliOptions {
 
 function printCliHelp(): void {
   const usage = `
-DECISION ORCHESTRATOR TUI (Lead · Decision Gate · Workers · Verifier · Advisor)
+DGATE TUI (Lead · Decision Gate · Workers · Verifier · Advisor)
 
 사용법:
   node ./src/cli.ts [옵션]
@@ -234,8 +234,8 @@ DECISION ORCHESTRATOR TUI (Lead · Decision Gate · Workers · Verifier · Advis
   --watch-dir <path>     트랜스크립트 검색 기본 디렉터리 지정 (기본: CLI ~/.gemini/antigravity-cli/brain 및
                          IDE ~/.gemini/antigravity/brain 중 최신 mtime 자동 선택)
   --watch-db <path>      SQLite 결정 DB(decision.db) 읽기전용 구독 경로 지정 (N8)
-                         우선순위: --watch-db > DECISION_ORCHESTRATOR_DB_PATH > GEMINI_TRICK_DB_PATH(레거시)
-                                  > ~/.local/state/decision-orchestrator/decision.db
+                         우선순위: --watch-db > DGATE_DB_PATH > DECISION_ORCHESTRATOR_DB_PATH > GEMINI_TRICK_DB_PATH(레거시)
+                                  > ~/.local/state/dgate/decision.db
   --live, --agy          실제 Antigravity(agy) / Gemini API 백엔드 에이전트 루프 연결 실행
   --demo                 gemini_sub_neon.html의 40초 멀티 에이전트 시나리오 데모 실행 (기본값)
   --stream               표준 입력(stdin)으로부터 JSONL(또는 agy stream-json) 실시간 렌더링
@@ -300,12 +300,12 @@ function main(): void {
     state.effort = opts.effort;
   }
 
-  // N8: --watch-db > DECISION_ORCHESTRATOR_DB_PATH > GEMINI_TRICK_DB_PATH(레거시) > 기본 경로
+  // N8: --watch-db > DGATE_DB_PATH > DECISION_ORCHESTRATOR_DB_PATH > GEMINI_TRICK_DB_PATH(레거시) > 기본 경로
   // 우선순위로 SQLite 결정 DB 읽기전용 구독.
   // W1은 최초 1회 로드만 수행한다(주기 구독 훅은 W2-B가 src/state에 추가).
   const decisionDbPath = resolveDbPath(opts.watchDb);
   if (
-    (opts.watchDb !== null || process.env.DECISION_ORCHESTRATOR_DB_PATH || process.env.GEMINI_TRICK_DB_PATH) &&
+    (opts.watchDb !== null || process.env.DGATE_DB_PATH || process.env.DECISION_ORCHESTRATOR_DB_PATH || process.env.GEMINI_TRICK_DB_PATH) &&
     fs.existsSync(decisionDbPath)
   ) {
     try {

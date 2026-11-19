@@ -3,7 +3,7 @@
  * Neon·gemini-4-*)이 아니라 활성 roster.json 바인딩에서 파생되는지 검증한다.
  * - formatRoleBadge: provider/중첩/cli 접두 정리로 간결 태그 생성
  * - createInitialState: 내장 roster(quota-saver) 기본 라벨, gemini-4-* 제로
- * - renderFrame/quad 프레임: DECISION ORCHESTRATOR TUI + 실제 라벨 + gemini-4-* 제로
+ * - renderFrame/quad 프레임: DGATE TUI + 실제 라벨 + gemini-4-* 제로
  * - cli --snapshot: builtin 폴백(quota-saver)과 HERDR_ROSTER_PATH 커스텀 로스터 모두 반영
  */
 import assert from 'node:assert/strict';
@@ -24,6 +24,8 @@ function cliEnv(base: string): NodeJS.ProcessEnv {
   const env = { ...process.env };
   env.XDG_CONFIG_HOME = base; // 실제 전역 roster와 격리 → builtin 폴백 유도
   env.GEMINI_TRICK_DB_PATH = path.join(base, 'never.db');
+  delete env.DGATE_DB_PATH;
+  delete env.DECISION_ORCHESTRATOR_DB_PATH;
   delete env.HERDR_ROSTER_PATH;
   return env;
 }
@@ -78,12 +80,12 @@ test('2. createInitialState — 내장 roster 라벨 + gemini-4-* 기본값 제�
   }
 });
 
-test('3. renderFrame(148×43) — DECISION ORCHESTRATOR TUI + 실제 roster 라벨 + gemini-4-* 제로', () => {
+test('3. renderFrame(148×43) — DGATE TUI + 실제 roster 라벨 + gemini-4-* 제로', () => {
   const state = createInitialState('demo');
   applyDemoTime(state, 10, createDemoController());
   const text = renderFrame(state, 148, 43).toPlainString();
 
-  assert.ok(text.includes('DECISION ORCHESTRATOR TUI'), 'header title');
+  assert.ok(text.includes('DGATE TUI'), 'header title');
   assert.ok(text.includes('profile=quota-saver'), 'active profile tag');
   assert.ok(text.includes('Lead · pi:glm-5.3'), 'lead panel title + badge');
   assert.ok(text.includes('Workers · pi:deepseek-v4.1-flash / devin'), 'workers legend');
@@ -140,7 +142,7 @@ test('5. cli --snapshot — builtin 폴백(quota-saver) 시 gemini-4-* 제로', 
     );
     assert.equal(res.status, 0, res.stderr);
     assert.ok(
-      res.stdout.includes('DECISION ORCHESTRATOR TUI'),
+      res.stdout.includes('DGATE TUI'),
       'new header in cli snapshot'
     );
     assert.ok(res.stdout.includes('profile=quota-saver'), 'builtin profile tag');

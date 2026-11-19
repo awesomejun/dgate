@@ -1,4 +1,4 @@
-# herdr-quad — 실측 통계 기반 멀티 에이전트 오케스트레이터
+# dgate — 실측 통계 기반 멀티 에이전트 오케스트레이터
 
 5개 역할 슬롯(lead·explore·coder·verifier·advisor)에 임의의 로컬 CLI 에이전트(`pi`·`agy`·`devin`·`claude`)를 바인딩해, **실측 통계 기반 Decision Gate**가 저비용 경로와 리드 승격 경로를 자동 분기하는 오케스트레이션 시스템이다. 핵심 목적:
 
@@ -37,7 +37,7 @@
 - **Layer 3 (독립 검증자)** — 리드와 이종 모델·읽기전용 권한으로 검증한다. 판정 SSOT는 구조화 verdict JSON(`.herdr/verify/<fork_id>-verdict.json`)이고, 리드가 `dg backprop --verdict-file`로 pass/rework/fail/human을 원본 fork에 fail-closed 반영한다(§5).
 - **Layer 4 (자문 3관문)** — 계획·오류·완료 시점에만 온디맨드로 기동하는 자문 세션이다. 관문 통과 후 즉시 `hc kill; hc rm`으로 정리된다.
 
-세션 관제·런치는 `hc`(Herdr 터미널 CLI) 위에서 동작한다. 모든 통계는 `~/.local/state/decision-orchestrator/decision.db`(SQLite)에 SSOT로 축적된다.
+세션 관제·런치는 `hc`(Herdr 터미널 CLI) 위에서 동작한다. 모든 통계는 `~/.local/state/dgate/decision.db`(SQLite)에 SSOT로 축적된다.
 
 ---
 
@@ -59,8 +59,8 @@ node ./src/decision/dg.ts wrap --route tool_select --tool-class shell_exec -- ec
 node ./src/decision/dg.ts stats --cost --timing && node ./src/decision/dg.ts report    # dg stats / report — 비용·타이밍 통계, 규칙 후보 리포트
 ```
 
-- (선택) 실시간 TUI 모니터: `node ./src/cli.ts --watch-db ~/.local/state/decision-orchestrator/decision.db --watch`
-- (선택) 에이전트 스킬로 연동하려면: [skills/decision-orchestrator/SKILL.md](skills/decision-orchestrator/SKILL.md)
+- (선택) 실시간 TUI 모니터: `node ./src/cli.ts --watch-db ~/.local/state/dgate/decision.db --watch`
+- (선택) 에이전트 스킬로 연동하려면: [skills/dgate/SKILL.md](skills/dgate/SKILL.md)
 
 ### 빠른 시작
 
@@ -134,7 +134,7 @@ cp .herdr/roster.example.json ~/.config/herdr-quad/roster.json
 
 | 변수 | 용도 |
 | :--- | :--- |
-| `DECISION_ORCHESTRATOR_DB_PATH` | 결정 엔진 SQLite DB 경로 (기본 `~/.local/state/decision-orchestrator/decision.db`, 레거시 별칭 `GEMINI_TRICK_DB_PATH`) |
+| `DGATE_DB_PATH` | 결정 엔진 SQLite DB 경로 (기본 `~/.local/state/dgate/decision.db`, 레거시 별칭 `DECISION_ORCHESTRATOR_DB_PATH`·`GEMINI_TRICK_DB_PATH`) |
 | `HERDR_ROSTER_PATH` | roster.json 경로 오버라이드 |
 | `PI_BIN` / `HERDR_PI_BIN` | `pi` 실행 파일 경로 오버라이드 |
 | `AGY_BIN` / `DEVIN_BIN` / `HC_BIN` / `CLAUDE_BIN` | 각 CLI 실행 파일 경로 오버라이드 |

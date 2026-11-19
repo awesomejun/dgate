@@ -41,7 +41,11 @@ function makeEnv(): TestEnv {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), `w2a-${process.pid}-`));
   const dbPath = path.join(base, 'decision.db');
   const prevDb = process.env.GEMINI_TRICK_DB_PATH;
+  const prevDgateDb = process.env.DGATE_DB_PATH;
+  const prevDoDb = process.env.DECISION_ORCHESTRATOR_DB_PATH;
   process.env.GEMINI_TRICK_DB_PATH = dbPath;
+  delete process.env.DGATE_DB_PATH;
+  delete process.env.DECISION_ORCHESTRATOR_DB_PATH;
   return {
     base,
     dbPath,
@@ -49,6 +53,10 @@ function makeEnv(): TestEnv {
     restore() {
       if (prevDb === undefined) delete process.env.GEMINI_TRICK_DB_PATH;
       else process.env.GEMINI_TRICK_DB_PATH = prevDb;
+      if (prevDgateDb === undefined) delete process.env.DGATE_DB_PATH;
+      else process.env.DGATE_DB_PATH = prevDgateDb;
+      if (prevDoDb === undefined) delete process.env.DECISION_ORCHESTRATOR_DB_PATH;
+      else process.env.DECISION_ORCHESTRATOR_DB_PATH = prevDoDb;
       fs.rmSync(base, { recursive: true, force: true });
     },
   };

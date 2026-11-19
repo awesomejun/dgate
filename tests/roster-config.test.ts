@@ -57,6 +57,8 @@ function makeEnv(withGit = false): TestEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   env.GEMINI_TRICK_DB_PATH = neverDb;
   env.XDG_CONFIG_HOME = xdg;
+  delete env.DGATE_DB_PATH;
+  delete env.DECISION_ORCHESTRATOR_DB_PATH;
   delete env.HERDR_ROSTER_PATH;
   return { base, xdg, repo, neverDb, env };
 }

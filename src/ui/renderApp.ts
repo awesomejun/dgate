@@ -94,7 +94,7 @@ function renderHeader(
   y: number,
   width: number
 ): void {
-  const title = 'DECISION ORCHESTRATOR TUI';
+  const title = 'DGATE TUI';
   buf.writeText(x, y, title, THEME.fg, THEME.bg, true, width);
   const titleW = stringWidth(title);
 

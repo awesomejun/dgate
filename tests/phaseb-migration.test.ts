@@ -42,7 +42,7 @@ function makeEnv(): TestEnv {
   const dbPath = path.join(base, 'decision.db');
   const projDir = path.join(base, 'proj');
   fs.mkdirSync(projDir, { recursive: true });
-  return { base, dbPath, projDir, env: { ...process.env, GEMINI_TRICK_DB_PATH: dbPath } };
+  return { base, dbPath, projDir, env: { ...process.env, GEMINI_TRICK_DB_PATH: dbPath, DGATE_DB_PATH: undefined, DECISION_ORCHESTRATOR_DB_PATH: undefined } };
 }
 
 function cleanupEnv(e: TestEnv): void {
@@ -458,7 +458,7 @@ test('⑦ F-1 회귀: 라운드마다 미존재 DB에 8자식 동시 record = 40
       const roundEnv: TestEnv = {
         ...e,
         dbPath: roundDb,
-        env: { ...process.env, GEMINI_TRICK_DB_PATH: roundDb },
+        env: { ...process.env, GEMINI_TRICK_DB_PATH: roundDb, DGATE_DB_PATH: undefined, DECISION_ORCHESTRATOR_DB_PATH: undefined },
       };
       const batch = await Promise.all(
         Array.from({ length: 8 }, () =>

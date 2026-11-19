@@ -644,7 +644,7 @@ export class AgentRunner {
             systemInstruction: {
               parts: [
                 {
-                  text: '당신은 Decision Orchestrator TUI의 Lead 리드 에이전트입니다. 한국어로 명확하게 답하고, 파일 확인이 필요하면 제공된 도구를 사용하세요.',
+                  text: '당신은 DGATE TUI의 Lead 리드 에이전트입니다. 한국어로 명확하게 답하고, 파일 확인이 필요하면 제공된 도구를 사용하세요.',
                 },
               ],
             },

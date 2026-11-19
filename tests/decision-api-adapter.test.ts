@@ -171,6 +171,8 @@ function dgEnv(e: TestEnv, overrides: Record<string, string | undefined>): NodeJ
     DECISION_API: 'off',
   };
   delete env.GEMINI_DECISION_API_KEY;
+  delete env.DGATE_DB_PATH;
+  delete env.DECISION_ORCHESTRATOR_DB_PATH;
   delete env.DECISION_API_BASE_URL;
   delete env.DECISION_API_MODEL;
   delete env.DECISION_API_TIMEOUT_MS;
