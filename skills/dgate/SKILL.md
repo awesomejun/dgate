@@ -20,6 +20,8 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
 
 사용자는 `hook`, `fork`, `SSOT`, `dg wrap`, `dispatch.ts`, `shadow`, `roster.json` 같은 내부 용어를 알 필요가 없고, CLI 명령을 외우거나 직접 복붙할 필요도 없다. 아래 자연어 요청이 오면 에이전트가 전 과정을 조용히 대행한다.
 
+**다중 task 저장소 개발 위임 시** — PR을 개설하며 저장소 단위로 여러 task를 위임하는 개발에는 `docs/WORKFLOW.md`의 플레이북을 따른다 (PRD 비겹침 task 분해 → 소유주가 첫 task를 직접 시범 → 그다음 task부터 워크트리 기반 병렬 PR 위임). 단, main 병합·배포는 항상 별도 명시 승인 지점으로 유지하고, 단순 질문·즉석 수정에는 이 플레이북을 강요하지 않는다.
+
 **진입 트리거** — 사용자가 *"오케스트레이터 적용해줘"*, *"`dgate`로 진행해줘"*, *"멀티워커로 해줘"*라고 하면:
 
 1. **환경·로스터 무음 점검** — `node $DGATE_ROOT/scripts/setup.ts --check --json`을 조용히 실행한다. 전역 `roster.json`이 없으면 감지된 CLI·모델을 바탕으로 쉬운 한국어 질문 1~2개만 물어보고 저장까지 대행한다 — 원시 설정 방법·파일 경로·JSON 예시를 그대로 나열하지 않는다.

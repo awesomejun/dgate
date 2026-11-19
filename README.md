@@ -168,6 +168,8 @@ cp .herdr/roster.example.json ~/.config/herdr-quad/roster.json
 
 ## 4. 타 로컬 저장소 공용 실행 (`--repo`) & `dg` CLI
 
+저장소 단위 다중 task·PR 위임 개발 플레이북(PRD 비겹침 분해 → 소유주 첫 task 시범 → 워크트리 병렬 PR 위임 · main 병합 승인 게이트 · CI 비용 통제)은 [docs/WORKFLOW.md](docs/WORKFLOW.md)를 참고한다 (단순 질문·즉석 수정에는 적용을 강제하지 않는다).
+
 ### 다른 저장소에서 실행
 
 `dg.ts`·역할 계약서·roster는 오케스트레이터 루트 기준, 작업 cwd·worktree·project_id는 `--repo` 기준으로 해석된다. 어느 프로젝트에서든 동일하게 동작한다:
