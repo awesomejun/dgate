@@ -6,7 +6,7 @@ import {
   truncateWidth,
   wrapByWidth,
 } from '../core/width.ts';
-import { TRIGGER_LABELS, effortToGauge, getFilteredLogs, sortRoutesForDisplay } from '../state/store.ts';
+import { LOG_FILTER_LABELS, TRIGGER_LABELS, effortToGauge, getFilteredLogs, sortRoutesForDisplay } from '../state/store.ts';
 import { THEME, lerpColor, resolveColorKey, type RGB } from '../theme.ts';
 import type { AppState } from '../types.ts';
 import { computeLayout, type CompactLayout, type FullLayout } from './layout.ts';
@@ -47,13 +47,14 @@ function renderFullLayout(buf: CellBuffer, state: AppState, L: FullLayout): void
           : state.mode === 'live'
             ? `LIVE (${state.backendKind})${state.agentBusy ? ' · RUNNING' : ''}`
             : 'LIVE STREAM';
-    const cliName = state.mode === 'live' && state.backendKind === 'agy' ? 'agy' : 'gemini';
+    const leadCli = state.rosterLabels.lead.split(':')[0] || 'lead';
+    const cliName = state.mode === 'live' && state.backendKind === 'agy' ? 'agy' : leadCli;
     const centerTitle = `${state.cwd} · ${cliName} · ${L.cols}×${L.rows} · ${modeTag}`;
     buf.writeCentered(0, 0, L.cols, centerTitle, THEME.chromeFg, THEME.bgChrome, false);
     const rightChrome =
       state.mode === 'live'
-        ? '?:도움말  r:응답  n:Neon  s:스웜  /:입력'
-        : '?:도움말  n:Neon  s:스웜(50)  /:입력';
+        ? '?:도움말  r:응답  n:검증  s:스웜  /:입력'
+        : '?:도움말  n:검증  s:스웜(50)  /:입력';
     buf.writeRight(0, 0, L.cols - 2, rightChrome, THEME.chromeFg, THEME.bgChrome);
   }
 
@@ -63,14 +64,14 @@ function renderFullLayout(buf: CellBuffer, state: AppState, L: FullLayout): void
   // 3. 범례 네비게이션 바
   renderLegendNav(buf, state, L.padX, L.navY, L.cols - L.padX * 2);
 
-  // 4. 파이프라인 & Carbon 자문 연결 와이어 (패널보다 먼저 그려서 보더와 자연스럽게 접합)
+  // 4. 파이프라인 & Advisor 자문 연결 와이어 (패널보다 먼저 그려서 보더와 자연스럽게 접합)
   renderPipelineWires(buf, state, L);
   renderAdvisoryWires(buf, state, L);
 
-  // 5. 좌측 Carbon 자문 패널
+  // 5. 좌측 Advisor 자문 패널
   renderAdvisorPanel(buf, state, L);
 
-  // 6. 우측 4단 파이프라인 패널들 + Gemini Neon 교차 검증 패널
+  // 6. 우측 4단 파이프라인 패널들 + Verifier 교차 검증 패널
   renderMainPanel(buf, state, L);
   renderNeonPanel(buf, state, L);
   renderDecisionPanel(buf, state, L);
@@ -91,17 +92,30 @@ function renderHeader(
   y: number,
   width: number
 ): void {
-  buf.writeText(x, y, 'GEMINI CLI SUBAGENT TUI', THEME.fg, THEME.bg, true, width);
+  const title = 'DECISION ORCHESTRATOR TUI';
+  buf.writeText(x, y, title, THEME.fg, THEME.bg, true, width);
+  const titleW = stringWidth(title);
+  if (width - titleW > 8) {
+    buf.writeText(
+      x + titleW,
+      y,
+      ` · profile=${state.rosterLabels.profileName}`,
+      THEME.muted,
+      THEME.bg,
+      false,
+      width - titleW
+    );
+  }
 
   const compactBadges = width < 96;
-  const b1 = compactBadges ? `ARGON[${state.argonBuilds}]` : `ARGON BUILDS [${state.argonBuilds}]`;
+  const b1 = compactBadges ? `LEAD[${state.argonBuilds}]` : `LEAD BUILDS [${state.argonBuilds}]`;
   const b2 = compactBadges
-    ? `SWARM[${state.swarmActive}]`
-    : `HYDROGEN SWARMS [${state.swarmActive}]`;
+    ? `WORK[${state.swarmActive}]`
+    : `WORKERS [${state.swarmActive}]`;
   const b3 = compactBadges
-    ? `NEON[${state.neonVerified}]`
-    : `NEON VERIFIES [${state.neonVerified}]`;
-  const b4 = compactBadges ? `CARBON[${state.carbonCalls}]` : `CARBON [${state.carbonCalls}]`;
+    ? `VERIF[${state.neonVerified}]`
+    : `VERIFIES [${state.neonVerified}]`;
+  const b4 = compactBadges ? `ADV[${state.carbonCalls}]` : `ADVISOR [${state.carbonCalls}]`;
   const gap = width >= 124 ? '   ' : width >= 96 ? '  ' : ' ';
   const totalRightW =
     stringWidth(b1) +
@@ -111,7 +125,7 @@ function renderHeader(
     gap.length * 3;
   const startRight = x + width - totalRightW;
 
-  if (startRight > x + 24) {
+  if (startRight > x + 24 + titleW) {
     buf.writeSegments(startRight, y, [
       { text: b1, fg: THEME.orange, bg: THEME.bg, bold: true },
       { text: gap, fg: THEME.muted, bg: THEME.bg },
@@ -133,56 +147,48 @@ function renderLegendNav(
   y: number,
   width: number
 ): void {
-  const gap = width >= 136 ? '      ' : width >= 112 ? '    ' : '  ';
   const f = state.logFilter;
-  buf.writeSegmentsCentered(x, y, width, [
-    { text: '■ ', fg: THEME.orange, bg: THEME.bg, bold: true },
-    {
-      text: f === 'argon' ? 'Argon · 리드 [필터]' : 'Argon · 리드',
-      fg: f === 'argon' ? THEME.orange : THEME.muted,
+  const lb = state.rosterLabels;
+  const items: ReadonlyArray<{ text: string; fg: RGB; on: boolean }> = [
+    { text: `Lead · ${lb.lead}`, fg: THEME.orange, on: f === 'argon' },
+    { text: `Workers · ${lb.explore} / ${lb.coder}`, fg: THEME.blue, on: f === 'hydrogen' },
+    { text: 'Decision Gate', fg: THEME.green, on: f === 'decision' },
+    { text: `Verifier · ${lb.verifier}`, fg: THEME.neon, on: f === 'neon' },
+    { text: `Advisor · ${lb.advisor}`, fg: THEME.purple, on: f === 'carbon' },
+  ];
+
+  // 항목(아이콘 2칸 + 라벨)이 폭 안에 들어가는 가장 넓은 간격을 고른다.
+  const fixedW = items.reduce((acc, i) => acc + 2 + stringWidth(i.text) + (i.on ? 7 : 0), 0);
+  const gap =
+    fixedW + 6 * (items.length - 1) <= width
+      ? '      '
+      : fixedW + 4 * (items.length - 1) <= width
+        ? '    '
+        : fixedW + 3 * (items.length - 1) <= width
+          ? '   '
+          : fixedW + 2 * (items.length - 1) <= width
+            ? '  '
+            : ' ';
+
+  const segments: Array<{ text: string; fg: RGB; bg: RGB; bold?: boolean }> = [];
+  items.forEach((item, idx) => {
+    if (idx > 0) segments.push({ text: gap, fg: THEME.muted, bg: THEME.bg });
+    segments.push({ text: '■ ', fg: item.fg, bg: THEME.bg, bold: true });
+    segments.push({
+      text: item.on ? `${item.text} [필터]` : item.text,
+      fg: item.on ? item.fg : THEME.muted,
       bg: THEME.bg,
-      bold: f === 'argon',
-    },
-    { text: gap, fg: THEME.muted, bg: THEME.bg },
-    { text: '■ ', fg: THEME.blue, bg: THEME.bg, bold: true },
-    {
-      text: f === 'hydrogen' ? 'Hydrogen · 스웜 [필터]' : 'Hydrogen · 스웜',
-      fg: f === 'hydrogen' ? THEME.blue : THEME.muted,
-      bg: THEME.bg,
-      bold: f === 'hydrogen',
-    },
-    { text: gap, fg: THEME.muted, bg: THEME.bg },
-    { text: '■ ', fg: THEME.green, bg: THEME.bg, bold: true },
-    {
-      text: f === 'decision' ? 'Decision 1 · 분기 [필터]' : 'Decision 1 · 분기',
-      fg: f === 'decision' ? THEME.green : THEME.muted,
-      bg: THEME.bg,
-      bold: f === 'decision',
-    },
-    { text: gap, fg: THEME.muted, bg: THEME.bg },
-    { text: '■ ', fg: THEME.neon, bg: THEME.bg, bold: true },
-    {
-      text: f === 'neon' ? 'Neon · 검증 [필터]' : 'Neon · 검증',
-      fg: f === 'neon' ? THEME.neon : THEME.muted,
-      bg: THEME.bg,
-      bold: f === 'neon',
-    },
-    { text: gap, fg: THEME.muted, bg: THEME.bg },
-    { text: '■ ', fg: THEME.purple, bg: THEME.bg, bold: true },
-    {
-      text: f === 'carbon' ? 'Carbon · 자문 [필터]' : 'Carbon · 자문',
-      fg: f === 'carbon' ? THEME.purple : THEME.muted,
-      bg: THEME.bg,
-      bold: f === 'carbon',
-    },
-  ]);
+      bold: item.on,
+    });
+  });
+  buf.writeSegmentsCentered(x, y, width, segments);
 }
 
 function renderPipelineWires(buf: CellBuffer, state: AppState, L: FullLayout): void {
   const cx = L.centerX;
   const wireFg = THEME.borderWire;
 
-  // 1) Argon Main 하단 -> Decision 상단 수직선
+  // 1) Lead Main 하단 -> Decision 상단 수직선
   const mBottom = L.main.y + L.main.h;
   const pathMainToDec: Array<readonly [number, number]> = [];
   for (let y = mBottom; y < L.decision.y; y++) {
@@ -217,7 +223,7 @@ function renderPipelineWires(buf: CellBuffer, state: AppState, L: FullLayout): v
   for (let x = cx; x >= c0x; x--) pathFanOutLeft.push([x, L.fanOutY]);
   for (let x = cx; x <= c2x; x++) pathFanOutRight.push([x, L.fanOutY]);
 
-  // 3) 카드 하단 -> 팬인 트리 -> 다시 Argon 상단
+  // 3) 카드 하단 -> 팬인 트리 -> 다시 Lead 상단
   const pathFanIn: Array<readonly [number, number]> = [];
   for (let x = c0x; x <= c2x; x++) {
     let ch = '─';
@@ -235,7 +241,7 @@ function renderPipelineWires(buf: CellBuffer, state: AppState, L: FullLayout): v
     pathFanIn.push([cx, y]);
   }
 
-  // 4) Argon Main 우측 <-> Gemini Neon 좌측 교차 검증 링크
+  // 4) Lead Main 우측 <-> Verifier 좌측 교차 검증 링크
   const neonStartX = L.main.x + L.main.w;
   const neonEndX = L.neon.x - 1;
   const neonActive = state.neonState === 'run' || state.neonState === 'pass';
@@ -338,14 +344,14 @@ function renderAdvisorPanel(buf: CellBuffer, state: AppState, L: FullLayout): vo
   // 상단 헤더 영역 (R.y + 1 ~ tr0Row - 1)
   let hy = R.y + 1;
   if (hy < L.tr0Row) {
-    buf.writeCentered(ix, hy++, iw, 'Carbon', THEME.purple, THEME.bg, true);
+    buf.writeCentered(ix, hy++, iw, 'Advisor', THEME.purple, THEME.bg, true);
   }
   if (hy < L.tr0Row) {
     buf.writeCentered(
       ix,
       hy++,
       iw,
-      `advisor · ${state.advisorState}`,
+      `${state.rosterLabels.advisor} · ${state.advisorState}`,
       THEME.purple,
       THEME.bg,
       state.advisorState === '자문 중'
@@ -438,7 +444,7 @@ function renderAdvisorPanel(buf: CellBuffer, state: AppState, L: FullLayout): vo
       buf.writeText(ix + 1, ey++, '코드는 직접 쓰지 않습니다.', THEME.muted, THEME.bg, false, iw - 1);
     }
     if (ey <= expEnd) {
-      buf.writeText(ix + 1, ey++, '조언은 Argon이 적용합니다.', THEME.muted, THEME.bg, false, iw - 1);
+      buf.writeText(ix + 1, ey++, '조언은 Lead가 적용합니다.', THEME.muted, THEME.bg, false, iw - 1);
     }
   }
 }
@@ -455,12 +461,12 @@ function renderMainPanel(buf: CellBuffer, state: AppState, L: FullLayout): void 
     style: glowing || focused ? 'heavy' : 'single',
     borderColor,
     fillBg: panelBg,
-    rightLabel: focused ? 'Enter:편집' : glowing ? 'Carbon 자문' : undefined,
+    rightLabel: focused ? 'Enter:편집' : glowing ? 'Advisor 자문' : undefined,
     rightLabelColor: glowing ? THEME.purple : THEME.orange,
     boldBorder: glowing || focused,
   });
 
-  // 우측 보더에서 Gemini Neon 연결 분기점(├ / ┣) 마킹
+  // 우측 보더에서 Verifier 연결 분기점(├ / ┣) 마킹
   if (L.neonLinkRow > R.y && L.neonLinkRow < R.y + R.h - 1) {
     const neonOn = state.neonState === 'run' || state.neonState === 'pass';
     buf.setChar(
@@ -477,7 +483,15 @@ function renderMainPanel(buf: CellBuffer, state: AppState, L: FullLayout): void 
   const iw = R.w - 4;
   let cy = R.y + 1;
 
-  buf.writeCentered(ix, cy++, iw, 'Argon · 메인 세션', THEME.orange, panelBg, true);
+  buf.writeCentered(
+    ix,
+    cy++,
+    iw,
+    `Lead · ${state.rosterLabels.lead}`,
+    THEME.orange,
+    panelBg,
+    true
+  );
   if (cy < R.y + R.h - 1) {
     buf.writeCentered(ix, cy++, iw, state.mainSummary, THEME.fg, panelBg, false);
   }
@@ -536,7 +550,7 @@ function renderNeonPanel(buf: CellBuffer, state: AppState, L: FullLayout): void 
     boldBorder: active || focused,
   });
 
-  // 좌측 보더에서 Argon 메인 연결 접합점(┤ / ┫) 마킹
+  // 좌측 보더에서 Lead 메인 연결 접합점(┤ / ┫) 마킹
   if (L.neonLinkRow > R.y && L.neonLinkRow < R.y + R.h - 1) {
     buf.setChar(
       R.x,
@@ -552,8 +566,10 @@ function renderNeonPanel(buf: CellBuffer, state: AppState, L: FullLayout): void 
   const iw = R.w - 4;
   let cy = R.y + 1;
 
-  // 1) 제목
-  const titleText = iw >= 23 ? 'Gemini Neon · 교차 검증' : 'Neon · 교차 검증';
+  // 1) 제목 — 폭이 허용하면 활성 verifier 바인딩 배지까지 표기
+  const badgeTitle = `Verifier · ${state.rosterLabels.verifier}`;
+  const titleText =
+    stringWidth(badgeTitle) <= iw ? badgeTitle : 'Verifier · 교차 검증';
   buf.writeCentered(
     ix,
     cy++,
@@ -627,8 +643,8 @@ function renderDecisionPanel(buf: CellBuffer, state: AppState, L: FullLayout): v
   const iw = R.w - 4;
   let cy = R.y + 1;
 
-  // 헤더: Decision 1 · 분기 계층  |  forks 1,286
-  buf.writeText(ix, cy, 'Decision 1 · 분기 계층', THEME.green, THEME.bg, true, iw);
+  // 헤더: Decision Gate · 분기 계층  |  forks 1,286
+  buf.writeText(ix, cy, 'Decision Gate · 분기 계층', THEME.green, THEME.bg, true, iw);
   const forksStr = state.totalForks.toLocaleString('en-US');
   const forksPrefix = 'forks ';
   const rightW = stringWidth(forksPrefix) + stringWidth(forksStr);
@@ -684,7 +700,7 @@ function renderDecisionPanel(buf: CellBuffer, state: AppState, L: FullLayout): v
       cy,
       [
         { text: 'sharp → 코드에서 실행', fg: THEME.green, bg: THEME.bg },
-        { text: '   split → Argon', fg: THEME.muted, bg: THEME.bg },
+        { text: '   split → Lead', fg: THEME.muted, bg: THEME.bg },
       ],
       iw
     );
@@ -692,12 +708,12 @@ function renderDecisionPanel(buf: CellBuffer, state: AppState, L: FullLayout): v
 }
 
 function renderSwarmSection(buf: CellBuffer, state: AppState, L: FullLayout): void {
-  // 위임 라벨 (하위 에이전트에 위임 · Hydrogen)
+  // 위임 라벨 (하위 에이전트에 위임 · Workers)
   if (L.delegateLabelY < L.fanOutY) {
     const spanW = L.cards[2].x + L.cards[2].w - L.cards[0].x;
     buf.writeSegmentsCentered(L.cards[0].x, L.delegateLabelY, spanW, [
       { text: '하위 에이전트에 위임 · ', fg: THEME.fg, bg: THEME.bg },
-      { text: 'Hydrogen', fg: THEME.blue, bg: THEME.bg, bold: true },
+      { text: 'Workers', fg: THEME.blue, bg: THEME.bg, bold: true },
     ]);
   }
 
@@ -731,7 +747,7 @@ function renderSwarmSection(buf: CellBuffer, state: AppState, L: FullLayout): vo
     // 역할 이름 (search / grep / audit)
     buf.writeCentered(ix, cy++, iw, card.name, THEME.fg, cardBg, true);
 
-    // 모델명 (Hydrogen)
+    // 모델 태그 (활성 roster explore 바인딩)
     if (cy < cardRect.y + cardRect.h - 1 && cardRect.h >= 6) {
       buf.writeCentered(ix, cy++, iw, card.model, THEME.blue, cardBg, false);
     }
@@ -785,7 +801,7 @@ function renderBackPanel(buf: CellBuffer, state: AppState, L: FullLayout): void 
     style: glowing ? 'heavy' : 'single',
     borderColor,
     fillBg: panelBg,
-    rightLabel: glowing ? 'Carbon 최종 점검' : undefined,
+    rightLabel: glowing ? 'Advisor 최종 점검' : undefined,
     rightLabelColor: THEME.purple,
     boldBorder: glowing,
   });
@@ -793,7 +809,7 @@ function renderBackPanel(buf: CellBuffer, state: AppState, L: FullLayout): void 
   const ix = R.x + 2;
   const iw = R.w - 4;
   const y1 = R.y + 1;
-  buf.writeCentered(ix, y1, iw, '다시 Argon · 리드', THEME.orange, panelBg, true);
+  buf.writeCentered(ix, y1, iw, '다시 Lead · 리드', THEME.orange, panelBg, true);
   if (y1 + 1 < R.y + R.h - 1) {
     if (state.mode === 'live') {
       const liveText = state.agentBusy && state.latestResponse
@@ -819,7 +835,7 @@ function renderLogsPanel(buf: CellBuffer, state: AppState, R: Rect): void {
   const scroll = Math.min(state.logScrollOffset, maxScroll);
 
   const rightHints: string[] = [];
-  if (state.logFilter !== 'all') rightHints.push(`필터:${state.logFilter}`);
+  if (state.logFilter !== 'all') rightHints.push(`필터:${LOG_FILTER_LABELS[state.logFilter]}`);
   if (scroll > 0) rightHints.push(`-${scroll}줄`);
   if (focused) rightHints.push('Enter:전체보기');
 
@@ -891,7 +907,7 @@ function renderFooter(
   const s1 = compactStatus
     ? `[ 스웜 ${state.swarmActive}/${state.swarmMax} ]`
     : `[ 하위 에이전트 ${state.swarmActive}/${state.swarmMax} ]`;
-  const s2 = `[ Neon ${neonStatusText} ]`;
+  const s2 = `[ Verifier ${neonStatusText} ]`;
   const s3 = `[ ${state.advisorState} ]`;
   const s4 = `[ ${state.totalForks.toLocaleString('en-US')} 분기 ]`;
   const gap = compactStatus ? ' ' : '  ';
@@ -921,7 +937,7 @@ function renderFooter(
     ]);
   }
 
-  // 좌측 프롬프트 입력창 (`~/app $ gemini █`)
+  // 좌측 프롬프트 입력창 (`~/app $ pi █` — 활성 lead CLI 표기)
   const promptMaxW = Math.max(18, statusStartX - x - 2);
   const promptBg = state.inputActive ? THEME.bgInputFocus : THEME.bg;
   if (state.inputActive) {
@@ -929,7 +945,10 @@ function renderFooter(
   }
 
   const prefix1 = `${state.cwd} $ `;
-  const prefix2 = state.mode === 'live' && state.backendKind === 'agy' ? 'agy ' : 'gemini ';
+  const prefix2 =
+    state.mode === 'live' && state.backendKind === 'agy'
+      ? 'agy '
+      : `${state.rosterLabels.lead.split(':')[0] || 'lead'} `;
   let cx = x;
   cx += buf.writeText(cx, y, prefix1, THEME.green, promptBg, true);
   cx += buf.writeText(cx, y, prefix2, THEME.fg, promptBg, false);
@@ -980,7 +999,7 @@ function renderCompactLayout(buf: CellBuffer, state: AppState, L: CompactLayout)
   const tabs = [
     `[1:파이프라인]`,
     `[2:스웜(${state.swarmActive})]`,
-    `[3:Carbon(${state.advisorState})]`,
+    `[3:Advisor(${state.advisorState})]`,
     `[4:기록]`,
   ] as const;
 
@@ -1005,7 +1024,7 @@ function renderCompactLayout(buf: CellBuffer, state: AppState, L: CompactLayout)
   if (state.compactTab === 0) {
     buf.drawBox(B, {
       borderColor: THEME.orange,
-      title: `Argon(${state.phase}) → Decision 1(${state.totalForks} forks)`,
+      title: `Lead(${state.phase}) → Decision Gate(${state.totalForks} forks)`,
       titleColor: THEME.orange,
     });
     const ix = B.x + 2;
@@ -1014,7 +1033,7 @@ function renderCompactLayout(buf: CellBuffer, state: AppState, L: CompactLayout)
     buf.writeText(
       ix,
       cy++,
-      `Argon 메인: ${state.mainSummary} (${effortToGauge(state.effort)})`,
+      `Lead 메인: ${state.mainSummary} (${effortToGauge(state.effort)})`,
       THEME.orange,
       THEME.bg,
       true,
@@ -1059,7 +1078,7 @@ function renderCompactLayout(buf: CellBuffer, state: AppState, L: CompactLayout)
       buf.writeText(
         ix,
         cy++,
-        `Gemini Neon: ${neonText}`,
+        `Verifier: ${neonText}`,
         state.neonState === 'pass' ? THEME.green : THEME.neon,
         THEME.bg,
         state.neonState !== 'idle',
@@ -1070,7 +1089,7 @@ function renderCompactLayout(buf: CellBuffer, state: AppState, L: CompactLayout)
       buf.writeText(
         ix,
         cy++,
-        `Carbon(${state.advisorState}): ${state.latestAdvice}`,
+        `Advisor(${state.advisorState}): ${state.latestAdvice}`,
         THEME.purple,
         THEME.bg,
         false,
@@ -1083,7 +1102,7 @@ function renderCompactLayout(buf: CellBuffer, state: AppState, L: CompactLayout)
   } else if (state.compactTab === 1) {
     buf.drawBox(B, {
       borderColor: THEME.blue,
-      title: `Hydrogen 하위 에이전트 (${state.swarmActive}/${state.swarmMax})`,
+      title: `Workers 하위 에이전트 (${state.swarmActive}/${state.swarmMax})`,
       titleColor: THEME.blue,
     });
     const ix = B.x + 2;
@@ -1109,7 +1128,7 @@ function renderCompactLayout(buf: CellBuffer, state: AppState, L: CompactLayout)
   } else if (state.compactTab === 2) {
     buf.drawBox(B, {
       borderColor: THEME.purple,
-      title: `Carbon · advisor (${state.advisorState})`,
+      title: `Advisor · 자문 (${state.advisorState})`,
       titleColor: THEME.purple,
     });
     const ix = B.x + 2;

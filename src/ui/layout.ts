@@ -101,7 +101,7 @@ export function computeLayout(cols: number, rows: number): ComputedLayout {
   const pipeW = Math.max(58, cols - padX - pipeX);
   const centerX = pipeX + Math.floor(pipeW / 2);
 
-  // 각 패널 X/W 계산 (Argon 메인 중앙 축 대칭 + 우측 Gemini Neon 교차 검증 패널)
+  // 각 패널 X/W 계산 (Lead 메인 중앙 축 대칭 + 우측 Verifier 교차 검증 패널)
   const rightBound = cols - padX;
   const neonLinkGap = pipeW >= 96 ? 4 : pipeW >= 78 ? 3 : 2;
   const neonW = pipeW >= 112 ? 32 : pipeW >= 96 ? 28 : pipeW >= 78 ? 26 : 23;
@@ -160,7 +160,7 @@ export function computeLayout(cols: number, rows: number): ComputedLayout {
     h: Math.max(18, pipelineBottom - mainY),
   };
 
-  // Carbon 3대 트리거 행을 우측 타겟 패널 내부 행과 1:1 정렬 (상단 세션 정보 3줄 확보)
+  // Advisor 3대 트리거 행을 우측 타겟 패널 내부 행과 1:1 정렬 (상단 세션 정보 3줄 확보)
   const tr0Row = mainY + Math.min(mainH - 2, Math.max(3, Math.floor(mainH / 2) + 1));
   const tr1Row = cardsY + Math.floor(cardH / 2);
   const tr2Row = backY + Math.floor(backH / 2);

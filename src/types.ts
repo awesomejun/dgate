@@ -16,7 +16,7 @@ export type ModalKind =
   | 'logs'
   | 'response';
 
-export type CompactTab = 0 | 1 | 2 | 3; // 0: 파이프라인, 1: 스웜, 2: Carbon, 3: 세션 기록
+export type CompactTab = 0 | 1 | 2 | 3; // 0: 파이프라인, 1: 스웜, 2: Advisor, 3: 세션 기록
 
 export type LogFilter = 'all' | 'argon' | 'hydrogen' | 'decision' | 'neon' | 'carbon';
 
@@ -84,6 +84,23 @@ export interface LogEntry {
   message: string;
 }
 
+/**
+ * 활성 roster.json 바인딩의 TUI 표시용 라벨 묶음.
+ * 각 역할 슬롯 값은 `formatRoleBadge`가 만든 간결 태그
+ * (예: 'pi:glm-5.3', 'pi:deepseek-v4.1-flash', 'devin', 'claude:sonnet-4-6').
+ */
+export interface RosterDisplayLabels {
+  /** 활성 roster 프로필 이름 (예: 'zero-agy', 'quota-saver') */
+  profileName: string;
+  /** roster 로딩 출처: flag | env | project | global | builtin */
+  rosterSource: string;
+  lead: string;
+  explore: string;
+  coder: string;
+  verifier: string;
+  advisor: string;
+}
+
 export interface AppState {
   mode: RunMode;
   paused: boolean;
@@ -93,6 +110,8 @@ export interface AppState {
   // 세션 메타
   cwd: string;
   sessionId: number;
+  /** 활성 roster.json 역할·모델 바인딩 라벨 (리드·탐색·코더·검증·자문) */
+  rosterLabels: RosterDisplayLabels;
   modelFlag: string;
   modelName: string;
   backendKind: BackendKind;
@@ -111,13 +130,13 @@ export interface AppState {
   carbonCalls: number;
   totalForks: number;
 
-  // Argon 메인 & 리턴 패널
+  // Lead 메인 & 리턴 패널
   mainSummary: string;
   effort: EffortLevel;
   phase: string;
   backSummary: string;
 
-  // Gemini Neon 교차 검증 패널
+  // Verifier 교차 검증 패널
   neonModelName: string;
   neonModelFlag: string;
   neonState: NeonStatus;
@@ -126,19 +145,19 @@ export interface AppState {
   neonSummary: string;
   neonHistory: NeonCheckRecord[];
 
-  // Carbon 자문 패널
+  // Advisor 자문 패널
   advisorState: '대기 중' | '자문 중';
   activeTrigger: -1 | 0 | 1 | 2; // -1: 비활성, 0: 계획 확정 전, 1: 같은 오류 2회, 2: 완료 전
   latestAdvice: string;
   tokensRead: string;
   adviceHistory: AdviceRecord[];
 
-  // Decision 1 분기 패널
+  // Decision Gate 분기 패널
   routes: DecisionRoute[];
   sharpCount: number;
   splitCount: number;
 
-  // Hydrogen 스웜 패널
+  // Workers 스웜 패널
   cards: SwarmCard[];
   workers: SwarmWorker[];
 

@@ -57,11 +57,11 @@ export const THEME = {
   borderLog: hex('#454c56'),
   borderFocusBoost: hex('#eef3f8'),
 
-  orange: hex('#e9a17c'), // Argon · 리드
-  blue: hex('#93b9ef'),   // Hydrogen · 스웜
-  green: hex('#8cd5ae'),  // Decision 1 · 분기
-  purple: hex('#bda6ef'), // Carbon · 자문
-  neon: hex('#e8d97a'),   // Gemini Neon · 교차 검증
+  orange: hex('#e9a17c'), // Lead · 리드
+  blue: hex('#93b9ef'),   // Workers · 스웜
+  green: hex('#8cd5ae'),  // Decision Gate · 분기
+  purple: hex('#bda6ef'), // Advisor · 자문
+  neon: hex('#e8d97a'),   // Verifier · 교차 검증
 
   trafficRed: hex('#f16e69'),
   trafficYellow: hex('#edbd54'),

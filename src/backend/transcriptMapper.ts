@@ -278,7 +278,7 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
       state.argonBuilds += 1;
       state.agentBusy = true;
       state.backSummary = '실행 중… 완료 시 r 키로 전문 확인';
-      appendLog(state, 'Argon', 'orange', `작업 지시 — ${cleanRequest}`, timeStr);
+      appendLog(state, 'Lead', 'orange', `작업 지시 — ${cleanRequest}`, timeStr);
     }
     return;
   }
@@ -307,7 +307,7 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
       state.tokensRead = formatTokensCount(state.totalTokensUsed);
     }
 
-    // Thinking 필드 -> Carbon 자문 패널 매핑
+    // Thinking 필드 -> Advisor 자문 패널 매핑
     if (step.thinking && step.thinking.trim().length > 0) {
       state.carbonCalls += 1;
       state.advisorState = '자문 중';
@@ -331,10 +331,10 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
       if (state.adviceHistory.length > 50) {
         state.adviceHistory.splice(0, state.adviceHistory.length - 50);
       }
-      appendLog(state, 'Carbon', 'purple', adviceSummary, timeStr);
+      appendLog(state, 'Advisor', 'purple', adviceSummary, timeStr);
     }
 
-    // 도구 호출 (tool_calls) -> Decision 1 & Hydrogen & Neon
+    // 도구 호출 (tool_calls) -> Decision Gate & Workers & Verifier
     const toolCalls = step.tool_calls ?? [];
     abortPendingBatch(ctx); // [B6] 새 PLANNER 배치 — 이전 미완 배치는 고아로 폐기
     if (toolCalls.length > 0) {
@@ -364,7 +364,7 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
           state.conversationId
         );
 
-        // Hydrogen 카드 갱신
+        // Workers 카드 갱신
         card.status = 'running';
         card.progress = Math.min(92, Math.max(30, card.progress + 35));
         card.description = argHint
@@ -387,13 +387,13 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
 
         appendLog(
           state,
-          'Decision 1',
+          'Decision Gate',
           'green',
           `도구 분기 → ${toolName}${argHint ? ` (${redactSecrets(argHint)})` : ''} ${decision.tag} (p=${decision.p.toFixed(2)}, ${decision.basis})`,
           timeStr
         );
 
-        // 검증/테스트 관련 도구 시 Neon 교차 검증 연동
+        // 검증/테스트 관련 도구 시 Verifier 교차 검증 연동
         const isVerify =
           toolName.includes('test') ||
           toolName.includes('audit') ||
@@ -406,7 +406,7 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
           state.neonLabel = argHint || toolName;
           appendLog(
             state,
-            'Neon',
+            'Verifier',
             'neon',
             `독립 교차 검증 시작 — ${redactSecrets(argHint || toolName)}`,
             timeStr
@@ -444,14 +444,14 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
         });
         appendLog(
           state,
-          'Neon',
+          'Verifier',
           'neon',
-          '검증 통과 · 회귀 없음 → Argon에 전달',
+          '검증 통과 · 회귀 없음 → Lead에 전달',
           timeStr
         );
       }
 
-      appendLog(state, 'Argon', 'orange', '응답 완료 (r 키로 전문 보기)', timeStr);
+      appendLog(state, 'Lead', 'orange', '응답 완료 (r 키로 전문 보기)', timeStr);
     }
     return;
   }
@@ -481,9 +481,9 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
         state.advisorState = '자문 중';
         state.carbonCalls += 1;
         state.latestAdvice = '» 연속 오류 감지 — 파라미터 및 경로 재점검 권고';
-        appendLog(state, 'Carbon', 'purple', '같은 오류 2회 감지 — 파라미터 재검토', timeStr);
+        appendLog(state, 'Advisor', 'purple', '같은 오류 2회 감지 — 파라미터 재검토', timeStr);
       }
-      appendLog(state, 'Hydrogen', 'blue', `도구 실행 오류 감지`, timeStr);
+      appendLog(state, 'Worker', 'blue', `도구 실행 오류 감지`, timeStr);
     } else {
       state.consecutiveToolErrors = 0;
       // 실행 중이던 카드들을 완료로 전진
@@ -505,7 +505,7 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
       const brief = redactSecrets(
         firstLine.length > 55 ? firstLine.slice(0, 54) + '…' : firstLine
       );
-      appendLog(state, 'Hydrogen', 'blue', `도구 완료 — ${brief}`, timeStr);
+      appendLog(state, 'Worker', 'blue', `도구 완료 — ${brief}`, timeStr);
     }
 
     // GENERIC 결과 반영 후 라우트·sharp·split을 SSOT 실측으로 최신화(선행 버그 #3)

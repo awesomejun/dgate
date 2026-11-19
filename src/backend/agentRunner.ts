@@ -184,7 +184,7 @@ export class AgentRunner {
         state.neonProgress = 0;
         state.neonSummary = '교차 검증이 중단되었습니다';
       }
-      appendLog(state, 'Argon', 'orange', '사용자에 의해 현재 실행이 중단되었습니다');
+      appendLog(state, 'Lead', 'orange', '사용자에 의해 현재 실행이 중단되었습니다');
       flashStatus(state, '실행 중단됨');
       onUpdate();
     }
@@ -196,7 +196,7 @@ export class AgentRunner {
       flashStatus(state, '사용 가능한 백엔드(agy 또는 GEMINI_API_KEY)가 없습니다', 4000);
       appendLog(
         state,
-        'Carbon',
+        'Advisor',
         'purple',
         '백엔드 미연결: agy 로그인 또는 GEMINI_API_KEY 환경변수가 필요합니다'
       );
@@ -222,7 +222,7 @@ export class AgentRunner {
       c.status = 'idle';
     }
 
-    appendLog(state, 'Argon', 'orange', `작업 지시 — ${redactSecrets(prompt)}`);
+    appendLog(state, 'Lead', 'orange', `작업 지시 — ${redactSecrets(prompt)}`);
     onUpdate();
 
     if (this.backend === 'agy') {
@@ -279,7 +279,7 @@ export class AgentRunner {
         stalled = true;
         appendLog(
           state,
-          'Carbon',
+          'Advisor',
           'purple',
           `agy 무출력 스톨 감지 — ${Math.round(stallMs / 1000)}s 무응답, 강제 종료(stall)`
         );
@@ -314,7 +314,7 @@ export class AgentRunner {
       const trimmed = line.trim();
       if (!trimmed) return;
       if (trimmed.startsWith('warning:')) return;
-      appendLog(state, 'Argon', 'orange', redactSecrets(trimmed));
+      appendLog(state, 'Lead', 'orange', redactSecrets(trimmed));
       onUpdate();
     });
 
@@ -323,7 +323,7 @@ export class AgentRunner {
       if (this.activeChild === child) this.activeChild = null;
       state.agentBusy = false;
       state.phase = '오류';
-      appendLog(state, 'Carbon', 'purple', `agy 실행 실패: ${redactSecrets(err.message)}`);
+      appendLog(state, 'Advisor', 'purple', `agy 실행 실패: ${redactSecrets(err.message)}`);
       flashStatus(state, `실행 오류: ${redactSecrets(err.message)}`);
       onUpdate();
     });
@@ -336,40 +336,40 @@ export class AgentRunner {
         state.phase = '오류';
         state.activeTrigger = 1;
         state.advisorState = '자문 중';
-        appendLog(state, 'Carbon', 'purple', 'agy 무응답 스톨(stall) — 프로세스 강제 종료됨');
+        appendLog(state, 'Advisor', 'purple', 'agy 무응답 스톨(stall) — 프로세스 강제 종료됨');
       } else if (code !== 0 && state.phase !== '완료' && state.phase !== '중단됨') {
         state.phase = '오류';
         state.activeTrigger = 1;
         state.advisorState = '자문 중';
-        appendLog(state, 'Carbon', 'purple', `프로세스 종료 코드 ${code}`);
+        appendLog(state, 'Advisor', 'purple', `프로세스 종료 코드 ${code}`);
       }
       onUpdate();
     });
   }
 
   /**
-   * Carbon(자문 모델)에게 현재 상태/질문에 대한 별도 자문을 요청합니다.
+   * Advisor(자문 모델)에게 현재 상태/질문에 대한 별도 자문을 요청합니다.
    */
   askCarbonAdvisor(question: string, state: AppState, onUpdate: () => void): void {
     if (this.backend !== 'agy') {
-      flashStatus(state, 'Carbon 직접 호출은 agy 백엔드에서 지원됩니다');
+      flashStatus(state, 'Advisor 직접 호출은 agy 백엔드에서 지원됩니다');
       return;
     }
     if (this.advisorChild) {
-      flashStatus(state, 'Carbon 자문이 이미 실행 중입니다');
+      flashStatus(state, 'Advisor 자문이 이미 실행 중입니다');
       return;
     }
 
     state.activeTrigger = 0;
     state.advisorState = '자문 중';
     state.carbonCalls += 1;
-    appendLog(state, 'Carbon', 'purple', `자문 분석 중 — ${redactSecrets(question)}`);
+    appendLog(state, 'Advisor', 'purple', `자문 분석 중 — ${redactSecrets(question)}`);
     onUpdate();
 
     const contextHint = state.latestResponse
-      ? `최근 Argon 응답 요약:\n${state.latestResponse.slice(0, 1500)}\n\n`
+      ? `최근 Lead 응답 요약:\n${state.latestResponse.slice(0, 1500)}\n\n`
       : '';
-    const advisorPrompt = `${contextHint}당신은 코딩 세션의 메타 자문(Carbon)입니다. 코드를 직접 수정하지 말고, 다음 질문에 대해 한국어 2문장 이내로 핵심 조언만 간결히 답하세요:\n${question}`;
+    const advisorPrompt = `${contextHint}당신은 코딩 세션의 메타 자문(Advisor)입니다. 코드를 직접 수정하지 말고, 다음 질문에 대해 한국어 2문장 이내로 핵심 조언만 간결히 답하세요:\n${question}`;
 
     const args = [
       '--output-format',
@@ -422,7 +422,7 @@ export class AgentRunner {
           text: clean,
           tokensRead: state.tokensRead,
         });
-        appendLog(state, 'Carbon', 'purple', clean);
+        appendLog(state, 'Advisor', 'purple', clean);
       }
       state.advisorState = '대기 중';
       onUpdate();
@@ -430,7 +430,7 @@ export class AgentRunner {
   }
 
   /**
-   * Gemini Neon(독립 교차 검증 모델)에게 계획·변경 diff·응답의 교차 검증을 요청합니다.
+   * Verifier(독립 교차 검증 역할)에게 계획·변경 diff·응답의 교차 검증을 요청합니다.
    */
   askNeonVerify(target: string, state: AppState, onUpdate: () => void): void {
     if (this.backend === 'none') {
@@ -438,7 +438,7 @@ export class AgentRunner {
       return;
     }
     if (this.neonChild || this.neonAbortController) {
-      flashStatus(state, 'Gemini Neon 교차 검증이 이미 실행 중입니다');
+      flashStatus(state, 'Verifier 교차 검증이 이미 실행 중입니다');
       return;
     }
 
@@ -447,14 +447,14 @@ export class AgentRunner {
     state.neonProgress = 18;
     state.neonLabel = label;
     state.neonSummary = `${label} 독립 교차 검증 중…`;
-    appendLog(state, 'Neon', 'neon', `독립 교차 검증 시작 — ${redactSecrets(target)}`);
-    flashStatus(state, `Gemini Neon 교차 검증 시작 (${state.neonModelName})`);
+    appendLog(state, 'Verifier', 'neon', `독립 교차 검증 시작 — ${redactSecrets(target)}`);
+    flashStatus(state, `Verifier 교차 검증 시작 (${state.neonModelName})`);
     onUpdate();
 
     const contextHint = state.latestResponse
-      ? `최근 Argon 작업/응답 요약:\n${state.latestResponse.slice(0, 2000)}\n\n`
-      : `현재 Argon 작업 요약: ${state.mainSummary}\n\n`;
-    const verifyPrompt = `${contextHint}당신은 코딩 세션의 독립 교차 검증 모델(Gemini Neon)입니다. 코드를 직접 수정하지 말고, 누락·회귀·엣지케이스 관점에서 아래 대상을 검증해 주세요. 첫 머리에 [PASS] 또는 [FAIL]을 붙이고 한국어 2문장 이내로 핵심 결과만 간결히 답하세요:\n${target}`;
+      ? `최근 Lead 작업/응답 요약:\n${state.latestResponse.slice(0, 2000)}\n\n`
+      : `현재 Lead 작업 요약: ${state.mainSummary}\n\n`;
+    const verifyPrompt = `${contextHint}당신은 코딩 세션의 독립 교차 검증 역할(Verifier)입니다. 코드를 직접 수정하지 말고, 누락·회귀·엣지케이스 관점에서 아래 대상을 검증해 주세요. 첫 머리에 [PASS] 또는 [FAIL]을 붙이고 한국어 2문장 이내로 핵심 결과만 간결히 답하세요:\n${target}`;
 
     const finalizeNeon = (rawText: string, failedExec = false) => {
       const clean = redactSecrets(rawText.trim().replace(/\s+/g, ' '));
@@ -478,11 +478,11 @@ export class AgentRunner {
       }
       appendLog(
         state,
-        'Neon',
+        'Verifier',
         'neon',
         `${isFail ? '검증 주의' : '검증 통과'} — ${display}`
       );
-      flashStatus(state, isFail ? 'Neon 교차 검증 주의 항목 발견 (n:상세)' : 'Neon 교차 검증 통과 (n:상세)');
+      flashStatus(state, isFail ? 'Verifier 교차 검증 주의 항목 발견 (n:상세)' : 'Verifier 교차 검증 통과 (n:상세)');
       onUpdate();
     };
 
@@ -644,7 +644,7 @@ export class AgentRunner {
             systemInstruction: {
               parts: [
                 {
-                  text: '당신은 Gemini Subagent TUI의 Argon 리드 에이전트입니다. 한국어로 명확하게 답하고, 파일 확인이 필요하면 제공된 도구를 사용하세요.',
+                  text: '당신은 Decision Orchestrator TUI의 Lead 리드 에이전트입니다. 한국어로 명확하게 답하고, 파일 확인이 필요하면 제공된 도구를 사용하세요.',
                 },
               ],
             },
@@ -692,7 +692,7 @@ export class AgentRunner {
             state.latestResponse.split('\n').find((l) => l.trim().length > 0) ?? '응답 완료';
           state.backSummary =
             firstLine.length > 42 ? firstLine.slice(0, 41) + '… (r:전문)' : `${firstLine} (r:전문)`;
-          appendLog(state, 'Argon', 'orange', '응답 완료 (r 키로 전문 보기)');
+          appendLog(state, 'Lead', 'orange', '응답 완료 (r 키로 전문 보기)');
           break;
         }
 
@@ -706,7 +706,7 @@ export class AgentRunner {
           const cardIdx = fc.name === 'grep_search' ? 1 : 0;
           state.cards[cardIdx]!.status = 'running';
           state.cards[cardIdx]!.progress = 60;
-          appendLog(state, 'Decision 1', 'green', `도구 실행 → ${redactSecrets(fc.name)}`);
+          appendLog(state, 'Decision Gate', 'green', `도구 실행 → ${redactSecrets(fc.name)}`);
           onUpdate();
 
           const output = executeLocalReadOnlyTool(fc.name, fc.args ?? {});
@@ -744,7 +744,7 @@ export class AgentRunner {
             state.advisorState = '자문 중';
             state.carbonCalls += 1;
             state.latestAdvice = `» ${redactSecrets(fc.name)} 연속 오류 감지 — 파라미터/경로 재검토 필요`;
-            appendLog(state, 'Carbon', 'purple', `같은 오류 2회 감지 — ${redactSecrets(fc.name)}`);
+            appendLog(state, 'Advisor', 'purple', `같은 오류 2회 감지 — ${redactSecrets(fc.name)}`);
           }
 
           state.cards[cardIdx]!.status = hadError ? 'error' : 'done';
@@ -752,7 +752,7 @@ export class AgentRunner {
           state.swarmActive = Math.max(0, state.swarmActive - 1);
           appendLog(
             state,
-            'Hydrogen',
+            'Worker',
             'blue',
             `${fc.name} ${hadError ? '실패' : '완료'}${hadError ? ` — ${redactSecrets(String(output['error'])).slice(0, 60)}` : ''}`
           );
@@ -772,7 +772,7 @@ export class AgentRunner {
         state.advisorState = '자문 중';
         const msg = redactSecrets(err instanceof Error ? err.message : String(err));
         state.latestAdvice = `» API 오류: ${msg}`;
-        appendLog(state, 'Carbon', 'purple', `API 오류 — ${msg}`);
+        appendLog(state, 'Advisor', 'purple', `API 오류 — ${msg}`);
       }
     } finally {
       this.abortController = null;

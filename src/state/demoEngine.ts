@@ -4,7 +4,7 @@ import {
 } from '../backend/agentRunner.ts';
 import type { AgentColorKey } from '../theme.ts';
 import type { AppState, EffortLevel, NeonCheckRecord, NeonStatus } from '../types.ts';
-import { TRIGGER_LABELS, appendLog, flashStatus } from './store.ts';
+import { LOG_FILTER_LABELS, TRIGGER_LABELS, appendLog, flashStatus } from './store.ts';
 
 const LOOP = 40;
 const STEP = LOOP / 24;
@@ -16,30 +16,30 @@ const seg = (t: number, start: number, dur: number): number => clamp01((t - star
  * gemini_sub_neon.html 원본의 24개 시나리오 비트(beats) 정의 (24 × 1.667초 = 40초)
  */
 export const DEMO_BEATS: ReadonlyArray<readonly [string, AgentColorKey, string]> = [
-  ['Argon', 'orange', '작업 시작 — 수정 범위와 테스트를 확인'],
-  ['Decision 1', 'green', '어느 파일 → src/api/spec.ts  p=0.89 sharp → code'],
-  ['Hydrogen search', 'blue', '모듈 4개를 파악  p=0.55 split → Argon'],
-  ['Decision 1', 'green', '어느 도구 → grep  p=0.94 sharp → code'],
-  ['Hydrogen grep', 'blue', '호출 위치 14개를 찾음'],
-  ['Carbon', 'purple', '계획 확정 전 — 세션 전체를 읽는 중'],
-  ['Carbon', 'purple', '인증·DB/트랜잭션 호출 제외 → Argon에 조언'],
-  ['Neon', 'neon', '계획 교차 검토 완료 — 영향 범위 누락 없음'],
-  ['Argon', 'orange', '계획 확정 · 수정 적용 + 테스트 실행'],
-  ['Hydrogen audit', 'blue', '워크트리 차이 비교 · fixture 확인'],
-  ['Argon', 'orange', 'mock_missing_symbol · 같은 오류 2회'],
-  ['Carbon', 'purple', '같은 오류 2회 — 세션 전체를 읽는 중'],
-  ['Carbon', 'purple', '잘못된 fixture → Argon이 수정'],
-  ['Decision 1', 'green', '재시도 또는 중단 → 중단 후 질문  p=0.42 split → Argon'],
-  ['Argon', 'orange', 'fixture 수정 완료 · 테스트 28/28 통과'],
-  ['Carbon', 'purple', '완료 전 — 변경 사항과 결과를 읽는 중'],
-  ['Neon', 'neon', '변경 diff 독립 재검증 시작'],
-  ['Hydrogen audit', 'blue', '차이 비교 완료 · 누락 없음'],
-  ['Decision 1', 'green', '어느 도구 → test  p=0.94 sharp → code'],
-  ['Neon', 'neon', '회귀 없음 · 28/28 재현 → Argon에 전달'],
-  ['Carbon', 'purple', '검토 완료 · 조언을 Argon에 전달'],
-  ['Argon', 'orange', '검토 + 확인 · 테스트 통과'],
-  ['Hydrogen search', 'blue', '다음 작업을 위한 탐색 재개'],
-  ['Argon', 'orange', '세션 정리 · 다음 요청 대기'],
+  ['Lead', 'orange', '작업 시작 — 수정 범위와 테스트를 확인'],
+  ['Decision Gate', 'green', '어느 파일 → src/api/spec.ts  p=0.89 sharp → code'],
+  ['Worker search', 'blue', '모듈 4개를 파악  p=0.55 split → Lead'],
+  ['Decision Gate', 'green', '어느 도구 → grep  p=0.94 sharp → code'],
+  ['Worker grep', 'blue', '호출 위치 14개를 찾음'],
+  ['Advisor', 'purple', '계획 확정 전 — 세션 전체를 읽는 중'],
+  ['Advisor', 'purple', '인증·DB/트랜잭션 호출 제외 → Lead에 조언'],
+  ['Verifier', 'neon', '계획 교차 검토 완료 — 영향 범위 누락 없음'],
+  ['Lead', 'orange', '계획 확정 · 수정 적용 + 테스트 실행'],
+  ['Worker audit', 'blue', '워크트리 차이 비교 · fixture 확인'],
+  ['Lead', 'orange', 'mock_missing_symbol · 같은 오류 2회'],
+  ['Advisor', 'purple', '같은 오류 2회 — 세션 전체를 읽는 중'],
+  ['Advisor', 'purple', '잘못된 fixture → Lead가 수정'],
+  ['Decision Gate', 'green', '재시도 또는 중단 → 중단 후 질문  p=0.42 split → Lead'],
+  ['Lead', 'orange', 'fixture 수정 완료 · 테스트 28/28 통과'],
+  ['Advisor', 'purple', '완료 전 — 변경 사항과 결과를 읽는 중'],
+  ['Verifier', 'neon', '변경 diff 독립 재검증 시작'],
+  ['Worker audit', 'blue', '차이 비교 완료 · 누락 없음'],
+  ['Decision Gate', 'green', '어느 도구 → test  p=0.94 sharp → code'],
+  ['Verifier', 'neon', '회귀 없음 · 28/28 재현 → Lead에 전달'],
+  ['Advisor', 'purple', '검토 완료 · 조언을 Lead에 전달'],
+  ['Lead', 'orange', '검토 + 확인 · 테스트 통과'],
+  ['Worker search', 'blue', '다음 작업을 위한 탐색 재개'],
+  ['Lead', 'orange', '세션 정리 · 다음 요청 대기'],
 ];
 
 const ADV_WINDOWS = [
@@ -62,7 +62,7 @@ const PHASES: ReadonlyArray<readonly [number, string]> = [
   [at(22), '완료'],
 ];
 
-// Gemini Neon 교차 검증 구간: on → 진행 → done(✓) → off(대기)
+// Verifier 교차 검증 구간: on → 진행 → done(✓) → off(대기)
 const NEON_WINDOWS = [
   {
     on: 9.0,
@@ -77,7 +77,7 @@ const NEON_WINDOWS = [
     done: at(19),
     off: at(19) + 2.6,
     label: '변경 diff 재검증',
-    summary: '회귀 없음 · 28/28 재현 → Argon에 전달',
+    summary: '회귀 없음 · 28/28 재현 → Lead에 전달',
     time: '23:48:48',
   },
 ] as const;
@@ -185,7 +185,7 @@ export function applyDemoTime(state: AppState, rawTimeSec: number, ctrl: DemoCon
     },
   ];
 
-  // Gemini Neon 교차 검증 상태 계산 (gemini_sub_neon.html NEON 수식 1:1 동기화)
+  // Verifier 교차 검증 상태 계산 (gemini_sub_neon.html NEON 수식 1:1 동기화)
   let nState: NeonStatus = 'idle';
   let nProgress = 0;
   let nLabel = '';
@@ -201,7 +201,7 @@ export function applyDemoTime(state: AppState, rawTimeSec: number, ctrl: DemoCon
         label: w.label,
         status: 'pass',
         summary: w.summary,
-        model: 'gemini-neon',
+        model: state.rosterLabels.verifier,
       });
     }
     if (t < w.on) continue;
@@ -247,7 +247,7 @@ export function applyDemoTime(state: AppState, rawTimeSec: number, ctrl: DemoCon
   state.neonSummary = nSummary;
   state.neonHistory = neonHistory;
 
-  // Decision 1 라우트 확률 업데이트 (4번째 delegate_swarm 포함 — DB 접근 없는 순수 계산)
+  // Decision Gate 라우트 확률 업데이트 (4번째 delegate_swarm 포함 — DB 접근 없는 순수 계산)
   let sharp = 0;
   let split = 0;
   state.routes = ROUTE_NAMES.map((name, i) => {
@@ -259,13 +259,13 @@ export function applyDemoTime(state: AppState, rawTimeSec: number, ctrl: DemoCon
   state.sharpCount = sharp;
   state.splitCount = split;
 
-  // Hydrogen 대표 역할 카드 3개 진행률
+  // Workers 대표 역할 카드 3개 진행률
   state.cards = CARD_SPECS.map((spec, i) => {
     const cycle = (t + i * 2.7) % (9 + i * 1.7);
     const pct = Math.min(100, (cycle / (7 + i * 1.7)) * 100);
     return {
       name: spec.name,
-      model: 'Hydrogen',
+      model: state.rosterLabels.explore,
       progress: Math.floor(pct),
       description: spec.desc,
       status: pct >= 100 ? 'done' : 'running',
@@ -380,7 +380,7 @@ export function executePromptCommand(
         if (state.mode === 'live' && liveHooks) {
           if (restText.length > 0 || state.latestResponse.trim().length > 0) {
             liveHooks.onNeonVerify(
-              restText || '최근 Argon 응답과 변경 사항의 누락·회귀 여부를 독립 교차 검증해줘'
+              restText || '최근 Lead 응답과 변경 사항의 누락·회귀 여부를 독립 교차 검증해줘'
             );
           } else {
             state.modal = 'neon';
@@ -398,15 +398,15 @@ export function executePromptCommand(
           if (state.mode === 'demo') {
             ctrl.customLogs.push({
               time: ts,
-              agent: 'Neon',
+              agent: 'Verifier',
               color: 'neon',
               message: `독립 교차 검증 시작 — ${restText}`,
             });
             ctrl.lastSeq = -999;
           } else {
-            appendLog(state, 'Neon', 'neon', `독립 교차 검증 시작 — ${restText}`, ts);
+            appendLog(state, 'Verifier', 'neon', `독립 교차 검증 시작 — ${restText}`, ts);
           }
-          flashStatus(state, `Gemini Neon 교차 검증 시작: ${restText}`);
+          flashStatus(state, `Verifier 교차 검증 시작: ${restText}`);
         } else {
           state.modal = 'neon';
         }
@@ -421,7 +421,7 @@ export function executePromptCommand(
         } else {
           flashStatus(
             state,
-            `현재 모델: ${state.modelName} (예: /model gemini-4-neon-high)`
+            `현재 모델: ${state.modelName} (예: /model glm-zcode/glm-5.3)`
           );
         }
         return;
@@ -472,7 +472,7 @@ export function executePromptCommand(
             state.modelName = applyEffortToModelName(state.modelName, state.effort);
             state.modelFlag = `--model ${state.modelName}`;
           }
-          flashStatus(state, `Argon effort 변경: ${arg}`);
+          flashStatus(state, `Lead effort 변경: ${arg}`);
         } else {
           flashStatus(state, '사용법: /effort <low|medium|high|max>');
         }
@@ -485,7 +485,7 @@ export function executePromptCommand(
           ctrl.manualTriggerUntil = Date.now() + 6000;
           state.activeTrigger = idx;
           state.advisorState = '자문 중';
-          flashStatus(state, `Carbon 트리거 발동: ${TRIGGER_LABELS[idx]}`);
+          flashStatus(state, `Advisor 트리거 발동: ${TRIGGER_LABELS[idx]}`);
         } else {
           ctrl.manualTriggerUntil = 0;
           flashStatus(state, '사용법: /trigger <0|1|2>');
@@ -503,7 +503,7 @@ export function executePromptCommand(
         ) {
           state.logFilter = arg;
           state.logScrollOffset = 0;
-          flashStatus(state, `로그 필터: ${arg}`);
+          flashStatus(state, `로그 필터: ${LOG_FILTER_LABELS[arg]}`);
         } else {
           flashStatus(state, '사용법: /filter <all|argon|hydrogen|decision|neon|carbon>');
         }
@@ -540,13 +540,13 @@ export function executePromptCommand(
   if (state.mode === 'demo') {
     ctrl.customLogs.push({
       time: ts,
-      agent: 'Argon',
+      agent: 'Lead',
       color: 'orange',
       message: `새 지시 수신 — "${trimmed}"`,
     });
     ctrl.lastSeq = -999; // 즉시 재구성
   } else {
-    appendLog(state, 'Argon', 'orange', `새 지시 수신 — "${trimmed}"`, ts);
+    appendLog(state, 'Lead', 'orange', `새 지시 수신 — "${trimmed}"`, ts);
   }
-  flashStatus(state, 'Argon 메인 세션에 새 작업이 전달되었습니다');
+  flashStatus(state, 'Lead 메인 세션에 새 작업이 전달되었습니다');
 }

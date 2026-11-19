@@ -299,7 +299,7 @@ export function applyAgyEvent(state: AppState, raw: AgyRawEvent): void {
     state.activeTrigger = -1;
     appendLog(
       state,
-      'Argon',
+      'Lead',
       'orange',
       `세션 연결됨 (${raw.init?.model ?? state.modelName})`
     );
@@ -340,7 +340,7 @@ export function applyAgyEvent(state: AppState, raw: AgyRawEvent): void {
         if (u.duration_seconds !== undefined) {
           appendLog(
             state,
-            'Argon',
+            'Lead',
             'orange',
             `응답 스텝 완료 (${u.duration_seconds.toFixed(1)}s, 토큰 ${state.tokensRead})`
           );
@@ -376,7 +376,7 @@ export function applyAgyEvent(state: AppState, raw: AgyRawEvent): void {
 
         appendLog(
           state,
-          `Decision 1`,
+          `Decision Gate`,
           'green',
           `도구 분기 → ${toolName}${hint ? ` (${redactSecrets(hint)})` : ''}  ${decision.tag} (p=${decision.p.toFixed(2)}, ${decision.basis})`
         );
@@ -391,7 +391,7 @@ export function applyAgyEvent(state: AppState, raw: AgyRawEvent): void {
             state.advisorState = '자문 중';
             state.carbonCalls += 1;
             state.latestAdvice = `» ${redactSecrets(toolName)} 연속 오류 감지 — 파라미터/경로 재검토 필요`;
-            appendLog(state, 'Carbon', 'purple', `같은 오류 2회 감지 — ${redactSecrets(toolName)}`);
+            appendLog(state, 'Advisor', 'purple', `같은 오류 2회 감지 — ${redactSecrets(toolName)}`);
           }
         } else {
           state.consecutiveToolErrors = 0;
@@ -437,7 +437,7 @@ export function applyAgyEvent(state: AppState, raw: AgyRawEvent): void {
         const post = evaluateToolDecision(toolName, params, convId);
         appendLog(
           state,
-          'Decision 1',
+          'Decision Gate',
           'green',
           `${toolName} 결과 → ${post.tag} (p=${post.p.toFixed(2)}, ${post.basis})`
         );
@@ -447,7 +447,7 @@ export function applyAgyEvent(state: AppState, raw: AgyRawEvent): void {
         const out = u.tool_info?.output ? ` · ${redactSecrets(u.tool_info.output)}` : '';
         appendLog(
           state,
-          `Hydrogen ${role}`,
+          `Worker ${role}`,
           'blue',
           `${toolName}${hint ? ` [${redactSecrets(hint)}]` : ''} 완료${dur}${out}`
         );
@@ -459,7 +459,7 @@ export function applyAgyEvent(state: AppState, raw: AgyRawEvent): void {
     if (u.step_type) {
       appendLog(
         state,
-        'Hydrogen',
+        'Worker',
         'blue',
         `${u.step_type} (${u.state ?? 'UPDATE'})`
       );
@@ -510,7 +510,7 @@ export function applyAgyEvent(state: AppState, raw: AgyRawEvent): void {
       }
       appendLog(
         state,
-        state.modelName.toLowerCase().includes('neon') ? 'Neon' : 'Argon',
+        state.modelName.toLowerCase().includes('neon') ? 'Verifier' : 'Lead',
         state.modelName.toLowerCase().includes('neon') ? 'neon' : 'orange',
         `턴 완료 (${r.duration_seconds?.toFixed(1) ?? '?'}s · r 키로 전문 보기)`
       );
@@ -526,7 +526,7 @@ export function applyAgyEvent(state: AppState, raw: AgyRawEvent): void {
         state.neonProgress = 100;
         state.neonSummary = errMsg;
       }
-      appendLog(state, 'Carbon', 'purple', `오류 발생 — ${errMsg}`);
+      appendLog(state, 'Advisor', 'purple', `오류 발생 — ${errMsg}`);
     }
   }
 }

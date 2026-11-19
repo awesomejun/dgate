@@ -6,9 +6,17 @@ import type {
   EffortLevel,
   FocusTarget,
   LogEntry,
+  LogFilter,
+  RosterDisplayLabels,
   RunMode,
   SwarmWorker,
 } from '../types.ts';
+import {
+  builtinRosterConfig,
+  resolveRosterProfile,
+  type RoleWorkerSpec,
+  type RosterProfile,
+} from '../decision/roster.ts';
 import { readTelemetrySnapshot } from '../decision/telemetry.ts';
 import type { AgentColorKey } from '../theme.ts';
 
@@ -36,6 +44,76 @@ const WORKER_ROLES: ReadonlyArray<SwarmWorker['role']> = [
 ];
 
 export const TRIGGER_LABELS = ['계획 확정 전', '같은 오류 2회', '완료 전'] as const;
+
+/** 로그 필터 키 → 화면 표시용 역할 이름 (모델 무관) */
+export const LOG_FILTER_LABELS: Record<LogFilter, string> = {
+  all: '전체',
+  argon: 'Lead',
+  hydrogen: 'Workers',
+  decision: 'Decision Gate',
+  neon: 'Verifier',
+  carbon: 'Advisor',
+};
+
+/**
+ * 역할 스펙 → 간결 표기 태그 (예: 'pi:glm-5.3', 'pi:deepseek-v4.1-flash',
+ * 'devin', 'claude:sonnet-4-6'). provider 프리픽스('provider/model')와
+ * 'deepseek-deepseek-' 같은 중첩 접두, 'claude-sonnet-' 같은 cli 접두를 정리한다.
+ */
+export function formatRoleBadge(spec: RoleWorkerSpec | undefined): string {
+  if (!spec) return '—';
+  const raw = spec.model?.trim();
+  if (!raw) return spec.cli;
+  let short = raw.includes('/') ? raw.slice(raw.lastIndexOf('/') + 1) : raw;
+  short = short.replace(/^([A-Za-z0-9]+)-\1-/, '$1-');
+  const cliPrefix = `${spec.cli}-`;
+  if (short.startsWith(cliPrefix)) short = short.slice(cliPrefix.length);
+  return `${spec.cli}:${short}`;
+}
+
+/** 활성 roster 프로필 → TUI 표시용 라벨 묶음 */
+export function rosterLabelsFromProfile(
+  profileName: string,
+  rosterSource: string,
+  profile: RosterProfile
+): RosterDisplayLabels {
+  return {
+    profileName,
+    rosterSource,
+    lead: formatRoleBadge(profile.roles.lead),
+    explore: formatRoleBadge(profile.roles.explore),
+    coder: formatRoleBadge(profile.roles.coder),
+    verifier: formatRoleBadge(profile.roles.verifier),
+    advisor: formatRoleBadge(profile.roles.advisor),
+  };
+}
+
+/**
+ * 활성 roster 프로필을 AppState 표시 필드에 반영한다.
+ * - rosterLabels: 5개 역할 슬롯 배지
+ * - modelName/modelFlag: lead 슬롯 태그 + 실제 --model 플래그
+ * - neonModelName/neonModelFlag: verifier 슬롯 태그 + 실제 --model 플래그
+ * - cards[].model: 스웜 워커 카드는 explore 슬롯 배지
+ */
+export function applyRosterToState(
+  state: AppState,
+  profileName: string,
+  rosterSource: string,
+  profile: RosterProfile
+): void {
+  state.rosterLabels = rosterLabelsFromProfile(profileName, rosterSource, profile);
+  const lead = profile.roles.lead;
+  const verifier = profile.roles.verifier;
+  state.modelName = state.rosterLabels.lead;
+  state.modelFlag = lead?.model ? `--model ${lead.model}` : state.rosterLabels.lead;
+  state.neonModelName = state.rosterLabels.verifier;
+  state.neonModelFlag = verifier?.model
+    ? `--model ${verifier.model}`
+    : state.rosterLabels.verifier;
+  for (const card of state.cards) {
+    card.model = state.rosterLabels.explore;
+  }
+}
 
 /**
  * UI 표시용 라우트 우선 정렬(N3): forcedSplit 최우선 → p<0.70(split) 차우선 → 원래 순서 보존.
@@ -128,6 +206,17 @@ export function createInitialState(mode: RunMode = 'demo'): AppState {
         { name: '스웜 위임', p: 0.62, targetHint: '스웜', id: 'delegate_swarm', basis: 'prior', samples: 2, consecutiveErrors: 0, forcedSplit: false },
       ];
   const initialSplit = initialRoutes.filter((r) => r.forcedSplit === true || r.p < 0.7).length;
+  // 역할·모델 기본 라벨은 내장 roster(quota-saver/zero-agy 계열)에서 파생한다 —
+  // 레거시 gemini-4-* 하드코딩 제로. cli.ts가 시작 시 실제 roster.json으로 덮어쓴다.
+  const builtinRoster = builtinRosterConfig();
+  const builtinProfile = resolveRosterProfile(builtinRoster, builtinRoster.defaultProfile);
+  const initialRosterLabels = rosterLabelsFromProfile(
+    builtinProfile.name,
+    'builtin',
+    builtinProfile.profile
+  );
+  const leadSpec = builtinProfile.profile.roles.lead;
+  const verifierSpec = builtinProfile.profile.roles.verifier;
   return {
     mode,
     paused: false,
@@ -136,8 +225,9 @@ export function createInitialState(mode: RunMode = 'demo'): AppState {
 
     cwd: isLive ? formatCompactPath(process.cwd()) : '~/app',
     sessionId: isLive ? Math.floor(Date.now() % 1000) : 121,
-    modelFlag: isLive ? '--model gemini-4-argon-high' : '--model argon',
-    modelName: 'gemini-4-argon-high',
+    rosterLabels: initialRosterLabels,
+    modelFlag: leadSpec?.model ? `--model ${leadSpec.model}` : initialRosterLabels.lead,
+    modelName: initialRosterLabels.lead,
     backendKind: 'none',
     conversationId: null,
     agentBusy: false,
@@ -164,8 +254,10 @@ export function createInitialState(mode: RunMode = 'demo'): AppState {
       ? '응답 완료 시 r 키로 전문 확인'
       : '검토 + 확인 · review + verify',
 
-    neonModelName: 'gemini-4-neon-high',
-    neonModelFlag: isLive ? '--model gemini-4-neon-high' : '--model gemini-neon',
+    neonModelName: initialRosterLabels.verifier,
+    neonModelFlag: verifierSpec?.model
+      ? `--model ${verifierSpec.model}`
+      : initialRosterLabels.verifier,
     neonState: 'idle',
     neonProgress: 0,
     neonLabel: '',
@@ -203,21 +295,21 @@ export function createInitialState(mode: RunMode = 'demo'): AppState {
     cards: [
       {
         name: 'search',
-        model: 'Hydrogen',
+        model: initialRosterLabels.explore,
         progress: isLive ? 0 : 64,
         description: isLive ? '파일·구조 탐색 대기' : '저장소 구조를 파악합니다',
         status: isLive ? 'idle' : 'running',
       },
       {
         name: 'grep',
-        model: 'Hydrogen',
+        model: initialRosterLabels.explore,
         progress: isLive ? 0 : 100,
         description: isLive ? '코드 패턴 검색 대기' : '호출 위치를 찾습니다',
         status: isLive ? 'idle' : 'done',
       },
       {
         name: 'audit',
-        model: 'Hydrogen',
+        model: initialRosterLabels.explore,
         progress: isLive ? 0 : 42,
         description: isLive ? '명령·수정 검증 대기' : '워크트리에서 차이를 비교합니다',
         status: isLive ? 'idle' : 'running',
@@ -273,15 +365,15 @@ export function getFilteredLogs(state: AppState): LogEntry[] {
     const lower = entry.agent.toLowerCase();
     switch (state.logFilter) {
       case 'argon':
-        return lower.includes('argon');
+        return lower.includes('argon') || lower.includes('lead');
       case 'hydrogen':
-        return lower.includes('hydrogen');
+        return lower.includes('hydrogen') || lower.includes('worker');
       case 'decision':
         return lower.includes('decision');
       case 'neon':
-        return lower.includes('neon');
+        return lower.includes('neon') || lower.includes('verifier');
       case 'carbon':
-        return lower.includes('carbon');
+        return lower.includes('carbon') || lower.includes('advisor');
     }
   });
 }

@@ -1,6 +1,6 @@
 import { CellBuffer, type Rect } from '../core/buffer.ts';
 import { padLeftWidth, padRightWidth, truncateWidth, wrapByWidth } from '../core/width.ts';
-import { getFilteredLogs, sortRoutesForDisplay } from '../state/store.ts';
+import { LOG_FILTER_LABELS, getFilteredLogs, sortRoutesForDisplay } from '../state/store.ts';
 import { THEME, lerpColor, resolveColorKey } from '../theme.ts';
 import type { AppState } from '../types.ts';
 
@@ -74,10 +74,10 @@ function renderHelpModal(buf: CellBuffer, rect: Rect): void {
 
   buf.writeText(ix, cy++, '■ 키보드 네비게이션 (기본 관제 모드)', THEME.orange, THEME.bgModal, true, iw);
   const keys: ReadonlyArray<readonly [string, string]> = [
-    ['Tab / Shift+Tab', '패널 포커스 순환 (Carbon → Argon → Neon → Decision 1 → Hydrogen → 기록)'],
+    ['Tab / Shift+Tab', '패널 포커스 순환 (Advisor → Lead → Verifier → Decision Gate → Workers → 기록)'],
     ['Enter', '현재 포커스된 패널의 상세 드릴다운 모달 열기'],
-    ['r / s / n / c / d', '응답(r) · 스웜(s) · Neon(n) · Carbon(c) · 분기(d) · 로그(l) 모달 열기'],
-    ['1~5 / 0', '로그 필터 (1:Argon 2:Hydrogen 3:Decision 4:Neon 5:Carbon 0:전체)'],
+    ['r / s / n / c / d', '응답(r) · 스웜(s) · Verifier(n) · Advisor(c) · 분기(d) · 로그(l) 모달 열기'],
+    ['1~5 / 0', '로그 필터 (1:Lead 2:Workers 3:Decision 4:Verifier 5:Advisor 0:전체)'],
     ['↑ / ↓', '세션 기록 / 응답 전문 스크롤 탐색'],
     ['Space / ← →', '(데모 모드) 재생 일시정지·재개 및 타임라인 ±2초 이동'],
     ['/ 또는 i', '하단 프롬프트 입력 모드 진입 (Esc로 복귀)'],
@@ -102,10 +102,10 @@ function renderHelpModal(buf: CellBuffer, rect: Rect): void {
     buf.writeText(ix, cy++, '■ 프롬프트 슬래시 명령어 & JSONL 스트림 연동', THEME.blue, THEME.bgModal, true, iw);
   }
   const cmds: ReadonlyArray<readonly [string, string]> = [
-    ['/model <name>', '라이브 모델 변경 (예: gemini-4-argon-high, gemini-4-neon-high)'],
-    ['/effort <level>', 'Argon 추론 강도 변경 (low | medium | high | max)'],
-    ['/neon [대상]', 'Gemini Neon 독립 교차 검증 실행 (--live 시 실제 neon 모델 호출)'],
-    ['/carbon <질문>', '(--live) Carbon 자문 모델에게 별도 자문 요청'],
+    ['/model <name>', '라이브 모델 변경 (예: glm-5.3, deepseek-v4.1-flash, sonnet-4-6)'],
+    ['/effort <level>', 'Lead 추론 강도 변경 (low | medium | high | max)'],
+    ['/neon [대상]', 'Verifier 독립 교차 검증 실행 (--live 시 실제 verifier 모델 호출)'],
+    ['/carbon <질문>', '(--live) Advisor 자문 모델에게 별도 자문 요청'],
     ['/new · /cancel', '(--live) 새 대화 시작(/new) 또는 실행 중인 턴 중단(/cancel)'],
     ['/seek <0~40>', '(--demo) 데모 시나리오 특정 시간(초)으로 즉시 점프'],
     ['--live / --stream', '실제 agy/API 백엔드 실행(--live) 또는 JSONL 파이프 관제(--stream)'],
@@ -129,7 +129,7 @@ function renderSwarmModal(buf: CellBuffer, rect: Rect, state: AppState): void {
     style: 'double',
     borderColor: THEME.blue,
     fillBg: THEME.bgModal,
-    title: `Hydrogen 하위 에이전트 스웜 매트릭스 (${state.swarmActive}/${state.swarmMax})`,
+    title: `Workers 스웜 매트릭스 (${state.swarmActive}/${state.swarmMax}) · ${state.rosterLabels.explore} / ${state.rosterLabels.coder}`,
     titleColor: THEME.blue,
     rightLabel: 'Esc 닫기',
     rightLabelColor: THEME.muted,
@@ -212,7 +212,7 @@ function renderAdvisorModal(buf: CellBuffer, rect: Rect, state: AppState): void 
     style: 'double',
     borderColor: THEME.purple,
     fillBg: THEME.bgModal,
-    title: `Carbon · 메타 자문 상세 (세션 ${state.sessionId})`,
+    title: `Advisor · ${state.rosterLabels.advisor} · 메타 자문 상세 (세션 ${state.sessionId})`,
     titleColor: THEME.purple,
     rightLabel: 'Esc 닫기',
     rightLabelColor: THEME.muted,
@@ -239,7 +239,7 @@ function renderAdvisorModal(buf: CellBuffer, rect: Rect, state: AppState): void 
   buf.writeText(
     ix,
     cy++,
-    '원칙: 일상 턴에서는 침묵하며 코드는 직접 수정하지 않고 Argon 리드 세션에 조언만 주입합니다.',
+    '원칙: 일상 턴에서는 침묵하며 코드는 직접 수정하지 않고 Lead 리드 세션에 조언만 주입합니다.',
     THEME.muted,
     THEME.bgModal,
     false,
@@ -283,7 +283,7 @@ function renderNeonModal(buf: CellBuffer, rect: Rect, state: AppState): void {
     style: 'double',
     borderColor: state.neonState === 'fail' ? THEME.trafficRed : THEME.neon,
     fillBg: THEME.bgModal,
-    title: `Gemini Neon · 독립 교차 검증 인스펙터 (통과 ${state.neonVerified}건)`,
+    title: `Verifier · ${state.rosterLabels.verifier} · 독립 교차 검증 인스펙터 (통과 ${state.neonVerified}건)`,
     titleColor: THEME.neon,
     rightLabel: 'Esc 닫기',
     rightLabelColor: THEME.muted,
@@ -344,7 +344,7 @@ function renderNeonModal(buf: CellBuffer, rect: Rect, state: AppState): void {
   buf.writeText(
     ix,
     cy++,
-    '역할: Argon의 계획·변경 diff를 독립 검증해 누락·회귀를 차단합니다. (/neon <대상>)',
+    '역할: Lead의 계획·변경 diff를 독립 검증해 누락·회귀를 차단합니다. (/neon <대상>)',
     THEME.muted,
     THEME.bgModal,
     false,
@@ -411,7 +411,7 @@ function renderDecisionModal(buf: CellBuffer, rect: Rect, state: AppState): void
     style: 'double',
     borderColor: THEME.green,
     fillBg: THEME.bgModal,
-    title: `Decision 1 · 확률 분기 인스펙터 (총 ${state.totalForks.toLocaleString('en-US')} forks)`,
+    title: `Decision Gate · 확률 분기 인스펙터 (총 ${state.totalForks.toLocaleString('en-US')} forks)`,
     titleColor: THEME.green,
     rightLabel: 'Esc 닫기',
     rightLabelColor: THEME.muted,
@@ -425,7 +425,7 @@ function renderDecisionModal(buf: CellBuffer, rect: Rect, state: AppState): void
   buf.writeText(
     ix,
     cy++,
-    '라우팅 임계값 정책: 확신도 p >= 0.70 이면 sharp(즉시 코드/도구 실행), p < 0.70 이면 split(Argon 에스컬레이션)',
+    '라우팅 임계값 정책: 확신도 p >= 0.70 이면 sharp(즉시 코드/도구 실행), p < 0.70 이면 split(Lead 에스컬레이션)',
     THEME.fgSoft,
     THEME.bgModal,
     false,
@@ -448,7 +448,7 @@ function renderDecisionModal(buf: CellBuffer, rect: Rect, state: AppState): void
       cy,
       route.forcedSplit === true
         ? `p=${route.p.toFixed(2)}  SPLIT! → 강제 split`
-        : `p=${route.p.toFixed(2)}  ${isSplit ? 'split → Argon' : 'sharp → 코드 실행'}`,
+        : `p=${route.p.toFixed(2)}  ${isSplit ? 'split → Lead' : 'sharp → 코드 실행'}`,
       color,
       THEME.bgModal,
       true,
@@ -482,7 +482,7 @@ function renderLogsModal(buf: CellBuffer, rect: Rect, state: AppState): void {
     style: 'double',
     borderColor: THEME.fgSoft,
     fillBg: THEME.bgModal,
-    title: `세션 기록 전체 보기 (필터: ${state.logFilter}, 총 ${filtered.length}건)`,
+    title: `세션 기록 전체 보기 (필터: ${LOG_FILTER_LABELS[state.logFilter]}, 총 ${filtered.length}건)`,
     titleColor: THEME.fg,
     rightLabel: '↑/↓ 스크롤 · 0~5 필터 · Esc 닫기',
     rightLabelColor: THEME.muted,
@@ -531,7 +531,7 @@ function renderResponseModal(buf: CellBuffer, rect: Rect, state: AppState): void
     style: 'double',
     borderColor: THEME.orange,
     fillBg: THEME.bgModal,
-    title: `Argon · 실제 응답 전문 (${state.modelName} · ${statusTag})`,
+    title: `Lead · 실제 응답 전문 (${state.modelName} · ${statusTag})`,
     titleColor: THEME.orange,
     rightLabel: '↑/↓ 스크롤 · / 입력 · Esc 닫기',
     rightLabelColor: THEME.muted,

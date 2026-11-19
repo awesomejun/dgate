@@ -14,13 +14,17 @@ function getRoleLogs(state: AppState, role: QuadRole): LogEntry[] {
     const lower = entry.agent.toLowerCase();
     switch (role) {
       case 'argon':
-        return lower.includes('argon') || lower.includes('decision');
+        return (
+          lower.includes('argon') ||
+          lower.includes('lead') ||
+          lower.includes('decision')
+        );
       case 'carbon':
-        return lower.includes('carbon');
+        return lower.includes('carbon') || lower.includes('advisor');
       case 'neon':
-        return lower.includes('neon');
+        return lower.includes('neon') || lower.includes('verifier');
       case 'hydrogen':
-        return lower.includes('hydrogen');
+        return lower.includes('hydrogen') || lower.includes('worker');
       default:
         return true;
     }
@@ -57,14 +61,14 @@ export function renderQuadRoleFrame(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. ARGON (리드 오케스트레이터 · gemini-4-argon-high)
+// 1. LEAD (리드 오케스트레이터 · 활성 roster lead 바인딩)
 // ─────────────────────────────────────────────────────────────────────────────
 function renderArgonView(buf: CellBuffer, state: AppState, cols: number, rows: number): void {
   // 상단 헤더 바
   buf.fillRect({ x: 0, y: 0, w: cols, h: 1 }, THEME.bgChrome);
   buf.setChar(1, 0, '◈', THEME.orange, THEME.bgChrome, true);
-  buf.writeText(3, 0, 'ARGON · LEAD ORCHESTRATOR', THEME.orange, THEME.bgChrome, true);
-  const modelTag = `gemini-4-argon-high (${effortToGauge(state.effort)})`;
+  buf.writeText(3, 0, 'LEAD · ORCHESTRATOR', THEME.orange, THEME.bgChrome, true);
+  const modelTag = `${state.rosterLabels.lead} (${effortToGauge(state.effort)})`;
   buf.writeRight(0, 0, cols - 2, modelTag, THEME.chromeFg, THEME.bgChrome);
 
   // 상단 요약 박스 (Phase & Builds)
@@ -86,7 +90,7 @@ function renderArgonView(buf: CellBuffer, state: AppState, cols: number, rows: n
   const targetText = `목표: ${truncateWidth(state.mainSummary || '대기 중…', cols - padX * 2 - 8)}`;
   buf.writeText(padX + 2, topBoxY + 2, targetText, THEME.fgSoft, THEME.bgElevated);
 
-  // 분기 라우팅 매트릭스 (Decision 1)
+  // 분기 라우팅 매트릭스 (Decision Gate)
   const decY = topBoxY + topBoxH;
   const decH = Math.min(6, Math.max(4, Math.floor((rows - decY) * 0.35)));
   buf.drawBox(
@@ -94,7 +98,7 @@ function renderArgonView(buf: CellBuffer, state: AppState, cols: number, rows: n
     {
       borderColor: THEME.green,
       fillBg: THEME.bgElevated,
-      title: 'Decision 1 · Branching Routes',
+      title: 'Decision Gate · Branching Routes',
       titleColor: THEME.green,
       rightLabel: `forks ${state.totalForks}`,
       rightLabelColor: THEME.muted,
@@ -148,7 +152,7 @@ function renderArgonView(buf: CellBuffer, state: AppState, cols: number, rows: n
     {
       borderColor: THEME.borderLog,
       fillBg: THEME.bg,
-      title: 'Argon Execution Stream',
+      title: 'Lead Execution Stream',
       titleColor: THEME.orange,
     }
   );
@@ -168,20 +172,20 @@ function renderArgonView(buf: CellBuffer, state: AppState, cols: number, rows: n
   const footY = rows - 1;
   buf.fillRect({ x: 0, y: footY, w: cols, h: 1 }, THEME.bgChrome);
   const promptStr = state.inputActive
-    ? `Argon $ ${state.inputValue}█`
-    : `Argon █  [/:명령어 입력  Tab:포커스  Space:일시정지]`;
+    ? `Lead $ ${state.inputValue}█`
+    : `Lead █  [/:명령어 입력  Tab:포커스  Space:일시정지]`;
   buf.writeText(1, footY, promptStr, THEME.orange, THEME.bgChrome, true, cols - 2);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. CARBON (전략 자문 모델 · gemini-4-carbon-high)
+// 2. ADVISOR (전략 자문 역할 · 활성 roster advisor 바인딩)
 // ─────────────────────────────────────────────────────────────────────────────
 function renderCarbonView(buf: CellBuffer, state: AppState, cols: number, rows: number): void {
   // 상단 헤더 바
   buf.fillRect({ x: 0, y: 0, w: cols, h: 1 }, THEME.bgChrome);
   buf.setChar(1, 0, '⬡', THEME.purple, THEME.bgChrome, true);
-  buf.writeText(3, 0, 'CARBON · STRATEGIC ADVISOR', THEME.purple, THEME.bgChrome, true);
-  const statusStr = `gemini-4-carbon-high · ${state.advisorState}`;
+  buf.writeText(3, 0, 'ADVISOR · STRATEGIC GATE', THEME.purple, THEME.bgChrome, true);
+  const statusStr = `${state.rosterLabels.advisor} · ${state.advisorState}`;
   buf.writeRight(0, 0, cols - 2, statusStr, THEME.chromeFg, THEME.bgChrome);
 
   const padX = 1;
@@ -244,7 +248,7 @@ function renderCarbonView(buf: CellBuffer, state: AppState, cols: number, rows: 
     {
       borderColor: THEME.borderLog,
       fillBg: THEME.bg,
-      title: 'Carbon Advisory History',
+      title: 'Advisor History',
       titleColor: THEME.purple,
     }
   );
@@ -266,21 +270,21 @@ function renderCarbonView(buf: CellBuffer, state: AppState, cols: number, rows: 
   buf.writeText(
     1,
     footY,
-    'Carbon · 코드는 직접 쓰지 않고 아키텍처 가이드만 Argon에 전달합니다',
+    'Advisor · 코드는 직접 쓰지 않고 아키텍처 가이드만 Lead에 전달합니다',
     THEME.purple,
     THEME.bgChrome
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. NEON (독립 교차 검증 모델 · gemini-4-neon-high)
+// 3. VERIFIER (독립 교차 검증 역할 · 활성 roster verifier 바인딩)
 // ─────────────────────────────────────────────────────────────────────────────
 function renderNeonView(buf: CellBuffer, state: AppState, cols: number, rows: number): void {
   // 상단 헤더 바
   buf.fillRect({ x: 0, y: 0, w: cols, h: 1 }, THEME.bgChrome);
   buf.setChar(1, 0, '✦', THEME.neon, THEME.bgChrome, true);
-  buf.writeText(3, 0, 'GEMINI NEON · CROSS-VERIFIER', THEME.neon, THEME.bgChrome, true);
-  const verTag = `gemini-4-neon-high · 검증 [${state.neonVerified}건]`;
+  buf.writeText(3, 0, 'VERIFIER · CROSS-VERIFIER', THEME.neon, THEME.bgChrome, true);
+  const verTag = `${state.rosterLabels.verifier} · 검증 [${state.neonVerified}건]`;
   buf.writeRight(0, 0, cols - 2, verTag, THEME.chromeFg, THEME.bgChrome);
 
   const padX = 1;
@@ -341,7 +345,7 @@ function renderNeonView(buf: CellBuffer, state: AppState, cols: number, rows: nu
     {
       borderColor: THEME.borderLog,
       fillBg: THEME.bg,
-      title: 'Neon Verification Audit Trail',
+      title: 'Verifier Audit Trail',
       titleColor: THEME.neon,
     }
   );
@@ -363,21 +367,21 @@ function renderNeonView(buf: CellBuffer, state: AppState, cols: number, rows: nu
   buf.writeText(
     1,
     footY,
-    'Gemini Neon · 편향 없는 독립 교차 검증으로 오류 발생을 미연에 차단합니다',
+    'Verifier · 편향 없는 독립 교차 검증으로 오류 발생을 미연에 차단합니다',
     THEME.neon,
     THEME.bgChrome
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4. HYDROGEN (스웜 & 서브에이전트 함대 · gemini-4-hydrogen-high)
+// 4. WORKERS (스웜 & 서브에이전트 함대 · 활성 roster explore/coder 바인딩)
 // ─────────────────────────────────────────────────────────────────────────────
 function renderHydrogenView(buf: CellBuffer, state: AppState, cols: number, rows: number): void {
   // 상단 헤더 바
   buf.fillRect({ x: 0, y: 0, w: cols, h: 1 }, THEME.bgChrome);
   buf.setChar(1, 0, '❖', THEME.blue, THEME.bgChrome, true);
-  buf.writeText(3, 0, 'HYDROGEN · SWARM FLEET', THEME.blue, THEME.bgChrome, true);
-  const fleetTag = `gemini-4-hydrogen-high · 활성 [${state.swarmActive}/${state.swarmMax}]`;
+  buf.writeText(3, 0, 'WORKERS · SWARM FLEET', THEME.blue, THEME.bgChrome, true);
+  const fleetTag = `${state.rosterLabels.explore} / ${state.rosterLabels.coder} · 활성 [${state.swarmActive}/${state.swarmMax}]`;
   buf.writeRight(0, 0, cols - 2, fleetTag, THEME.chromeFg, THEME.bgChrome);
 
   const padX = 1;
@@ -455,7 +459,7 @@ function renderHydrogenView(buf: CellBuffer, state: AppState, cols: number, rows
     {
       borderColor: THEME.borderLog,
       fillBg: THEME.bg,
-      title: 'Hydrogen Subagent Activity',
+      title: 'Worker Activity',
       titleColor: THEME.blue,
     }
   );
@@ -477,7 +481,7 @@ function renderHydrogenView(buf: CellBuffer, state: AppState, cols: number, rows
   buf.writeText(
     1,
     footY,
-    'Hydrogen · 50개 고속 슬롯으로 파일 탐색, grep, AST 분석을 병렬 처리합니다',
+    'Workers · 50개 고속 슬롯으로 파일 탐색, grep, AST 분석을 병렬 처리합니다',
     THEME.blue,
     THEME.bgChrome
   );

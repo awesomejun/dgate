@@ -19,6 +19,7 @@ import {
 } from './state/demoEngine.ts';
 import {
   appendLog,
+  applyRosterToState,
   createInitialState,
   cycleFocus,
   flashStatus,
@@ -36,6 +37,7 @@ import { renderFrame } from './ui/renderApp.ts';
 import { renderQuadRoleFrame } from './ui/renderQuadRole.ts';
 import { QuadBusClient, QuadBusServer, type QuadMessage } from './ipc/quadBus.ts';
 import { resolveDbPath } from './decision/db.ts';
+import { loadRosterConfig, resolveRosterProfile } from './decision/roster.ts';
 import { readTelemetrySnapshot } from './decision/telemetry.ts';
 
 interface CliOptions {
@@ -222,7 +224,7 @@ function parseArgs(argv: string[]): CliOptions {
 
 function printCliHelp(): void {
   const usage = `
-DECISION ORCHESTRATOR TUI (Argon · Decision 1 · Hydrogen · Neon · Carbon)
+DECISION ORCHESTRATOR TUI (Lead · Decision Gate · Workers · Verifier · Advisor)
 
 사용법:
   node ./src/cli.ts [옵션]
@@ -242,7 +244,7 @@ DECISION ORCHESTRATOR TUI (Argon · Decision 1 · Hydrogen · Neon · Carbon)
   --replay-ms <ms>       --file 사용 시 각 이벤트를 지정 간격(ms)으로 순차 재생
 
 라이브 백엔드 옵션 (--live):
-  --model, -m <name>     사용할 모델 지정 (기본: gemini-4-argon-high, 예: gemini-4-neon-high)
+  --model, -m <name>     사용할 모델 지정 (기본: 활성 roster.json lead 바인딩)
   --effort <level>       추론 강도 지정 (low | medium | high | max)
   --prompt, -p <text>    시작과 동시에 실행할 초기 프롬프트 지정
   --backend <kind>       백엔드 선택 (auto | agy | api)
@@ -259,8 +261,8 @@ DECISION ORCHESTRATOR TUI (Argon · Decision 1 · Hydrogen · Neon · Carbon)
 단축키 요약:
   Tab / Shift+Tab        패널 포커스 이동
   Enter                  포커스된 패널 상세 모달 열기
-  r / s / n / c / d / l  응답(r) · 스웜(s) · Neon(n) · Carbon(c) · 분기(d) · 로그(l) 모달 열기
-  1~5 / 0                에이전트별 로그 필터 (1:Argon, 2:Hydrogen, 3:Decision, 4:Neon, 5:Carbon, 0:전체)
+  r / s / n / c / d / l  응답(r) · 스웜(s) · Verifier(n) · Advisor(c) · 분기(d) · 로그(l) 모달 열기
+  1~5 / 0                역할별 로그 필터 (1:Lead, 2:Workers, 3:Decision, 4:Verifier, 5:Advisor, 0:전체)
   / 또는 i               하단 프롬프트 입력창 진입 (/model, /neon, /carbon, /new, /cancel 지원)
   Space / ← →            데모 일시정지·재생 및 타임라인 탐색
   ?                      인앱 도움말 모달 열기
@@ -279,6 +281,17 @@ function main(): void {
   const state = createInitialState(opts.mode);
   state.paused = opts.paused;
   state.modal = opts.modalOverride;
+
+  // 활성 roster.json 역할·모델 바인딩 반영 — 실패 시 createInitialState의
+  // 내장(builtin) 라벨을 그대로 유지하는 안전 폴백.
+  try {
+    const loaded = loadRosterConfig({ repoDir: opts.watchDir ?? process.cwd() });
+    const resolved = resolveRosterProfile(loaded.config, loaded.config.defaultProfile);
+    applyRosterToState(state, resolved.name, loaded.source, resolved.profile);
+  } catch {
+    // 내장 라벨 폴백 유지
+  }
+
   if (opts.modelName) {
     state.modelName = opts.modelName;
     state.modelFlag = `--model ${opts.modelName}`;
@@ -435,7 +448,7 @@ function main(): void {
           state.conversationId = null;
           state.latestResponse = '';
           state.phase = '대기 중';
-          appendLog(state, 'Argon', 'orange', '새 대화 세션이 초기화되었습니다');
+          appendLog(state, 'Lead', 'orange', '새 대화 세션이 초기화되었습니다');
           flashStatus(state, '새 대화 시작 (컨텍스트 초기화)');
           renderNow();
         },
@@ -469,7 +482,7 @@ function main(): void {
     if (runner.backend === 'none') {
       appendLog(
         state,
-        'Carbon',
+        'Advisor',
         'purple',
         '연결 가능한 백엔드(agy 또는 GEMINI_API_KEY)를 찾지 못했습니다'
       );
@@ -477,7 +490,7 @@ function main(): void {
     } else {
       appendLog(
         state,
-        'Argon',
+        'Lead',
         'orange',
         `백엔드 연결 준비 완료 (${runner.backend} · ${state.modelName})`
       );
@@ -496,7 +509,7 @@ function main(): void {
       stopFileWatcher = attachTranscriptWatcher(opts.filePath, state, renderNow);
       state.cwd = formatCompactPath(path.dirname(path.dirname(path.dirname(opts.filePath))));
       const sessShort = state.conversationId ? state.conversationId.slice(0, 8) : 'active';
-      appendLog(state, 'Argon', 'orange', `세션 트랜스크립트 관제 연결됨 (${sessShort})`);
+      appendLog(state, 'Lead', 'orange', `세션 트랜스크립트 관제 연결됨 (${sessShort})`);
       flashStatus(state, `실시간 관제 연결: 세션 ${sessShort} (transcript.jsonl)`, 5000);
     } else {
       flashStatus(state, '활성 세션 트랜스크립트를 찾지 못했습니다. agy 실행 후 다시 시도하세요.', 6000);

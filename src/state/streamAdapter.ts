@@ -12,11 +12,11 @@ import { TRIGGER_LABELS, appendLog, createInitialState, formatNowHHMMSS } from '
 function inferAgentColor(agent: string, explicit?: AgentColorKey): AgentColorKey {
   if (explicit) return explicit;
   const lower = agent.toLowerCase();
-  if (lower.includes('argon')) return 'orange';
-  if (lower.includes('hydrogen')) return 'blue';
+  if (lower.includes('argon') || lower.includes('lead')) return 'orange';
+  if (lower.includes('hydrogen') || lower.includes('worker')) return 'blue';
   if (lower.includes('decision')) return 'green';
-  if (lower.includes('neon')) return 'neon';
-  if (lower.includes('carbon')) return 'purple';
+  if (lower.includes('neon') || lower.includes('verifier')) return 'neon';
+  if (lower.includes('carbon') || lower.includes('advisor')) return 'purple';
   return 'fg';
 }
 
@@ -26,8 +26,10 @@ function inferAgentColor(agent: string, explicit?: AgentColorKey): AgentColorKey
 export function applyStreamEvent(state: AppState, ev: StreamEvent): void {
   switch (ev.type) {
     case 'reset': {
+      const rosterLabels = state.rosterLabels;
       const fresh = createInitialState('stream');
       Object.assign(state, fresh);
+      state.rosterLabels = rosterLabels; // 활성 roster 바인딩은 리셋에서도 유지
       return;
     }
     case 'session': {
@@ -78,7 +80,7 @@ export function applyStreamEvent(state: AppState, ev: StreamEvent): void {
       if (ev.cards && ev.cards.length > 0) {
         state.cards = ev.cards.map((c) => ({
           name: c.name,
-          model: c.model ?? 'Hydrogen',
+          model: c.model ?? state.rosterLabels.explore,
           progress: Math.max(0, Math.min(100, Math.round(c.progress))),
           description: c.description ?? '',
           status: c.status ?? (c.progress >= 100 ? 'done' : 'running'),
