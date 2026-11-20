@@ -1868,3 +1868,73 @@ test('watch 모드 effort 진실성 — 미확인 effort는 숨기고 명시 지
   const demoText = renderFrame(demo, 148, 43).toPlainString();
   assert.ok(demoText.includes('effort ▮▮▮▯ high'), 'demo 모드 effort 표시 유지');
 });
+
+test('foreground.argv 우선 — 초기 셸 런치의 스테일 --model을 현재 포그라운드 세션에 덮지 않는다', () => {
+  const inferred = inferLiveWorkerSlot({
+    address: 't165',
+    agent: 'antigravity',
+    state: 'live',
+    status: 'working',
+    cwd: '/tmp/my-repo',
+    argv: [
+      '/bin/zsh',
+      '-lic',
+      '"$@"; exec "$0" -li',
+      '/bin/zsh',
+      'agy',
+      '--model',
+      'gemini-4-neon-high',
+      '--dangerously-skip-permissions',
+    ],
+    foregroundArgv: ['agy', '--dangerously-skip-permissions', '--conversation=4bc9e1bd'],
+  });
+  assert.equal(inferred?.shortModel, 'agy');
+  assert.equal(inferred?.modelName, 'agy');
+  const merged = mergeLiveRosterLabels(makeBaseLabels(), null, [
+    normalizeTopLevelWorker(inferred!, {
+      address: 't165',
+      agent: 'antigravity',
+      state: 'live',
+      status: 'working',
+    }),
+  ]);
+  assert.equal(merged.labels.lead, 'agy');
+  assert.equal(merged.leadModelFlag, 'live session: agy');
+
+  // 라이브 터미널 하단 상태줄에서 실측 model·effort 추출 (agy / pi)
+  const agyWithFooter = inferLiveWorkerSlot(
+    {
+      address: 't165',
+      agent: 'antigravity',
+      state: 'live',
+      status: 'working',
+      cwd: '/tmp/my-repo',
+      argv: ['/bin/zsh', '-lic', 'agy --model gemini-4-neon-high'],
+      foregroundArgv: ['agy', '--dangerously-skip-permissions', '--conversation=4bc9e1bd'],
+    },
+    '● Edited 2 files\nesc to cancel                    auto · Gemini 4 Neon · medium\n'
+  );
+  assert.equal(agyWithFooter?.cli, 'agy');
+  assert.equal(agyWithFooter?.model, 'Gemini 4 Neon');
+  assert.equal(agyWithFooter?.effort, 'medium');
+  assert.equal(agyWithFooter?.telemetryLine, 'agy · Gemini 4 Neon · medium');
+  assert.equal(agyWithFooter?.activity, '● Edited 2 files');
+
+  const piWithFooter = inferLiveWorkerSlot(
+    {
+      address: 't1r',
+      agent: 'pi',
+      state: 'live',
+      status: 'done',
+      cwd: '/tmp/my-repo',
+      argv: ['/bin/zsh', '-l'],
+      foregroundArgv: ['pi', ''],
+    },
+    '작업 완료\n↑675k ↓68k  (opencodex) glm-zcode/glm-5.3 • max\nctx 15%\n'
+  );
+  assert.equal(piWithFooter?.cli, 'pi');
+  assert.equal(piWithFooter?.model, 'glm-zcode/glm-5.3');
+  assert.equal(piWithFooter?.effort, 'max');
+  assert.equal(piWithFooter?.telemetryLine, 'pi · glm-5.3 · max');
+  assert.equal(piWithFooter?.activity, '작업 완료');
+});

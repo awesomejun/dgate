@@ -442,27 +442,11 @@ impl DashboardView {
             .flex_wrap()
             .items_center()
             .gap_3()
-            .child(legend_item(
-                LEAD_ORANGE,
-                format!("Lead · {}", role_model_label(snap, "lead")),
-            ))
-            .child(legend_item(
-                WORKER_BLUE,
-                format!(
-                    "Workers · {}/{}",
-                    role_model_label(snap, "explore"),
-                    role_model_label(snap, "coder")
-                ),
-            ))
+            .child(legend_item(LEAD_ORANGE, "Lead".to_string()))
+            .child(legend_item(WORKER_BLUE, "Workers".to_string()))
             .child(legend_item(GATE_GREEN, "Decision Gate".to_string()))
-            .child(legend_item(
-                VERIFIER_NEON,
-                format!("Verifier · {}", role_model_label(snap, "verifier")),
-            ))
-            .child(legend_item(
-                ADVISOR_PURPLE,
-                format!("Advisor · {}", role_model_label(snap, "advisor")),
-            ));
+            .child(legend_item(VERIFIER_NEON, "Verifier".to_string()))
+            .child(legend_item(ADVISOR_PURPLE, "Advisor".to_string()));
 
         let mut tabs = div().flex().flex_row().items_center().gap_1();
         tabs = tabs.child(repo_tab(
@@ -562,7 +546,6 @@ impl DashboardView {
         } else {
             BORDER_ADVISORY_IDLE
         };
-        let model = role_model_label(snap, "advisor");
         let (state_label, state_color) = if active {
             ("자문 중", ADVISOR_PURPLE)
         } else {
@@ -621,26 +604,28 @@ impl DashboardView {
                 .w(px(self.controller.panel_sizes.advisor_width))
                 .flex_shrink_0()
         };
-        panel = panel
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .min_h(px(18.))
-                    .child(title)
-                    .child(div().flex_1())
-                    .child(pill(state_label, state_color, BG)),
-            )
-            .child(
+        let advisor_telemetry = advisors.first().map(|w| w.telemetry_line());
+        panel = panel.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .min_h(px(18.))
+                .child(title)
+                .child(div().flex_1())
+                .child(pill(state_label, state_color, BG)),
+        );
+        if let Some(tel) = advisor_telemetry {
+            panel = panel.child(
                 div()
                     .h(px(14.))
                     .text_size(px(10.))
                     .text_color(if active { ADVISOR_PURPLE } else { MUTED })
                     .truncate()
-                    .child(model),
+                    .child(tel),
             );
+        }
         // 명시적 advisor 세션 — 자문 카드 위에 세션마다 고정 높이 1행(주소 구분).
         // 동일 레포에 여러 자문 세션이 떠 있어도 각자 보인다.
         for (i, w) in advisors.iter().enumerate() {
@@ -974,7 +959,7 @@ impl DashboardView {
                             .font_weight(FontWeight::BOLD)
                             .text_color(LEAD_ORANGE)
                             .truncate()
-                            .child(format!("Lead · {}", model)),
+                            .child("Lead"),
                     )
                     .child(div().flex_1())
                     .child(state_pill),
@@ -1073,7 +1058,6 @@ impl DashboardView {
     fn render_verifier_card(&self, snap: &DashboardSnapshot, vw: Pixels) -> gpui::Div {
         let parts = partition_sessions_by_role(&snap.workers);
         let active = self.verifier_motion(snap);
-        let model = role_model_label(snap, "verifier");
         let badge_pill = if active {
             spinner_pill(
                 spinner_char(self.anim_secs, 0),
@@ -1112,7 +1096,7 @@ impl DashboardView {
                         .font_weight(FontWeight::BOLD)
                         .text_color(if active { VERIFIER_NEON } else { TEXT_SOFT })
                         .truncate()
-                        .child(format!("Verifier · {}", model)),
+                        .child("Verifier"),
                 )
                 .child(div().flex_1())
                 .child(badge_pill),
@@ -1492,14 +1476,6 @@ impl DashboardView {
                             .text_size(px(10.))
                             .text_color(MUTED)
                             .child(w.slot.as_str().to_string()),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(WORKER_BLUE)
-                            .truncate()
-                            .child(w.short_model.clone()),
                     ),
             )
             // 진행바 — DEMO 미리보기 전용: 실행 중 WORKER_BLUE 알약이 좌↔우 연속
@@ -1615,6 +1591,15 @@ impl DashboardView {
                     })
                     .child(div().flex_1())
                     .child(actions),
+            )
+            // 하단 실측 텔레메트리 — cli · model · effort (roster.json 미사용)
+            .child(
+                div()
+                    .h(px(14.))
+                    .text_size(px(10.))
+                    .text_color(WORKER_BLUE)
+                    .truncate()
+                    .child(w.telemetry_line()),
             )
     }
 
@@ -1987,12 +1972,12 @@ fn role_session_row(
     if show_model {
         row = row.child(
             div()
-                .w(px(80.))
                 .flex_none()
+                .max_w(px(200.))
                 .text_size(px(9.))
                 .text_color(TEXT_SOFT)
                 .truncate()
-                .child(w.short_model.clone()),
+                .child(w.telemetry_line()),
         );
     }
     row = row.child(
@@ -2057,6 +2042,7 @@ fn verifier_active(snap: &DashboardSnapshot) -> bool {
 }
 
 /// 로스터 슬롯의 표시 모델 — live 배지 우선, 없으면 roster.json 대기 배지.
+#[allow(dead_code)]
 fn role_model_label(snap: &DashboardSnapshot, slot: &str) -> String {
     snap.roles
         .iter()

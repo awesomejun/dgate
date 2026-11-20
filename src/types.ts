@@ -145,6 +145,10 @@ export interface AppState {
   effort: EffortLevel;
   /** watch 모드에서 외부 세션의 실시간 effort를 모를 때 false — 허위 게이지 출력 차단 */
   effortKnown?: boolean;
+  /** watch 모드 실측 하단 텔레메트리 (`cli · model · effort`), roster.json 미사용 */
+  leadTelemetry?: string | null;
+  verifierTelemetry?: string | null;
+  advisorTelemetry?: string | null;
   phase: string;
   backSummary: string;
 

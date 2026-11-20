@@ -1441,6 +1441,9 @@ fn demo_worker(slot: RoleSlot, name: &str, activity: &str, short_model: &str) ->
         activity: activity.to_string(),
         status: Some("working".to_string()),
         turn: Some(14),
+        cli: short_model.split(':').next().unwrap_or(short_model).to_string(),
+        model: short_model.split_once(':').map(|(_, m)| m.to_string()),
+        effort: None,
     }
 }
 
@@ -1866,6 +1869,9 @@ mod tests {
             activity: "테스트 활동 줄".to_string(),
             status: Some("working".to_string()),
             turn: None,
+            cli: "pi".to_string(),
+            model: Some("glm-zcode/glm-5.3".to_string()),
+            effort: None,
         }
     }
 

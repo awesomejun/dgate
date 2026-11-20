@@ -60,9 +60,11 @@ export interface HcTerminalSummary {
   turn?: number;
 }
 
-/** `hc get <addr> --json` 터미널 항목(상세) — argv 포함. */
+/** `hc get <addr> --json` 터미널 항목(상세) — argv 및 현재 foreground.argv 포함. */
 export interface HcTerminalDetail extends HcTerminalSummary {
   argv?: string[];
+  /** 현재 터미널 포그라운드 프로세스 argv — 있으면 초기 셸 런치 argv보다 모델·CLI 판정에 우선. */
+  foregroundArgv?: string[];
 }
 
 /** 역할 슬롯 — roster RoleSlot과 동일한 5종. */
@@ -88,6 +90,14 @@ export interface LiveWorkerInfo {
   status?: string | null;
   /** `hc ls --json` 실측 턴 카운터 — 카드 텔레메트리 라인에 그대로 노출. */
   turn?: number;
+  /** 실측 CLI 이름 (예: 'agy', 'pi', 'devin') — roster.json 미사용. */
+  cli?: string;
+  /** 실측 모델명 (예: 'Gemini 4 Neon', 'glm-zcode/glm-5.3') — 미확인 시 null. */
+  model?: string | null;
+  /** 실측 effort/thinking (예: 'medium', 'max', 'high') — 미확인 시 null. */
+  effort?: string | null;
+  /** 카드 하단 표시용 실측 요약 (예: 'agy · Gemini 4 Neon · medium'). */
+  telemetryLine?: string;
 }
 
 /** `mergeLiveRosterLabels` 결과 — cli.ts가 AppState에 반영할 값의 묶음. */
@@ -97,6 +107,10 @@ export interface MergedLiveRoster {
   leadModelFlag: string;
   verifierModelName: string;
   verifierModelFlag: string;
+  /** 실측 라이브 역할 세션의 하단 텔레메트리 (`cli · model · effort`), 없으면 null. */
+  leadTelemetry?: string | null;
+  verifierTelemetry?: string | null;
+  advisorTelemetry?: string | null;
   workers: LiveWorkerInfo[];
   activeWorkerCount: number;
 }
@@ -284,9 +298,85 @@ function truncateChars(s: string, maxChars: number): string {
   return chars.slice(0, Math.max(1, maxChars - 1)).join('') + '…';
 }
 
+const AGY_FOOTER_RE = /·\s+([^·]+?)\s+·\s+(minimal|low|medium|high|xhigh|max)(?:\s+·|\s*$)/i;
+const PI_FOOTER_RE = /(?:\([^)]+\)\s+)?([^\s•]+)\s+•\s+(off|minimal|low|medium|high|xhigh|max)\b/i;
+const STATUS_CHROME_LINE_RE =
+  /^(?:esc to cancel\b|\?\s+for shortcuts\b|ctx\s+\d+%|↑\d+[kKmM]?\s+↓\d+[kKmM]?)/i;
+
+/**
+ * 라이브 터미널 화면 하단 상태줄에서 실측 model·effort를 추출한다.
+ * - Antigravity(agy): `auto · Gemini 4 Neon · medium`
+ * - Pi(pi): `(opencodex) glm-zcode/glm-5.3 • max`
+ */
+export function parseLiveScreenTelemetry(
+  rawScreen: string | null | undefined
+): { model: string | null; effort: string | null } {
+  if (typeof rawScreen !== 'string' || rawScreen.length === 0) {
+    return { model: null, effort: null };
+  }
+  const lines = stripAnsi(rawScreen).split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = (lines[i] ?? '').trim();
+    if (line.length === 0) continue;
+    const agy = line.match(AGY_FOOTER_RE);
+    if (agy) {
+      const model = agy[1]!.trim();
+      const effort = agy[2]!.toLowerCase();
+      if (model.length > 0) return { model, effort };
+    }
+    const pi = line.match(PI_FOOTER_RE);
+    if (pi) {
+      const model = pi[1]!.trim();
+      const effort = pi[2]!.toLowerCase();
+      if (model.length > 0) return { model, effort };
+    }
+  }
+  return { model: null, effort: null };
+}
+
+/** argv에서 `--effort` / `--thinking` 값을 추출한다. */
+function parseWorkerEffort(argv: readonly string[]): string | null {
+  for (let i = 0; i < argv.length; i++) {
+    const t = argv[i] ?? '';
+    if ((t === '--effort' || t === '--thinking') && i + 1 < argv.length) {
+      const next = argv[i + 1] ?? '';
+      if (next.length > 0 && !next.startsWith('-')) return next.toLowerCase();
+    } else if (t.startsWith('--effort=') || t.startsWith('--thinking=')) {
+      const v = t.slice(t.indexOf('=') + 1).trim();
+      if (v.length > 0) return v.toLowerCase();
+    }
+  }
+  return null;
+}
+
+/** 모델명에서 provider 접두(`glm-zcode/glm-5.3` → `glm-5.3`)만 정리해 간결 표기. */
+function compactTelemetryModel(model: string | null | undefined): string | null {
+  if (!model) return null;
+  const trimmed = model.trim();
+  if (!trimmed) return null;
+  const slash = trimmed.lastIndexOf('/');
+  return slash >= 0 ? trimmed.slice(slash + 1).trim() || trimmed : trimmed;
+}
+
+/** 실측 `cli · model · effort` 한 줄 포맷(확인된 항목만 조합). */
+export function formatLiveTelemetry(
+  cli: string | null | undefined,
+  model: string | null | undefined,
+  effort: string | null | undefined
+): string {
+  const parts: string[] = [];
+  const c = (cli ?? '').trim();
+  if (c && c !== 'custom') parts.push(c);
+  const m = compactTelemetryModel(model);
+  if (m && m.toLowerCase() !== c.toLowerCase()) parts.push(m);
+  const e = (effort ?? '').trim().toLowerCase();
+  if (e) parts.push(e);
+  return parts.join(' · ') || c || 'live';
+}
+
 /**
  * 터미널 화면 원문에서 "의미 있는 마지막 1줄"을 뽑는다.
- * 아래에서 위로 훑으며 빈 줄·`[hc] …` 상태줄·박스/구분선·스피너 전용 줄은 건너뛴다.
+ * 아래에서 위로 훑으며 빈 줄·`[hc] …` 상태줄·박스/구분선·스피너 전용 줄·CLI 하단 상태줄은 건너뛴다.
  * 후보 줄은 가장자리 박스 장식(`│` 등)을 떼고, `redactSecrets`로 시크릿을.masking한 뒤
  * 공백을 붙이고 maxChars(기본 68)로 절단한다. 없으면 null.
  */
@@ -307,6 +397,8 @@ export function extractLastActivityLine(
     if (HC_STATUS_LINE_RE.test(line)) continue;
     if (BOX_ONLY_LINE_RE.test(line)) continue;
     if (SPINNER_ONLY_LINE_RE.test(line)) continue;
+    if (STATUS_CHROME_LINE_RE.test(line)) continue;
+    if (AGY_FOOTER_RE.test(line) || PI_FOOTER_RE.test(line)) continue;
     // 시크릿 리덕션은 절단 이전에(레댁션 계약 — 잘린 경계 무효화 방지)
     const safe = redactSecrets(line).replace(/\s+/g, ' ').trim();
     if (safe.length === 0) continue;
@@ -404,11 +496,14 @@ export function inferLiveWorkerSlot(
 ): LiveWorkerInfo | null {
   if (!detail || typeof detail.address !== 'string' || detail.address.length === 0) return null;
   const argv = Array.isArray(detail.argv) ? detail.argv : [];
+  const fgArgv = Array.isArray(detail.foregroundArgv) ? detail.foregroundArgv : [];
+  // 현재 포그라운드 프로세스 argv가 있으면 초기 셸 런치 argv(스테일 --model 등) 대신 사용한다.
+  const cliArgv = fgArgv.length > 0 ? fgArgv : argv;
 
-  // 1) 슬롯 — HERDR_ROLE env가 최우선
+  // 1) 슬롯 — HERDR_ROLE env가 최우선 (래퍼 argv·포그라운드 argv 모두 검사)
   let slot: LiveWorkerSlot = 'coder';
   let roleFromArgv = false;
-  for (const token of argv) {
+  for (const token of [...argv, ...fgArgv]) {
     if (typeof token !== 'string') continue;
     const m = token.match(HERDR_ROLE_RE);
     if (m) {
@@ -427,10 +522,21 @@ export function inferLiveWorkerSlot(
     else slot = 'coder';
   }
 
-  // 2) CLI·모델
-  const { cli, model } = parseWorkerCliAndModel(argv, detail.agent);
-  const shortModel = formatRoleBadge(model ? { cli, model } : { cli });
-  const modelName = model ?? cli;
+  // 2) CLI·모델·effort — 현재 포그라운드 프로세스(cliArgv) + 실시간 터미널 하단 상태줄 우선
+  const { cli, model: argvModel } = parseWorkerCliAndModel(cliArgv, detail.agent);
+  const screenTel = parseLiveScreenTelemetry(rawScreen);
+  const argvEffort = parseWorkerEffort(cliArgv);
+  const liveModel = screenTel.model ?? argvModel ?? null;
+  const liveEffort = screenTel.effort ?? argvEffort ?? null;
+  const displayCli =
+    cli === 'custom' && detail.agent
+      ? detail.agent.toLowerCase() === 'antigravity'
+        ? 'agy'
+        : detail.agent.toLowerCase()
+      : cli;
+  const shortModel = formatRoleBadge(liveModel ? { cli, model: liveModel } : { cli });
+  const modelName = liveModel ?? cli;
+  const telemetryLine = formatLiveTelemetry(displayCli, liveModel, liveEffort);
 
   // 3) 조립 — 활동은 화면 원문 우선, 없으면 상태 기반 간결 폴백
   const activity =
@@ -448,6 +554,10 @@ export function inferLiveWorkerSlot(
     activity,
     status: detail.status ?? null,
     turn: detail.turn,
+    cli: displayCli,
+    model: liveModel,
+    effort: liveEffort,
+    telemetryLine,
   };
 }
 
@@ -501,6 +611,7 @@ export function mergeLiveRosterLabels(
 
   let leadWorker: LiveWorkerInfo | null = null;
   let verifierWorker: LiveWorkerInfo | null = null;
+  let advisorWorker: LiveWorkerInfo | null = null;
   const claimed = new Set<LiveWorkerSlot>();
   for (const w of workers) {
     if (w.slot === 'lead') {
@@ -511,6 +622,7 @@ export function mergeLiveRosterLabels(
       claimed.add(w.slot);
       labels[w.slot] = w.shortModel;
       if (w.slot === 'verifier') verifierWorker = w;
+      if (w.slot === 'advisor') advisorWorker = w;
     }
   }
 
@@ -541,6 +653,17 @@ export function mergeLiveRosterLabels(
     leadModelFlag,
     verifierModelName,
     verifierModelFlag,
+    leadTelemetry: leadWorker
+      ? (leadWorker.telemetryLine ?? formatLiveTelemetry(leadWorker.cli, leadWorker.model, leadWorker.effort))
+      : null,
+    verifierTelemetry: verifierWorker
+      ? (verifierWorker.telemetryLine ??
+        formatLiveTelemetry(verifierWorker.cli, verifierWorker.model, verifierWorker.effort))
+      : null,
+    advisorTelemetry: advisorWorker
+      ? (advisorWorker.telemetryLine ??
+        formatLiveTelemetry(advisorWorker.cli, advisorWorker.model, advisorWorker.effort))
+      : null,
     workers: [...workers],
     activeWorkerCount: workers.length,
   };
@@ -750,12 +873,25 @@ export function createLiveRosterSyncer(opts: LiveRosterSyncerOptions): LiveRoste
               });
               const parsed = parseJsonOrNull(raw);
               const normalized = parsed ? normalizeTerminal(parsed) : null;
+              const fgObj =
+                parsed &&
+                typeof parsed['foreground'] === 'object' &&
+                parsed['foreground'] !== null &&
+                !Array.isArray(parsed['foreground'])
+                  ? (parsed['foreground'] as Record<string, unknown>)
+                  : null;
               detail = normalized
                 ? {
                     ...normalized,
                     argv:
                       parsed && Array.isArray(parsed['argv'])
                         ? (parsed['argv'] as unknown[]).filter(
+                            (a): a is string => typeof a === 'string'
+                          )
+                        : undefined,
+                    foregroundArgv:
+                      fgObj && Array.isArray(fgObj['argv'])
+                        ? (fgObj['argv'] as unknown[]).filter(
                             (a): a is string => typeof a === 'string'
                           )
                         : undefined,

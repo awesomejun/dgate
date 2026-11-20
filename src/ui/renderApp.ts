@@ -264,13 +264,23 @@ function renderLegendNav(
 ): void {
   const f = state.logFilter;
   const lb = state.rosterLabels;
-  const items: ReadonlyArray<{ text: string; fg: RGB; on: boolean }> = [
-    { text: `Lead · ${lb.lead}`, fg: THEME.orange, on: f === 'argon' },
-    { text: `Workers · ${lb.explore} / ${lb.coder}`, fg: THEME.blue, on: f === 'hydrogen' },
-    { text: 'Decision Gate', fg: THEME.green, on: f === 'decision' },
-    { text: `Verifier · ${lb.verifier}`, fg: THEME.neon, on: f === 'neon' },
-    { text: `Advisor · ${lb.advisor}`, fg: THEME.purple, on: f === 'carbon' },
-  ];
+  // watch 모드: 상단/범례는 역할명만 표시(roster.json 모델명 배제).
+  const isWatch = state.mode === 'watch';
+  const items: ReadonlyArray<{ text: string; fg: RGB; on: boolean }> = isWatch
+    ? [
+        { text: 'Lead', fg: THEME.orange, on: f === 'argon' },
+        { text: 'Workers', fg: THEME.blue, on: f === 'hydrogen' },
+        { text: 'Decision Gate', fg: THEME.green, on: f === 'decision' },
+        { text: 'Verifier', fg: THEME.neon, on: f === 'neon' },
+        { text: 'Advisor', fg: THEME.purple, on: f === 'carbon' },
+      ]
+    : [
+        { text: `Lead · ${lb.lead}`, fg: THEME.orange, on: f === 'argon' },
+        { text: `Workers · ${lb.explore} / ${lb.coder}`, fg: THEME.blue, on: f === 'hydrogen' },
+        { text: 'Decision Gate', fg: THEME.green, on: f === 'decision' },
+        { text: `Verifier · ${lb.verifier}`, fg: THEME.neon, on: f === 'neon' },
+        { text: `Advisor · ${lb.advisor}`, fg: THEME.purple, on: f === 'carbon' },
+      ];
 
   // 항목(아이콘 2칸 + 라벨)이 폭 안에 들어가는 가장 넓은 간격을 고른다.
   const fixedW = items.reduce((acc, i) => acc + 2 + stringWidth(i.text) + (i.on ? 7 : 0), 0);
@@ -501,20 +511,19 @@ function renderAdvisorPanel(buf: CellBuffer, state: AppState, L: FullLayout): vo
   }
   if (hy < L.tr0Row) {
     const advisorActive = state.advisorState === '자문 중';
-    const advisorTitle = `${state.rosterLabels.advisor} · ${state.advisorState}${
-      advisorActive ? ` ${spinnerFrame(state.simTime, 3)}` : ''
-    }`;
+    const spinner = advisorActive ? ` ${spinnerFrame(state.simTime, 3)}` : '';
+    const advisorTitle =
+      state.mode === 'watch'
+        ? `${state.advisorState}${spinner}`
+        : `${state.rosterLabels.advisor} · ${state.advisorState}${spinner}`;
     buf.writeCentered(ix, hy++, iw, advisorTitle, THEME.purple, THEME.bg, advisorActive);
   }
   if (hy < L.tr0Row) {
-    buf.writeCentered(
-      ix,
-      hy++,
-      iw,
-      `세션 ${state.sessionId} · session: ${state.sessionId}`,
-      THEME.muted,
-      THEME.bg
-    );
+    const subLine =
+      state.mode === 'watch' && state.advisorTelemetry
+        ? state.advisorTelemetry
+        : `세션 ${state.sessionId} · session: ${state.sessionId}`;
+    buf.writeCentered(ix, hy++, iw, subLine, THEME.muted, THEME.bg);
   }
 
   // 트리거 3개 행 렌더링 (활성 시 보라 하이라이트 배경 바)
@@ -638,15 +647,8 @@ function renderMainPanel(buf: CellBuffer, state: AppState, L: FullLayout): void 
   const iw = R.w - 4;
   let cy = R.y + 1;
 
-  buf.writeCentered(
-    ix,
-    cy++,
-    iw,
-    `Lead · ${state.rosterLabels.lead}`,
-    THEME.orange,
-    panelBg,
-    true
-  );
+  const leadHeader = state.mode === 'watch' ? 'Lead' : `Lead · ${state.rosterLabels.lead}`;
+  buf.writeCentered(ix, cy++, iw, leadHeader, THEME.orange, panelBg, true);
   if (cy < R.y + R.h - 1) {
     buf.writeCentered(ix, cy++, iw, state.mainSummary, THEME.fg, panelBg, false);
   }
@@ -672,23 +674,26 @@ function renderMainPanel(buf: CellBuffer, state: AppState, L: FullLayout): void 
     }
     buf.writeSegmentsCentered(ix, cy++, iw, phaseSegs);
   }
+  // 하단 텔레메트리 — watch 모드에서는 roster.json 없이 실측 cli · model · effort만 표시.
+  const leadBottomLine =
+    state.mode === 'watch' ? (state.leadTelemetry ?? '대기 중') : state.modelFlag;
   // 실측 태스크 진행률 — 체크박스 파일이 있을 때만. 없으면 아무것도 그리지 않는다.
-  // 패널 내부 폭이 협소(표시 가능 줄이 제한적)할 땐 modelFlag 줄 대신 이 줄을 보여준다.
+  // 패널 내부 폭이 협소(표시 가능 줄이 제한적)할 땐 하단 줄 대신 이 줄을 보여준다.
   const tp = state.taskProgress;
   if (tp && tp.total > 0) {
     const tpText = `태스크 ${tp.done}/${tp.total} (${tp.pct}%) · ${tp.sourceName}`;
     if (cy < R.y + R.h - 2) {
       if (cy < R.y + R.h - 1) {
-        buf.writeCentered(ix, cy++, iw, state.modelFlag, THEME.muted, panelBg, false);
+        buf.writeCentered(ix, cy++, iw, tpText, THEME.green, panelBg, false);
       }
       if (cy < R.y + R.h - 1) {
-        buf.writeCentered(ix, cy++, iw, tpText, THEME.green, panelBg, false);
+        buf.writeCentered(ix, cy++, iw, leadBottomLine, THEME.muted, panelBg, false);
       }
     } else if (cy < R.y + R.h - 1) {
       buf.writeCentered(ix, cy++, iw, tpText, THEME.green, panelBg, false);
     }
   } else if (cy < R.y + R.h - 1) {
-    buf.writeCentered(ix, cy++, iw, state.modelFlag, THEME.muted, panelBg, false);
+    buf.writeCentered(ix, cy++, iw, leadBottomLine, THEME.muted, panelBg, false);
   }
 }
 
@@ -750,10 +755,14 @@ function renderNeonPanel(buf: CellBuffer, state: AppState, L: FullLayout): void 
   const iw = R.w - 4;
   let cy = R.y + 1;
 
-  // 1) 제목 — 폭이 허용하면 활성 verifier 바인딩 배지까지 표기
+  // 1) 제목 — watch 모드는 역할명('Verifier')만 표시(roster.json 배제)
   const badgeTitle = `Verifier · ${state.rosterLabels.verifier}`;
   const titleText =
-    stringWidth(badgeTitle) <= iw ? badgeTitle : 'Verifier · 교차 검증';
+    state.mode === 'watch'
+      ? 'Verifier'
+      : stringWidth(badgeTitle) <= iw
+        ? badgeTitle
+        : 'Verifier · 교차 검증';
   buf.writeCentered(
     ix,
     cy++,
@@ -835,9 +844,11 @@ function renderNeonPanel(buf: CellBuffer, state: AppState, L: FullLayout): void 
     buf.writeCentered(ix, cy++, iw, statusLabel, statusFg, panelBg, isRun || isPass || isFail);
   }
 
-  // 4) 모델 플래그
+  // 4) 하단 텔레메트리 — watch 모드는 실측 cli · model · effort (없으면 대기 중)
   if (cy < R.y + R.h - 1) {
-    buf.writeCentered(ix, cy++, iw, state.neonModelFlag, THEME.muted, panelBg, false);
+    const verifierBottom =
+      state.mode === 'watch' ? (state.verifierTelemetry ?? '대기 중') : state.neonModelFlag;
+    buf.writeCentered(ix, cy++, iw, verifierBottom, THEME.muted, panelBg, false);
   }
 }
 
@@ -1004,11 +1015,11 @@ function renderSwarmSection(buf: CellBuffer, state: AppState, L: FullLayout): vo
     const iw = cardRect.w - 4;
     let cy = cardRect.y + 1;
 
-    // 역할 이름 (search / grep / audit)
+    // 역할 이름 (상단: 역할/세션명만)
     buf.writeCentered(ix, cy++, iw, card.name, THEME.fg, cardBg, true);
 
-    // 모델 태그 (활성 roster explore 바인딩)
-    if (cy < cardRect.y + cardRect.h - 1 && cardRect.h >= 6) {
+    // 모델 태그 — demo 모드만 상단 2행 유지; watch 모드는 하단에 cli · model · effort 표시
+    if (state.mode !== 'watch' && cy < cardRect.y + cardRect.h - 1 && cardRect.h >= 6) {
       buf.writeCentered(ix, cy++, iw, card.model, THEME.blue, cardBg, false);
     }
 
@@ -1094,30 +1105,39 @@ function renderSwarmSection(buf: CellBuffer, state: AppState, L: FullLayout): vo
       buf.writeCentered(cardRect.x + 1, cy++, cardRect.w - 2, card.description, THEME.fgSoft, cardBg, false);
     }
 
-    // 상태 표시 (✓ 완료 / ⠙ 실행 중 / ▪ 대기 중 / ✕ 오류) — 실행 중 라이브 모션일 때만 회전
+    // 하단 줄 — watch 모드는 실측 cli · model · effort, demo 모드는 상태 요약
     if (cy < cardRect.y + cardRect.h - 1) {
-      const isDone = card.status === 'done' || card.progress >= 100;
-      const isIdle = card.status === 'idle' && card.progress === 0;
-      const isErr = card.status === 'error';
-      const label = isErr
-        ? '✕ 오류'
-        : isDone
-          ? typeof card.elapsedSec === 'number'
-            ? `✓ 완료 · ${formatElapsedMmss(card.elapsedSec)}`
-            : '✓ 완료'
-          : isIdle
-            ? '▪ 대기 중'
-            : motion
-              ? `${spinnerFrame(state.simTime, idx)} 실행 중`
-              : '◉ 실행 중';
-      const fg = isErr
-        ? THEME.trafficRed
-        : isDone
-          ? THEME.green
-          : isIdle
-            ? THEME.muted
-            : THEME.blue;
-      buf.writeCentered(ix, cy, iw, label, fg, cardBg, isDone);
+      if (state.mode === 'watch') {
+        const showBar = card.progress > 0 && card.progress < 100;
+        const bottomLabel =
+          motion && card.status === 'running' && showBar
+            ? `${spinnerFrame(state.simTime, idx)} ${card.model}`
+            : card.model;
+        buf.writeCentered(ix, cy, iw, bottomLabel, THEME.blue, cardBg, false);
+      } else {
+        const isDone = card.status === 'done' || card.progress >= 100;
+        const isIdle = card.status === 'idle' && card.progress === 0;
+        const isErr = card.status === 'error';
+        const label = isErr
+          ? '✕ 오류'
+          : isDone
+            ? typeof card.elapsedSec === 'number'
+              ? `✓ 완료 · ${formatElapsedMmss(card.elapsedSec)}`
+              : '✓ 완료'
+            : isIdle
+              ? '▪ 대기 중'
+              : motion
+                ? `${spinnerFrame(state.simTime, idx)} 실행 중`
+                : '◉ 실행 중';
+        const fg = isErr
+          ? THEME.trafficRed
+          : isDone
+            ? THEME.green
+            : isIdle
+              ? THEME.muted
+              : THEME.blue;
+        buf.writeCentered(ix, cy, iw, label, fg, cardBg, isDone);
+      }
     }
   });
 }

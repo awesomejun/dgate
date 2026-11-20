@@ -89,7 +89,7 @@ impl HcTerminalSummary {
     }
 }
 
-/// `hc get <addr> --json` 터미널 항목(상세) — argv 포함.
+/// `hc get <addr> --json` 터미널 항목(상세) — argv 및 현재 foreground.argv 포함.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct HcTerminalDetail {
     pub address: String,
@@ -100,6 +100,8 @@ pub struct HcTerminalDetail {
     pub status: Option<String>,
     pub cwd: Option<String>,
     pub argv: Option<Vec<String>>,
+    /// 현재 터미널 포그라운드 프로세스 argv — 있으면 초기 셸 런치 argv보다 우선.
+    pub foreground_argv: Option<Vec<String>>,
 }
 
 impl HcTerminalDetail {
@@ -113,6 +115,7 @@ impl HcTerminalDetail {
             status: s.status.clone(),
             cwd: s.cwd.clone(),
             argv: None,
+            foreground_argv: None,
         }
     }
 }
@@ -175,6 +178,23 @@ pub struct LiveWorkerInfo {
     pub status: Option<String>,
     /// `hc ls` 실측 턴 수 — LIVE 카드 'turn N' pill 원천(관측 불가 시 None).
     pub turn: Option<u64>,
+    /// 실측 CLI 이름 (예: 'agy', 'pi', 'devin') — roster.json 미사용.
+    pub cli: String,
+    /// 실측 모델명 (예: 'Gemini 4 Neon', 'glm-zcode/glm-5.3') — 미확인 시 None.
+    pub model: Option<String>,
+    /// 실측 effort/thinking (예: 'medium', 'max', 'high') — 미확인 시 None.
+    pub effort: Option<String>,
+}
+
+impl LiveWorkerInfo {
+    /// 카드 하단 표시용 실측 요약 (`cli · model · effort`).
+    pub fn telemetry_line(&self) -> String {
+        format_live_telemetry(
+            Some(self.cli.as_str()),
+            self.model.as_deref(),
+            self.effort.as_deref(),
+        )
+    }
 }
 
 /// `merge_live_roster_labels` 결과 — AppState에 반영할 값의 묶음.
@@ -451,8 +471,131 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
     out
 }
 
+fn re_agy_footer() -> &'static regex::Regex {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?i)·\s+([^·]+?)\s+·\s+(minimal|low|medium|high|xhigh|max)(?:\s+·|\s*$)",
+        )
+        .unwrap()
+    })
+}
+
+fn re_pi_footer() -> &'static regex::Regex {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"(?i)(?:\([^)]+\)\s+)?([^\s•]+)\s+•\s+(off|minimal|low|medium|high|xhigh|max)\b")
+            .unwrap()
+    })
+}
+
+fn re_status_chrome_line() -> &'static regex::Regex {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?i)^(?:esc to cancel\b|\?\s+for shortcuts\b|ctx\s+\d+%|↑\d+[kKmM]?\s+↓\d+[kKmM]?)",
+        )
+        .unwrap()
+    })
+}
+
+/// 라이브 터미널 화면 하단 상태줄에서 실측 `(model, effort)`를 추출한다.
+/// - Antigravity(agy): `auto · Gemini 4 Neon · medium`
+/// - Pi(pi): `(opencodex) glm-zcode/glm-5.3 • max`
+pub fn parse_live_screen_telemetry(raw_screen: Option<&str>) -> (Option<String>, Option<String>) {
+    let Some(raw) = raw_screen.filter(|s| !s.is_empty()) else {
+        return (None, None);
+    };
+    let stripped = strip_ansi(&raw.replace("\r\n", "\n"));
+    for line in stripped.split('\n').rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(cap) = re_agy_footer().captures(trimmed) {
+            let model = cap.get(1).map(|m| m.as_str().trim().to_string()).filter(|s| !s.is_empty());
+            let effort = cap.get(2).map(|m| m.as_str().to_lowercase());
+            if model.is_some() {
+                return (model, effort);
+            }
+        }
+        if let Some(cap) = re_pi_footer().captures(trimmed) {
+            let model = cap.get(1).map(|m| m.as_str().trim().to_string()).filter(|s| !s.is_empty());
+            let effort = cap.get(2).map(|m| m.as_str().to_lowercase());
+            if model.is_some() {
+                return (model, effort);
+            }
+        }
+    }
+    (None, None)
+}
+
+/// argv에서 `--effort` / `--thinking` 값을 추출한다.
+fn parse_worker_effort(argv: &[String]) -> Option<String> {
+    let mut i = 0;
+    while i < argv.len() {
+        let t = argv[i].as_str();
+        if (t == "--effort" || t == "--thinking") && i + 1 < argv.len() {
+            let next = argv[i + 1].trim();
+            if !next.is_empty() && !next.starts_with('-') {
+                return Some(next.to_lowercase());
+            }
+        } else if let Some(v) = t
+            .strip_prefix("--effort=")
+            .or_else(|| t.strip_prefix("--thinking="))
+        {
+            let v = v.trim();
+            if !v.is_empty() {
+                return Some(v.to_lowercase());
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// 실측 `cli · model · effort` 한 줄 포맷(확인된 항목만 조합).
+pub fn format_live_telemetry(
+    cli: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let c = cli.map(str::trim).unwrap_or("");
+    if !c.is_empty() && c != "custom" {
+        parts.push(c.to_string());
+    }
+    if let Some(m_raw) = model.map(str::trim).filter(|s| !s.is_empty()) {
+        let compact = match m_raw.rfind('/') {
+            Some(idx) => {
+                let tail = m_raw[idx + 1..].trim();
+                if tail.is_empty() { m_raw } else { tail }
+            }
+            None => m_raw,
+        };
+        if !compact.eq_ignore_ascii_case(c) {
+            parts.push(compact.to_string());
+        }
+    }
+    if let Some(e) = effort.map(str::trim).filter(|s| !s.is_empty()) {
+        parts.push(e.to_lowercase());
+    }
+    if parts.is_empty() {
+        if c.is_empty() {
+            "live".to_string()
+        } else {
+            c.to_string()
+        }
+    } else {
+        parts.join(" · ")
+    }
+}
+
 /// 터미널 화면 원문에서 "의미 있는 마지막 1줄"을 뽑는다.
-/// 아래에서 위로 훑으며 빈 줄·`[hc] …` 상태줄·박스/구분선·스피너 전용 줄은 건너뛴다.
+/// 아래에서 위로 훑으며 빈 줄·`[hc] …` 상태줄·박스/구분선·스피너 전용 줄·CLI 하단 상태줄은 건너뛴다.
 /// 후보 줄은 가장자리 박스 장식(`│` 등)을 떼고, `redact_secrets`로 시크릿을 마스킹한
 /// 뒤 공백을 붙이고 maxChars(기본 68)로 절단한다. 없으면 None.
 pub fn extract_last_activity_line(raw_screen: Option<&str>, max_chars: usize) -> Option<String> {
@@ -475,6 +618,12 @@ pub fn extract_last_activity_line(raw_screen: Option<&str>, max_chars: usize) ->
             continue;
         }
         if re_spinner_only_line().is_match(&line) {
+            continue;
+        }
+        if re_status_chrome_line().is_match(&line) {
+            continue;
+        }
+        if re_agy_footer().is_match(&line) || re_pi_footer().is_match(&line) {
             continue;
         }
         // 시크릿 리덕션은 절단 이전에(레댁션 계약 — 잘린 경계 무효화 방지)
@@ -667,11 +816,18 @@ pub fn infer_live_worker_slot(
         return None;
     }
     let argv: Vec<String> = detail.argv.clone().unwrap_or_default();
+    let fg_argv: Vec<String> = detail.foreground_argv.clone().unwrap_or_default();
+    // 현재 포그라운드 프로세스 argv가 있으면 초기 셸 런치 argv(스테일 --model 등) 대신 사용한다.
+    let cli_argv: &[String] = if !fg_argv.is_empty() {
+        &fg_argv
+    } else {
+        &argv
+    };
 
-    // 1) 슬롯 — HERDR_ROLE env가 최우선
+    // 1) 슬롯 — HERDR_ROLE env가 최우선 (래퍼 argv·포그라운드 argv 모두 검사)
     let mut slot: LiveWorkerSlot = RoleSlot::Coder;
     let mut role_from_argv = false;
-    for token in &argv {
+    for token in argv.iter().chain(fg_argv.iter()) {
         if let Some(m) = re_herdr_role().captures(token) {
             let role = m
                 .get(1)
@@ -711,10 +867,23 @@ pub fn infer_live_worker_slot(
         }
     }
 
-    // 2) CLI·모델
-    let (cli, model) = parse_worker_cli_and_model(&argv, detail.agent.as_deref());
-    let short_model = format_role_badge(&cli, model.as_deref());
-    let model_name = model.unwrap_or_else(|| cli.clone());
+    // 2) CLI·모델·effort — 현재 포그라운드 프로세스(cli_argv) + 실시간 터미널 하단 상태줄 우선
+    let (cli, argv_model) = parse_worker_cli_and_model(cli_argv, detail.agent.as_deref());
+    let (screen_model, screen_effort) = parse_live_screen_telemetry(raw_screen);
+    let argv_effort = parse_worker_effort(cli_argv);
+    let live_model = screen_model.or(argv_model);
+    let live_effort = screen_effort.or(argv_effort);
+    let display_cli = if cli == "custom" {
+        match detail.agent.as_deref().map(str::to_lowercase).as_deref() {
+            Some("antigravity") => "agy".to_string(),
+            Some(a) if !a.is_empty() => a.to_string(),
+            _ => cli.clone(),
+        }
+    } else {
+        cli.clone()
+    };
+    let short_model = format_role_badge(&cli, live_model.as_deref());
+    let model_name = live_model.clone().unwrap_or_else(|| cli.clone());
 
     // 3) 조립 — 활동은 화면 원문 우선, 없으면 상태 기반 간결 폴백
     let activity = extract_last_activity_line(raw_screen, 68).unwrap_or_else(|| {
@@ -741,6 +910,9 @@ pub fn infer_live_worker_slot(
         activity,
         status: detail.status.clone(),
         turn: None,
+        cli: display_cli,
+        model: live_model,
+        effort: live_effort,
     })
 }
 
@@ -940,7 +1112,7 @@ pub fn parse_hc_ls_json(raw: &str) -> Option<Vec<HcTerminalSummary>> {
     )
 }
 
-/// `hc get --json` 출력 → 상세(argv 포함). 파싱 실패·address 누락은 None.
+/// `hc get --json` 출력 → 상세(argv·foreground.argv 포함). 파싱 실패·address 누락은 None.
 fn parse_hc_get_json(raw: &str) -> Option<HcTerminalDetail> {
     let parsed: Value = serde_json::from_str(raw).ok()?;
     let obj = parsed.as_object()?;
@@ -951,8 +1123,20 @@ fn parse_hc_get_json(raw: &str) -> Option<HcTerminalDetail> {
             .map(str::to_string)
             .collect::<Vec<String>>()
     });
+    let foreground_argv = obj
+        .get("foreground")
+        .and_then(Value::as_object)
+        .and_then(|fg| fg.get("argv"))
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<String>>()
+        });
     Some(HcTerminalDetail {
         argv,
+        foreground_argv,
         ..HcTerminalDetail::from_summary(&summary)
     })
 }
@@ -1715,6 +1899,7 @@ mod tests {
             status: Some("working".to_string()),
             cwd: cwd.map(str::to_string),
             argv: Some(argv.iter().map(|s| s.to_string()).collect()),
+            foreground_argv: None,
         }
     }
 
@@ -1859,6 +2044,51 @@ mod tests {
         let w2 = infer_live_worker_slot(&d2, None).unwrap();
         assert_eq!(w2.model_name, "gemini-4-neon-high");
         assert_eq!(w2.short_model, "agy:gemini-4-neon-high");
+
+        // foreground.argv 우선 + 터미널 하단 상태줄에서 실측 model·effort 추출
+        let mut d3 = detail(
+            "t165",
+            "",
+            "antigravity",
+            &[
+                "/bin/zsh",
+                "-lic",
+                "\"$@\"; exec \"$0\" -li",
+                "/bin/zsh",
+                "agy",
+                "--model",
+                "gemini-4-neon-high",
+            ],
+            None,
+        );
+        d3.foreground_argv = Some(vec![
+            "agy".into(),
+            "--dangerously-skip-permissions".into(),
+            "--conversation=abc".into(),
+        ]);
+        let w3 = infer_live_worker_slot(
+            &d3,
+            Some("● Edited 2 files\nesc to cancel     auto · Gemini 4 Neon · medium\n"),
+        )
+        .unwrap();
+        assert_eq!(w3.cli, "agy");
+        assert_eq!(w3.model.as_deref(), Some("Gemini 4 Neon"));
+        assert_eq!(w3.effort.as_deref(), Some("medium"));
+        assert_eq!(w3.telemetry_line(), "agy · Gemini 4 Neon · medium");
+        assert_eq!(w3.activity, "● Edited 2 files");
+
+        let mut d4 = detail("t1r", "", "pi", &["/bin/zsh", "-l"], None);
+        d4.foreground_argv = Some(vec!["pi".into(), "".into()]);
+        let w4 = infer_live_worker_slot(
+            &d4,
+            Some("작업 완료\n↑675k ↓68k (opencodex) glm-zcode/glm-5.3 • max\nctx 15%\n"),
+        )
+        .unwrap();
+        assert_eq!(w4.cli, "pi");
+        assert_eq!(w4.model.as_deref(), Some("glm-zcode/glm-5.3"));
+        assert_eq!(w4.effort.as_deref(), Some("max"));
+        assert_eq!(w4.telemetry_line(), "pi · glm-5.3 · max");
+        assert_eq!(w4.activity, "작업 완료");
     }
 
     #[test]
@@ -1944,6 +2174,9 @@ mod tests {
             activity: "a".into(),
             status: None,
             turn: None,
+            cli: short.split(':').next().unwrap_or(short).to_string(),
+            model: model.map(str::to_string),
+            effort: None,
         }
     }
 

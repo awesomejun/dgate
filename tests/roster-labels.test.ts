@@ -301,24 +301,20 @@ test('10. cli --watch --snapshot — Lead 카드는 관측 세션 호스트, Wor
     );
     assert.equal(res.status, 0, res.stderr);
     assert.ok(
-      res.stdout.includes('Lead · Antigravity (현재 세션)'),
-      'watched session host shown on Lead card'
-    );
-    assert.ok(
       res.stdout.includes('live session: Antigravity'),
-      'model flag honestly shows the watched session'
+      'bottom telemetry honestly shows the watched session'
     );
     assert.ok(
       !res.stdout.includes('Lead · pi:glm-5.3'),
       'headless roster lead label must not masquerade as the watched lead'
     );
     assert.ok(
-      res.stdout.includes('Verifier · pi:deepseek-v4.1-flash'),
-      'verifier keeps real roster worker model'
+      !res.stdout.includes('Verifier · pi:deepseek-v4.1-flash'),
+      'watch mode headers show role only without roster.json model'
     );
     assert.ok(
-      res.stdout.includes('Workers · pi:deepseek-v4.1-flash / devin'),
-      'workers keep real roster worker models'
+      !res.stdout.includes('Workers · pi:deepseek-v4.1-flash / devin'),
+      'watch mode legend shows role only without roster.json models'
     );
   } finally {
     fs.rmSync(base, { recursive: true, force: true });
