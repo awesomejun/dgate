@@ -108,6 +108,10 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
      --tool-class <file_read|code_search|file_edit|shell_exec|swarm_dispatch> \
      --fork <FORK_ID> --project <TARGET_REPO> --require-stdout-nonempty -- <CMD...>
    ```
+    - **워커 위임 원칙 (서브에이전트 금지)**: dgate로 진행하는 하위 작업(탐색·코딩·검증·자문)은 에이전트 내장 서브에이전트(`invoke_subagent` 등)로 위임하지 말고, 반드시 위 `dg wrap` 워커 또는 `hc run`으로 띄운 워커로 위임한다.
+      - 이유: 내장 서브에이전트는 리드와 같은 모델·쿼터를 쓰고(roster 역할별 모델·`agy` 0회 규칙 무력화), 격리 worktree가 없으며, `hc`/프로세스에 흔적이 없어 dgate TUI·GUI에 보이지 않는다(관측·통계·`dg backprop` 불가).
+      - 워커는 역할별 모델(roster.json)·격리 worktree·`--stall-ms` 감시·`fork` 통계가 모두 적용되고, `dgate-tui`/`dgate-gui` Workers 카드에 CLI·모델·effort·경과 시간이 실측으로 표시된다.
+      - 예외: 파일 1~2개를 읽고 결론만 필요한 극히 작은 질의는 리드가 직접 처리한다(서브에이전트도 쓰지 않는다).
 4. **검증·체크포인트·정리**:
    - 구조화 판정 반영(검증 실패/HEAD 불일치 시 `exit 3` 차단): `dg backprop --fork <FORK_ID> --verdict-file <PATH> --expected-head <SHA>`
    - 워크트리 삭제 전 체크포인트 강제(실패 시 `exit 4`·워크트리 보존): `dg worktree remove --worktree <PATH> --fork <FORK_ID>`
