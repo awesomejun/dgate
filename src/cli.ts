@@ -1032,6 +1032,10 @@ function main(): void {
   const liveRosterStateSignature = (): string =>
     JSON.stringify([
       state.rosterLabels,
+      state.phase,
+      state.mainSummary,
+      state.neonState,
+      state.advisorState,
       state.modelName,
       state.modelFlag,
       state.neonModelName,
@@ -1468,9 +1472,11 @@ function main(): void {
   // - demo: 80ms (~12.5fps)
   // - watch/live: 250ms (4fps) + 유휴(실행 중인 세션 0)일 때는 렌더 0회(0fps)로
   //   CellBuffer GC·터미널 컴포지터 부하와 인접 패인(pi 등) 입력 지연을 제거한다.
+  const IDLE_PHASES = new Set(['', '대기 중', '완료', '중단됨', 'idle', 'done']);
   const hasActiveMotion = (): boolean =>
     state.mode === 'demo' ||
     state.liveRunning ||
+    !IDLE_PHASES.has(state.phase.trim()) ||
     state.neonState === 'run' ||
     state.advisorState === '자문 중' ||
     (state.liveWorkers?.some((w) => w.status === 'running') ?? false);
