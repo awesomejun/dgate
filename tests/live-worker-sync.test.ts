@@ -1444,3 +1444,90 @@ test('21. createLiveRosterSyncer sessionId — 같은 레포 내 타 세션 워�
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+// ---- TUI 키 처리(applyKeyInput): watch 모드 입력 갇힘 방지·q/Q/ㅂ 종료·Space 일시정지 ----
+import { applyKeyInput, type KeyHandlerDeps } from '../src/cli.ts';
+import type { KeyEvent } from '../src/core/terminal.ts';
+import type { AppState } from '../src/types.ts';
+
+function makeKeyDeps(): { deps: KeyHandlerDeps; quits: { count: number }; prompts: string[] } {
+  const quits = { count: 0 };
+  const prompts: string[] = [];
+  const deps: KeyHandlerDeps = {
+    quitApp: () => { quits.count += 1; },
+    executePrompt: (s) => prompts.push(s),
+    filteredLogCount: () => 0,
+    layoutKind: () => 'full',
+    seekTo: () => {},
+    filterShortcut: () => {},
+  };
+  return { deps, quits, prompts };
+}
+
+const char = (value: string): KeyEvent => ({ kind: 'char', value });
+const tab = (): KeyEvent => ({ kind: 'tab', shift: false });
+
+test('watch 모드에서 패널 전체 Tab 순환 후 q/Q/ㅂ이 항상 종료를 호출한다', () => {
+  const panels = 6; // FOCUS_ORDER: advisor, main, neon, decision, swarm, logs
+  for (const q of ['q', 'Q', 'ㅂ']) {
+    for (let tabs = 0; tabs < panels; tabs += 1) {
+      const state = createInitialState('watch');
+      const { deps, quits } = makeKeyDeps();
+      for (let i = 0; i < tabs; i += 1) applyKeyInput(tab(), state, deps);
+      applyKeyInput(char(q), state, deps);
+      assert.equal(quits.count, 1, `Tab x${tabs} 후 ${q}는 즉시 종료`);
+      assert.equal(state.inputActive, false);
+    }
+  }
+});
+
+test('watch 모드에서 Tab→main→Enter는 inputActive에 갇히지 않고 q가 바로 종료한다', () => {
+  const state = createInitialState('watch');
+  const { deps, quits } = makeKeyDeps();
+  applyKeyInput(tab(), state, deps); // main -> neon
+  applyKeyInput({ kind: 'tab', shift: true }, state, deps); // neon -> main
+  assert.equal(state.focus, 'main');
+  applyKeyInput({ kind: 'enter' }, state, deps);
+  assert.equal(state.inputActive, false, '읽기전용 모드 Enter는 입력 모드 진입 금지');
+  applyKeyInput(char('q'), state, deps);
+  assert.equal(quits.count, 1);
+  // latestResponse가 있으면 response 모달이 열리고 ㅂ으로 닫힌다
+  const state2 = createInitialState('watch');
+  state2.latestResponse = '최신 응답';
+  const d2 = makeKeyDeps();
+  applyKeyInput({ kind: 'enter' }, state2, d2.deps);
+  assert.equal(state2.modal, 'response');
+  applyKeyInput(char('ㅂ'), state2, d2.deps);
+  assert.equal(state2.modal, 'none');
+});
+
+test('watch 모드에서 i는 입력 모드 진입이 차단되고, / 진입 후 Tab·Esc로 탈출되며 q가 종료한다', () => {
+  const state = createInitialState('watch');
+  const { deps, quits } = makeKeyDeps();
+  applyKeyInput(char('i'), state, deps);
+  assert.equal(state.inputActive, false, '읽기전용 모드에서 i 입력 모드 진입 금지');
+  applyKeyInput(char('/'), state, deps);
+  assert.equal(state.inputActive, true);
+  applyKeyInput(tab(), state, deps);
+  assert.equal(state.inputActive, false, 'Tab으로 입력 모드 탈출');
+  applyKeyInput(char('q'), state, deps);
+  assert.equal(quits.count, 1);
+  // Esc 탈출 경로
+  const state2 = createInitialState('watch');
+  const d2 = makeKeyDeps();
+  applyKeyInput(char('/'), state2, d2.deps);
+  applyKeyInput({ kind: 'escape' }, state2, d2.deps);
+  assert.equal(state2.inputActive, false);
+  applyKeyInput(char('Q'), state2, d2.deps);
+  assert.equal(d2.quits.count, 1);
+});
+
+test('watch 모드에서 Space가 state.paused를 true <-> false 로 토글한다', () => {
+  const state: AppState = createInitialState('watch');
+  const { deps } = makeKeyDeps();
+  assert.equal(state.paused, false);
+  applyKeyInput(char(' '), state, deps);
+  assert.equal(state.paused, true, 'Space 1회: 일시정지');
+  applyKeyInput(char(' '), state, deps);
+  assert.equal(state.paused, false, 'Space 2회: 재개');
+});

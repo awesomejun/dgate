@@ -310,6 +310,248 @@ DGATE TUI (Lead · Decision Gate · Workers · Verifier · Advisor)
 
 /** 라이브 역할 패널 동기화 추적 — 이 동기화가 덮어쓴 패널만 종료 시 깨끗하게 복귀시킨다. */
 /** 실측 경과(초)를 MM:SS(1시간↑ HH:MM:SS)로 — 음수·NaN은 0 클램프 */
+/**
+ * 종료 키 판정: 'q'와 대문자 'Q', 그리고 두벌식 한글 IME에서 q와 같은 물리 키인 'ㅂ'까지
+ * 종료로 인정한다. IME 켜짐 상태에서도 TUI 종료가 갇히지 않게 하기 위함.
+ */
+export function isQuitKey(ch: string): boolean {
+  return ch === 'q' || ch === 'Q' || ch === 'ㅂ';
+}
+
+export interface KeyHandlerDeps {
+  quitApp: () => void;
+  executePrompt: (input: string) => void;
+  filteredLogCount: () => number;
+  layoutKind: () => string;
+  seekTo: (t: number) => void;
+  filterShortcut: (ch: string) => void;
+  /** 데모 타임라인 동기화 등 일시정지 토글 부수효과(선택) */
+  onPauseToggle?: (paused: boolean) => void;
+}
+
+/**
+ * 순수 키 입력 처리기(main 내 handleKey의 로직을 추출해 단위 테스트 가능하게 함).
+ * - 읽기전용(watch/stream) 모드: Enter 'main' 포커스에서 inputActive 진입 금지,
+ *   latestResponse가 있으면 response 모달, 없으면 읽기전용 힌트 플래시.
+ * - inputActive 중 Tab/Esc로 탈출 보장(탈출 후 포커스 순환).
+ * - 종료·모달 닫기 키로 isQuitKey(q/Q/ㅂ) 지원.
+ */
+export function applyKeyInput(
+  ev: KeyEvent,
+  state: import('./types.ts').AppState,
+  deps: KeyHandlerDeps,
+): void {
+  const readOnly = state.mode === 'watch' || state.mode === 'stream';
+
+  if (ev.kind === 'ctrl-c') {
+    deps.quitApp();
+    return;
+  }
+
+  // 1. 프롬프트 입력 활성 모드 처리
+  if (state.inputActive) {
+    if (ev.kind === 'escape') {
+      state.inputActive = false;
+      return;
+    }
+    // Tab으로 입력 모드 탈출 — 어떤 경로로 입력 모드에 들어왔든 갇히지 않게 한다.
+    if (ev.kind === 'tab') {
+      state.inputActive = false;
+      cycleFocus(state, ev.shift);
+      return;
+    }
+    if (ev.kind === 'enter') {
+      const submitted = state.inputValue;
+      state.inputValue = '';
+      state.inputActive = false;
+      deps.executePrompt(submitted);
+      return;
+    }
+    if (ev.kind === 'backspace') {
+      const chars = Array.from(state.inputValue);
+      chars.pop();
+      state.inputValue = chars.join('');
+      return;
+    }
+    if (ev.kind === 'char') {
+      state.inputValue += ev.value;
+      return;
+    }
+    return;
+  }
+
+  // 2. 모달이 열려 있을 때의 키 처리
+  if (state.modal !== 'none') {
+    if (ev.kind === 'escape' || (ev.kind === 'char' && isQuitKey(ev.value))) {
+      state.modal = 'none';
+      return;
+    }
+    if (state.modal === 'logs') {
+      const filteredLen = deps.filteredLogCount();
+      if (ev.kind === 'arrow' && ev.dir === 'up') {
+        state.logScrollOffset = Math.min(Math.max(0, filteredLen - 3), state.logScrollOffset + 1);
+      } else if (ev.kind === 'arrow' && ev.dir === 'down') {
+        state.logScrollOffset = Math.max(0, state.logScrollOffset - 1);
+      }
+    }
+    if (state.modal === 'response') {
+      if (ev.kind === 'arrow' && ev.dir === 'up') {
+        state.responseScrollOffset = Math.max(0, state.responseScrollOffset - 1);
+      } else if (ev.kind === 'arrow' && ev.dir === 'down') {
+        state.responseScrollOffset += 1;
+      } else if (ev.kind === 'page' && ev.dir === 'up') {
+        state.responseScrollOffset = Math.max(0, state.responseScrollOffset - 10);
+      } else if (ev.kind === 'page' && ev.dir === 'down') {
+        state.responseScrollOffset += 10;
+      } else if (ev.kind === 'char' && (ev.value === '/' || ev.value === 'i')) {
+        state.modal = 'none';
+        if (ev.value === 'i' && readOnly) {
+          flashStatus(state, '읽기전용 모드에서는 프롬프트 입력을 사용할 수 없습니다', 3000);
+          return;
+        }
+        state.inputActive = true;
+        if (ev.value === '/') state.inputValue = '/';
+        return;
+      }
+    }
+    if (ev.kind === 'char') {
+      deps.filterShortcut(ev.value);
+    }
+    return;
+  }
+
+  // 3. 기본 관제 네비게이션 모드 처리
+  if (ev.kind === 'tab') {
+    cycleFocus(state, ev.shift);
+    return;
+  }
+
+  if (ev.kind === 'enter') {
+    switch (state.focus) {
+      case 'advisor':
+        state.modal = 'advisor';
+        break;
+      case 'main':
+        if (readOnly) {
+          // 읽기전용 모드에서 Enter가 입력 모드로 빠지면 q/Tab이 모두 갇히는 버그 방지.
+          if (state.latestResponse.trim()) {
+            state.modal = 'response';
+          } else {
+            flashStatus(state, '읽기전용 모드입니다 (r: 최신 응답, /: 필터)', 3000);
+          }
+        } else {
+          state.inputActive = true;
+        }
+        break;
+      case 'neon':
+        state.modal = 'neon';
+        break;
+      case 'decision':
+        state.modal = 'decision';
+        break;
+      case 'swarm':
+        state.modal = 'swarm';
+        break;
+      case 'logs':
+        state.modal = 'logs';
+        break;
+    }
+    return;
+  }
+
+  if (ev.kind === 'arrow') {
+    if (ev.dir === 'up') {
+      const maxOff = Math.max(0, deps.filteredLogCount() - 3);
+      state.logScrollOffset = Math.min(maxOff, state.logScrollOffset + 1);
+    } else if (ev.dir === 'down') {
+      state.logScrollOffset = Math.max(0, state.logScrollOffset - 1);
+    } else if (ev.dir === 'left' && state.mode === 'demo') {
+      const cur = state.simTime;
+      state.paused = true;
+      deps.seekTo(cur - 2);
+      flashStatus(state, `타임라인 ◀ t=${state.simTime.toFixed(1)}s (일시정지)`);
+    } else if (ev.dir === 'right' && state.mode === 'demo') {
+      const cur = state.simTime;
+      state.paused = true;
+      deps.seekTo(cur + 2);
+      flashStatus(state, `타임라인 ▶ t=${state.simTime.toFixed(1)}s (일시정지)`);
+    }
+    return;
+  }
+
+  if (ev.kind === 'char') {
+    const ch = ev.value;
+    if (isQuitKey(ch)) {
+      deps.quitApp();
+      return;
+    }
+    if (ch === '?' || ch === 'h') {
+      state.modal = 'help';
+      return;
+    }
+    if (ch === '/' || ch === 'i') {
+      if (ch === 'i' && readOnly) {
+        flashStatus(state, '읽기전용 모드에서는 프롬프트 입력을 사용할 수 없습니다', 3000);
+        return;
+      }
+      state.inputActive = true;
+      if (ch === '/') state.inputValue = '/';
+      return;
+    }
+    if (ch === ' ') {
+      if (state.mode === 'demo') {
+        if (state.paused) {
+          state.paused = false;
+          deps.onPauseToggle?.(false);
+          flashStatus(state, '▶ 데모 재생 재개');
+        } else {
+          state.paused = true;
+          deps.onPauseToggle?.(true);
+          flashStatus(state, '⏸ 데모 일시정지 (←/→ 탐색 가능)');
+        }
+      } else {
+        // watch/stream/live: 애니메이션·경과시간 흐름 일시정지 토글
+        state.paused = !state.paused;
+        deps.onPauseToggle?.(state.paused);
+        flashStatus(state, state.paused ? '⏸ 화면 일시정지 (Space로 재개)' : '▶ 화면 재개');
+      }
+      return;
+    }
+    if (ch === 's') {
+      state.modal = 'swarm';
+      return;
+    }
+    if (ch === 'n') {
+      state.modal = 'neon';
+      return;
+    }
+    if (ch === 'c') {
+      state.modal = 'advisor';
+      return;
+    }
+    if (ch === 'd') {
+      state.modal = 'decision';
+      return;
+    }
+    if (ch === 'l') {
+      state.modal = 'logs';
+      return;
+    }
+    if (ch === 'r') {
+      state.modal = 'response';
+      return;
+    }
+
+    // Compact 레이아웃일 경우 1~4는 탭 전환을 겸함
+    if (deps.layoutKind() === 'compact' && (ch === '1' || ch === '2' || ch === '3' || ch === '4')) {
+      state.compactTab = (Number(ch) - 1) as import('./types.ts').CompactTab;
+      return;
+    }
+
+    deps.filterShortcut(ch);
+  }
+}
+
 export function formatElapsedMmss(secs: number): string {
   if (!Number.isFinite(secs) || secs < 0) secs = 0;
   const total = Math.floor(secs);
@@ -971,188 +1213,26 @@ function main(): void {
   }
 
   const handleKey = (ev: KeyEvent) => {
-    if (ev.kind === 'ctrl-c') {
-      quitApp();
-      return;
-    }
-
-    // 1. 프롬프트 입력 활성 모드 처리
-    if (state.inputActive) {
-      if (ev.kind === 'escape') {
-        state.inputActive = false;
-        return;
-      }
-      if (ev.kind === 'enter') {
-        const submitted = state.inputValue;
-        state.inputValue = '';
-        state.inputActive = false;
-        executePromptCommand(submitted, state, demoCtrl, seekTo, quitApp, liveHooks);
-        return;
-      }
-      if (ev.kind === 'backspace') {
-        const chars = Array.from(state.inputValue);
-        chars.pop();
-        state.inputValue = chars.join('');
-        return;
-      }
-      if (ev.kind === 'char') {
-        state.inputValue += ev.value;
-        return;
-      }
-      return;
-    }
-
-    // 2. 모달이 열려 있을 때의 키 처리
-    if (state.modal !== 'none') {
-      if (ev.kind === 'escape' || (ev.kind === 'char' && ev.value === 'q')) {
-        state.modal = 'none';
-        return;
-      }
-      if (state.modal === 'logs') {
-        const filteredLen = getFilteredLogs(state).length;
-        if (ev.kind === 'arrow' && ev.dir === 'up') {
-          state.logScrollOffset = Math.min(Math.max(0, filteredLen - 3), state.logScrollOffset + 1);
-        } else if (ev.kind === 'arrow' && ev.dir === 'down') {
-          state.logScrollOffset = Math.max(0, state.logScrollOffset - 1);
+    applyKeyInput(ev, state, {
+      quitApp,
+      executePrompt: (input) =>
+        executePromptCommand(input, state, demoCtrl, seekTo, quitApp, liveHooks),
+      filteredLogCount: () => getFilteredLogs(state).length,
+      layoutKind: () => {
+        const { cols, rows } = screen.getSize();
+        return computeLayout(opts.colsOverride ?? cols, opts.rowsOverride ?? rows).kind;
+      },
+      seekTo,
+      filterShortcut: applyFilterShortcut,
+      onPauseToggle: (paused) => {
+        if (state.mode !== 'demo') return;
+        if (paused) {
+          timeOffsetSec = state.simTime;
+        } else {
+          baseWallMs = Date.now();
         }
-      }
-      if (state.modal === 'response') {
-        if (ev.kind === 'arrow' && ev.dir === 'up') {
-          state.responseScrollOffset = Math.max(0, state.responseScrollOffset - 1);
-        } else if (ev.kind === 'arrow' && ev.dir === 'down') {
-          state.responseScrollOffset += 1;
-        } else if (ev.kind === 'page' && ev.dir === 'up') {
-          state.responseScrollOffset = Math.max(0, state.responseScrollOffset - 10);
-        } else if (ev.kind === 'page' && ev.dir === 'down') {
-          state.responseScrollOffset += 10;
-        } else if (ev.kind === 'char' && (ev.value === '/' || ev.value === 'i')) {
-          state.modal = 'none';
-          state.inputActive = true;
-          if (ev.value === '/') state.inputValue = '/';
-          return;
-        }
-      }
-      if (ev.kind === 'char') {
-        applyFilterShortcut(ev.value);
-      }
-      return;
-    }
-
-    // 3. 기본 관제 네비게이션 모드 처리
-    if (ev.kind === 'tab') {
-      cycleFocus(state, ev.shift);
-      return;
-    }
-
-    if (ev.kind === 'enter') {
-      switch (state.focus) {
-        case 'advisor':
-          state.modal = 'advisor';
-          break;
-        case 'main':
-          state.inputActive = true;
-          break;
-        case 'neon':
-          state.modal = 'neon';
-          break;
-        case 'decision':
-          state.modal = 'decision';
-          break;
-        case 'swarm':
-          state.modal = 'swarm';
-          break;
-        case 'logs':
-          state.modal = 'logs';
-          break;
-      }
-      return;
-    }
-
-    if (ev.kind === 'arrow') {
-      if (ev.dir === 'up') {
-        const maxOff = Math.max(0, getFilteredLogs(state).length - 3);
-        state.logScrollOffset = Math.min(maxOff, state.logScrollOffset + 1);
-      } else if (ev.dir === 'down') {
-        state.logScrollOffset = Math.max(0, state.logScrollOffset - 1);
-      } else if (ev.dir === 'left' && state.mode === 'demo') {
-        const cur = state.simTime;
-        state.paused = true;
-        seekTo(cur - 2);
-        flashStatus(state, `타임라인 ◀ t=${state.simTime.toFixed(1)}s (일시정지)`);
-      } else if (ev.dir === 'right' && state.mode === 'demo') {
-        const cur = state.simTime;
-        state.paused = true;
-        seekTo(cur + 2);
-        flashStatus(state, `타임라인 ▶ t=${state.simTime.toFixed(1)}s (일시정지)`);
-      }
-      return;
-    }
-
-    if (ev.kind === 'char') {
-      const ch = ev.value;
-      if (ch === 'q') {
-        quitApp();
-        return;
-      }
-      if (ch === '?' || ch === 'h') {
-        state.modal = 'help';
-        return;
-      }
-      if (ch === '/' || ch === 'i') {
-        state.inputActive = true;
-        if (ch === '/') state.inputValue = '/';
-        return;
-      }
-      if (ch === ' ') {
-        if (state.mode === 'demo') {
-          if (state.paused) {
-            baseWallMs = Date.now();
-            timeOffsetSec = state.simTime;
-            state.paused = false;
-            flashStatus(state, '▶ 데모 재생 재개');
-          } else {
-            timeOffsetSec = state.simTime;
-            state.paused = true;
-            flashStatus(state, '⏸ 데모 일시정지 (←/→ 탐색 가능)');
-          }
-        }
-        return;
-      }
-      if (ch === 's') {
-        state.modal = 'swarm';
-        return;
-      }
-      if (ch === 'n') {
-        state.modal = 'neon';
-        return;
-      }
-      if (ch === 'c') {
-        state.modal = 'advisor';
-        return;
-      }
-      if (ch === 'd') {
-        state.modal = 'decision';
-        return;
-      }
-      if (ch === 'l') {
-        state.modal = 'logs';
-        return;
-      }
-      if (ch === 'r') {
-        state.modal = 'response';
-        return;
-      }
-
-      // Compact 레이아웃일 경우 1~4는 탭 전환을 겸함
-      const { cols, rows } = screen.getSize();
-      const curLayout = computeLayout(opts.colsOverride ?? cols, opts.rowsOverride ?? rows);
-      if (curLayout.kind === 'compact' && (ch === '1' || ch === '2' || ch === '3' || ch === '4')) {
-        state.compactTab = (Number(ch) - 1) as CompactTab;
-        return;
-      }
-
-      applyFilterShortcut(ch);
-    }
+      },
+    });
   };
 
   const applyFilterShortcut = (ch: string) => {
@@ -1207,9 +1287,14 @@ function main(): void {
         applyDemoTime(state, timeOffsetSec + elapsed, demoCtrl);
       }
     } else {
-      // 라이브 스트림 모드에서도 와이어 흐름과 커서 점멸이 살아 움직이도록 시간 전진
-      state.simTime += 0.08;
-      refreshLiveElapsed();
+      // 라이브 스트림 모드에서도 와이어 흐름과 커서 점멸이 살아 움직이도록 시간 전진.
+      // 일시정지 중에는 시간 전진과 렌더를 건너뛴다(키 입력은 stdin 핸들러에서 즉시 렌더).
+      if (!state.paused) {
+        state.simTime += 0.08;
+        refreshLiveElapsed();
+        renderNow();
+      }
+      return;
     }
     renderNow();
   }, 80);
