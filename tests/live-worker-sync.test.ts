@@ -1849,3 +1849,22 @@ test('watch + liveWorkers=[] — 정직한 단일 빈 상태 박스(자리표 3�
   assert.ok(demoText.includes('search'), '데모 모드 기존 cards 폴백 유지');
   assert.ok(!demoText.includes('현재 실행 중인 하위 워커가 없습니다'), '데모에는 빈 상태 미적용');
 });
+
+test('watch 모드 effort 진실성 — 미확인 effort는 숨기고 명시 지정 시에만 표시한다', () => {
+  const watch = createInitialState('watch');
+  assert.equal(watch.effortKnown, false);
+  const watchText = renderFrame(watch, 148, 43).toPlainString();
+  assert.ok(!watchText.includes('effort '), 'watch 기본 모드에서 허위 effort 게이지 미노출');
+
+  // 사용자가 --effort medium 명시 또는 이벤트 수신 시에는 표시
+  watch.effort = 'medium';
+  watch.effortKnown = true;
+  const explicitText = renderFrame(watch, 148, 43).toPlainString();
+  assert.ok(explicitText.includes('effort ▮▮▯▯ medium'), '명시 effort는 정확히 표시');
+
+  // demo 모드는 자체 시뮬레이션 effort를 표시
+  const demo = createInitialState('demo');
+  assert.equal(demo.effortKnown, true);
+  const demoText = renderFrame(demo, 148, 43).toPlainString();
+  assert.ok(demoText.includes('effort ▮▮▮▯ high'), 'demo 모드 effort 표시 유지');
+});

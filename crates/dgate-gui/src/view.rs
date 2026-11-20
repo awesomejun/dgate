@@ -1043,7 +1043,7 @@ impl DashboardView {
                         .text_size(px(10.))
                         .text_color(MUTED)
                         .truncate()
-                        .child(format!("effort ▮▮▮▮ · profile={}", snap.profile_name)),
+                        .child(format!("profile={}", snap.profile_name)),
                 );
         } else {
             for (i, w) in parts.leads.iter().enumerate() {

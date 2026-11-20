@@ -68,7 +68,10 @@ function renderArgonView(buf: CellBuffer, state: AppState, cols: number, rows: n
   buf.fillRect({ x: 0, y: 0, w: cols, h: 1 }, THEME.bgChrome);
   buf.setChar(1, 0, '◈', THEME.orange, THEME.bgChrome, true);
   buf.writeText(3, 0, 'LEAD · ORCHESTRATOR', THEME.orange, THEME.bgChrome, true);
-  const modelTag = `${state.rosterLabels.lead} (${effortToGauge(state.effort)})`;
+  const modelTag =
+    state.effortKnown !== false
+      ? `${state.rosterLabels.lead} (${effortToGauge(state.effort)})`
+      : state.rosterLabels.lead;
   buf.writeRight(0, 0, cols - 2, modelTag, THEME.chromeFg, THEME.bgChrome);
 
   // 상단 요약 박스 (Phase & Builds)

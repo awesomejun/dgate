@@ -651,12 +651,16 @@ function renderMainPanel(buf: CellBuffer, state: AppState, L: FullLayout): void 
     buf.writeCentered(ix, cy++, iw, state.mainSummary, THEME.fg, panelBg, false);
   }
   if (cy < R.y + R.h - 1) {
-    const phaseSegs: Array<{ text: string; fg: RGB; bg: RGB; bold?: boolean }> = [
-      { text: 'effort ', fg: THEME.muted, bg: panelBg },
-      { text: effortToGauge(state.effort), fg: THEME.orange, bg: panelBg, bold: true },
-      { text: ' · ', fg: THEME.muted, bg: panelBg },
-      { text: state.phase, fg: THEME.fg, bg: panelBg },
-    ];
+    const phaseSegs: Array<{ text: string; fg: RGB; bg: RGB; bold?: boolean }> = [];
+    // watch 모드에서 외부 세션의 실시간 effort가 확인되지 않으면 허위 게이지를 출력하지 않는다.
+    if (state.effortKnown !== false) {
+      phaseSegs.push(
+        { text: 'effort ', fg: THEME.muted, bg: panelBg },
+        { text: effortToGauge(state.effort), fg: THEME.orange, bg: panelBg, bold: true },
+        { text: ' · ', fg: THEME.muted, bg: panelBg }
+      );
+    }
+    phaseSegs.push({ text: state.phase, fg: THEME.fg, bg: panelBg });
     // Lead 활성 시 위상 배지 옆 회전 스피너 — 패널이 살아 있음을 즉시 보여준다(대기 시 정지)
     if (isLeadActive(state)) {
       phaseSegs.push({
@@ -1376,10 +1380,11 @@ function renderCompactLayout(buf: CellBuffer, state: AppState, L: CompactLayout)
     const ix = B.x + 2;
     const iw = B.w - 4;
     let cy = B.y + 1;
+    const effortSuffix = state.effortKnown !== false ? ` (${effortToGauge(state.effort)})` : '';
     buf.writeText(
       ix,
       cy++,
-      `Lead 메인: ${state.mainSummary} (${effortToGauge(state.effort)})`,
+      `Lead 메인: ${state.mainSummary}${effortSuffix}`,
       THEME.orange,
       THEME.bg,
       true,

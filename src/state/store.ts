@@ -249,6 +249,7 @@ export function createInitialState(mode: RunMode = 'demo'): AppState {
         ? '/ 또는 i 를 눌러 에이전트에 작업을 지시하세요'
         : '코드를 수정하고 테스트를 실행',
     effort: 'high',
+    effortKnown: !isWatch,
     phase: isWatch ? '세션 감시' : isLive ? '대기 중' : '탐색',
     backSummary: isLive
       ? '응답 완료 시 r 키로 전문 확인'
@@ -397,7 +398,7 @@ export function effortToGauge(effort: EffortLevel): string {
     case 'medium':
       return '▮▮▯▯ medium';
     case 'high':
-      return '▮▮▮▮ high';
+      return '▮▮▮▯ high';
     case 'max':
       return '▮▮▮▮ max+';
   }

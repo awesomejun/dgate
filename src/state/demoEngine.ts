@@ -468,6 +468,7 @@ export function executePromptCommand(
       case 'effort': {
         if (arg === 'low' || arg === 'medium' || arg === 'high' || arg === 'max') {
           state.effort = arg as EffortLevel;
+          state.effortKnown = true;
           if (state.mode === 'live') {
             state.modelName = applyEffortToModelName(state.modelName, state.effort);
             state.modelFlag = `--model ${state.modelName}`;

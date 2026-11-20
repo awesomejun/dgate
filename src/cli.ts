@@ -819,6 +819,7 @@ function main(): void {
   }
   if (opts.effort) {
     state.effort = opts.effort;
+    state.effortKnown = true;
   }
 
   // watch 모드 진실성: 관측 중인 transcript의 실제 호스트(Antigravity/Claude/Codex)를

@@ -143,6 +143,8 @@ export interface AppState {
   // Lead 메인 & 리턴 패널
   mainSummary: string;
   effort: EffortLevel;
+  /** watch 모드에서 외부 세션의 실시간 effort를 모를 때 false — 허위 게이지 출력 차단 */
+  effortKnown?: boolean;
   phase: string;
   backSummary: string;
 

@@ -38,7 +38,10 @@ export function applyStreamEvent(state: AppState, ev: StreamEvent): void {
       if (ev.model !== undefined) {
         state.modelFlag = ev.model.startsWith('--') ? ev.model : `--model ${ev.model}`;
       }
-      if (ev.effort !== undefined) state.effort = ev.effort;
+      if (ev.effort !== undefined) {
+        state.effort = ev.effort;
+        state.effortKnown = true;
+      }
       return;
     }
     case 'phase': {
