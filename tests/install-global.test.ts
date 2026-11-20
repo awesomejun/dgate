@@ -31,28 +31,43 @@ test('--dry-run creates 0 files', () => {
 
 test('install creates 4 executable wrappers; dg --help and dgate-tui --help exit 0', () => {
   const bin = tmpBinDir();
-  const { status, stderr } = runInstaller(['--bin-dir', bin]);
+  // --platform posix: Windows 호스트에서 네이티브 실행해도 .cmd가 아니라 POSIX 래퍼를 검증한다.
+  const { status, stderr } = runInstaller(['--bin-dir', bin, '--platform', 'posix']);
   assert.equal(status, 0, stderr);
   for (const name of WRAPPER_NAMES) {
     const file = path.join(bin, name);
     assert.ok(fs.existsSync(file), `missing ${name}`);
-    assert.ok(fs.statSync(file).mode & 0o111, `${name} not executable`);
+    // 실행 비트 검사는 POSIX 호스트에서만 유효 — win32 stat은 항상 0o666를 보고한다.
+    if (process.platform !== 'win32') {
+      assert.ok(fs.statSync(file).mode & 0o111, `${name} not executable`);
+    }
     const content = fs.readFileSync(file, 'utf8');
     assert.ok(content.split('\n')[1] === '# dgate-global-wrapper', `${name} missing marker`);
   }
-  for (const cmd of ['dg', 'dgate-tui']) {
-    const r = spawnSync(path.join(bin, cmd), ['--help'], { encoding: 'utf8' });
-    assert.equal(r.status, 0, `${cmd} --help failed: ${r.stderr}`);
+  if (process.platform === 'win32') {
+    // win32 호스트 — POSIX sh 래퍼는 실행 불가: 같은 인스톨러로 .cmd 래퍼를 만들어 그것을 실행 검증한다.
+    const binCmd = tmpBinDir();
+    assert.equal(runInstaller(['--bin-dir', binCmd, '--platform', 'win32']).status, 0);
+    for (const cmd of ['dg', 'dgate-tui']) {
+      const r = spawnSync('cmd.exe', ['/c', path.join(binCmd, `${cmd}.cmd`), '--help'], { encoding: 'utf8' });
+      assert.equal(r.status, 0, `${cmd}.cmd --help failed: ${r.stderr}`);
+    }
+    fs.rmSync(binCmd, { recursive: true, force: true });
+  } else {
+    for (const cmd of ['dg', 'dgate-tui']) {
+      const r = spawnSync(path.join(bin, cmd), ['--help'], { encoding: 'utf8' });
+      assert.equal(r.status, 0, `${cmd} --help failed: ${r.stderr}`);
+    }
   }
   fs.rmSync(bin, { recursive: true, force: true });
 });
 
 test('--uninstall removes ONLY dgate wrappers, leaves unrelated files untouched', () => {
   const bin = tmpBinDir();
-  assert.equal(runInstaller(['--bin-dir', bin]).status, 0);
+  assert.equal(runInstaller(['--bin-dir', bin, '--platform', 'posix']).status, 0);
   const userFile = path.join(bin, 'my-own-tool');
   fs.writeFileSync(userFile, '#!/bin/sh\necho hi\n', { mode: 0o755 });
-  const { status, stderr } = runInstaller(['--bin-dir', bin, '--uninstall']);
+  const { status, stderr } = runInstaller(['--bin-dir', bin, '--platform', 'posix', '--uninstall']);
   assert.equal(status, 0, stderr);
   for (const name of WRAPPER_NAMES) {
     assert.ok(!fs.existsSync(path.join(bin, name)), `${name} still present`);
@@ -65,7 +80,7 @@ test('refuses to overwrite a non-dgate file with the same name', () => {
   const bin = tmpBinDir();
   const file = path.join(bin, 'dg');
   fs.writeFileSync(file, '#!/bin/sh\necho precious\n', { mode: 0o755 });
-  const { status, stderr } = runInstaller(['--bin-dir', bin]);
+  const { status, stderr } = runInstaller(['--bin-dir', bin, '--platform', 'posix']);
   assert.equal(status, 1);
   assert.ok(stderr.includes('Refusing to overwrite'), stderr);
   assert.equal(fs.readFileSync(file, 'utf8'), '#!/bin/sh\necho precious\n');
@@ -148,8 +163,8 @@ test('invalid --platform value exits 2 with usage', () => {
 
 test('posix: re-running installer over managed wrappers is idempotent', () => {
   const bin = tmpBinDir();
-  assert.equal(runInstaller(['--bin-dir', bin]).status, 0);
-  const { status, stderr } = runInstaller(['--bin-dir', bin]);
+  assert.equal(runInstaller(['--bin-dir', bin, '--platform', 'posix']).status, 0);
+  const { status, stderr } = runInstaller(['--bin-dir', bin, '--platform', 'posix']);
   assert.equal(status, 0, stderr);
   for (const name of WRAPPER_NAMES) {
     assert.ok(fs.existsSync(path.join(bin, name)));

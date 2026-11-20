@@ -1042,9 +1042,10 @@ function main(): void {
     state.liveSessionCounts = computeLiveSessionCounts(merged.workers);
     state.neonModelName = merged.verifierModelName;
     state.neonModelFlag = merged.verifierModelFlag;
-    // lead는 라이브 리드 워커가 있을 때만(관측 중 세션 배지 우선) 반영
-    const hasLiveLead = merged.workers.some((w) => w.slot === 'lead');
-    if (hasLiveLead && !watchedLeadLabel) {
+    // lead — 관측 중(watchedLead)이 아니면 매 틱 merged 값으로 갱신한다:
+    // 라이브 리드 세션이 있으면 제목·modelName/modelFlag 모두 그 세션 기준이고,
+    // 없으면 roster.json 대기 배치로 깨끗히 원복된다(스테일 --model 잔류 방지).
+    if (!watchedLeadLabel) {
       state.modelName = merged.leadModelName;
       state.modelFlag = merged.leadModelFlag;
     }

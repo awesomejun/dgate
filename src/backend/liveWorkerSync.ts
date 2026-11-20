@@ -510,11 +510,19 @@ export function mergeLiveRosterLabels(
     }
   }
 
+  // 라이브 리드 세션이 있으면 제목(labels.lead)도 그 세션 기준으로 맞춘다 —
+  // 제목만 roster.json 배지를 남기면 하단 modelFlag와 출처가 어긋난다.
+  // watchedLead 우선이므로 이 덮어쓰기는 관측 중 세션 배지를 침범하지 않는다.
+  if (leadWorker) labels.lead = leadWorker.shortModel;
+
   const leadModelName = labels.lead;
-  const leadModelFlag =
-    leadWorker && leadWorker.modelName && leadWorker.modelName !== leadWorker.shortModel
+  // 라이브 리드: 실측 모델이 있으면 --model 원문, 에이전트명만 있으면 live session 배지,
+  // 리드 부재 시에는 roster.json 대기 배지로 깨끗히 원복(스테일 --model 잔류 방지).
+  const leadModelFlag = leadWorker
+    ? leadWorker.modelName && leadWorker.modelName !== leadWorker.shortModel
       ? `--model ${leadWorker.modelName}`
-      : labels.lead;
+      : `live session: ${leadWorker.shortModel}`
+    : labels.lead;
   const verifierModelName = labels.verifier;
   const verifierModelFlag =
     verifierWorker && verifierWorker.modelName && verifierWorker.modelName !== verifierWorker.shortModel
