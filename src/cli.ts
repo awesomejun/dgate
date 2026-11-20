@@ -44,9 +44,57 @@ import { computeLayout } from './ui/layout.ts';
 import { renderFrame } from './ui/renderApp.ts';
 import { renderQuadRoleFrame } from './ui/renderQuadRole.ts';
 import { QuadBusClient, QuadBusServer, type QuadMessage } from './ipc/quadBus.ts';
-import { resolveDbPath } from './decision/db.ts';
+import { openDbSafe, resolveDbPath } from './decision/db.ts';
 import { loadRosterConfig, resolveRosterProfile } from './decision/roster.ts';
+import { redactSecrets } from './decision/redact.ts';
 import { readTelemetrySnapshot } from './decision/telemetry.ts';
+
+/**
+ * watch 모드에서 트랜스크립트 파일을 자동 연결해도 되는지 판정하는 순수 헬퍼.
+ * 명시적 `--watch <file>`(filePath) 또는 `--watch-dir <dir>`이 있을 때만 true —
+ * 인자 없는 `--watch`는 전역 transcript.jsonl(다른 프로젝트 소속 포함)을 임의로
+ * 붙이지 않고 결정 DB + hc 라이브 세션만 SSOT로 삼는다.
+ */
+export function shouldAutoAttachTranscript(opts: {
+  filePath?: string | null;
+  watchDir?: string | null;
+}): boolean {
+  return Boolean(opts.filePath || opts.watchDir);
+}
+
+/**
+ * 순수 DB+hc 관제 모드에서 '세션 기록'에 실제 결정 DB의 최근 이벤트를 올린다.
+ * 읽기전용 연결(readOnly + busy timeout)이며, 텍스트는 redactSecrets로 스크럽하고
+ * DB 미존재·오류 시 조용히 건너뛴다(가짜 기록을 만들지 않는다).
+ */
+function appendRecentDecisionEvents(state: AppState, dbPath: string, limit = 6): void {
+  if (!fs.existsSync(dbPath)) return;
+  const db = openDbSafe(dbPath, { readOnly: true, busyTimeoutMs: 1000 });
+  if (!db) return;
+  try {
+    const rows = db
+      .prepare(
+        `SELECT source, tool_name, ok, error_snippet, created_at_ms
+           FROM decision_events ORDER BY event_id DESC LIMIT ?`
+      )
+      .all(limit) as Array<{ source: string; tool_name: string; ok: number; error_snippet: string | null; created_at_ms: number }>;
+    for (const row of rows.reverse()) {
+      const d = new Date(Number(row.created_at_ms));
+      const time = [d.getHours(), d.getMinutes(), d.getSeconds()]
+        .map((n) => String(n).padStart(2, '0'))
+        .join(':');
+      const ok = row.ok === 1;
+      const body = ok
+        ? `[${row.source}] ${row.tool_name} — ok`
+        : `[${row.source}] ${row.tool_name} — ${row.error_snippet ?? 'fail'}`;
+      appendLog(state, 'DB', ok ? 'green' : 'red', redactSecrets(body).slice(0, 160), time);
+    }
+  } catch {
+    // 결정 DB 읽기 실패 시 빈 기록 유지 — 추측 기록을 채우지 않는다.
+  } finally {
+    db.close();
+  }
+}
 
 interface CliOptions {
   mode: RunMode;
@@ -838,8 +886,10 @@ function main(): void {
   if (opts.mode === 'demo') {
     applyDemoTime(state, opts.initialTime, demoCtrl);
   } else if (opts.watchMode || opts.mode === 'watch') {
-    if (!opts.filePath) {
-      opts.filePath = findLatestTranscriptPath(opts.watchDir ?? undefined);
+    // 자동 attach는 명시적 watchDir 스코프가 있을 때만 — 인자 없는 --watch는
+    // 전역 transcript.jsonl(타 프로젝트 포함)을 임의로 붙이지 않는다(DB+hc SSOT).
+    if (!opts.filePath && opts.watchDir) {
+      opts.filePath = findLatestTranscriptPath(opts.watchDir);
     }
     applyWatchedLeadLabel(opts.filePath);
     if (opts.filePath && (opts.snapshotPlain || opts.snapshotAnsi)) {
@@ -1193,8 +1243,8 @@ function main(): void {
     if (!state.liveSessionCounts) {
       state.liveSessionCounts = { lead: 0, workers: 0, verifiers: 0, advisors: 0 };
     }
-    if (!opts.filePath) {
-      opts.filePath = findLatestTranscriptPath(opts.watchDir ?? undefined);
+    if (!opts.filePath && shouldAutoAttachTranscript(opts)) {
+      opts.filePath = findLatestTranscriptPath(opts.watchDir!);
     }
     if (opts.filePath) {
       applyWatchedLeadLabel(opts.filePath);
@@ -1204,7 +1254,38 @@ function main(): void {
       appendLog(state, 'Lead', 'orange', `세션 트랜스크립트 관제 연결됨 (${sessShort})`);
       flashStatus(state, `실시간 관제 연결: 세션 ${sessShort} (transcript.jsonl)`, 5000);
     } else {
-      flashStatus(state, '활성 세션 트랜스크립트를 찾지 못했습니다. agy 실행 후 다시 시도하세요.', 6000);
+      // 순수 DB+hc 관제 모드(트랜스크립트 미부착): 어떤 가짜 진행률·타 프로젝트
+      // 텍스트도 없이 침착한 대기 상태로 초기화하고, '세션 기록'에는 결정 DB의
+      // 실제 최근 이벤트(읽기전용·시크릿 리덕션)만 올린다.
+      state.phase = '대기 중';
+      state.neonState = 'idle';
+      state.advisorState = '대기 중';
+      state.activeTrigger = -1;
+      state.cards = [
+        {
+          name: 'explore',
+          model: state.rosterLabels.explore,
+          progress: 0,
+          status: 'idle',
+          description: '활성 워커 대기 중',
+        },
+        {
+          name: 'coder',
+          model: state.rosterLabels.coder,
+          progress: 0,
+          status: 'idle',
+          description: '활성 워커 대기 중',
+        },
+        {
+          name: 'verifier',
+          model: state.rosterLabels.verifier,
+          progress: 0,
+          status: 'idle',
+          description: '활성 워커 대기 중',
+        },
+      ];
+      appendRecentDecisionEvents(state, decisionDbPath);
+      flashStatus(state, '순수 DB+hc 관제 모드: 결정 DB·활성 hc 세션만 표시합니다', 5000);
     }
 
     if (opts.watchMode) {
@@ -1216,8 +1297,10 @@ function main(): void {
         getWatchedLead: () => watchedLeadLabel,
         onUpdate: (merged) => applyLiveRosterUpdate(merged),
       });
-      checkNewSessionTimer = setInterval(() => {
-        const latest = findLatestTranscriptPath(opts.watchDir ?? undefined);
+      // 새 세션 자동 감지 트레일러 헌팅도 명시적 watchDir이 있을 때만 — 인자 없는
+      // --watch에서 전역 transcript.jsonl을 주기적으로 뒤지지 않는다.
+      if (opts.watchDir) checkNewSessionTimer = setInterval(() => {
+        const latest = findLatestTranscriptPath(opts.watchDir);
         if (latest && latest !== opts.filePath) {
           opts.filePath = latest;
           applyWatchedLeadLabel(latest);

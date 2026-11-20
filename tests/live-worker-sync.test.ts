@@ -1617,3 +1617,30 @@ test('filterSubordinateWorkers — Workers 카드에는 explore/coder만 남는�
   );
   assert.ok(filtered.every((w) => w.slot === 'explore' || w.slot === 'coder'));
 });
+
+// ── w-tui-truthful-ssot: 기본 watch 모드의 전역 트랜스크립트 자동 attach 금지 ──
+// 인자 없는 `--watch`는 어떤 transcript.jsonl도 자동으로 붙이지 않아야 한다
+// (다른 프로젝트의 전역 트랜스크립트가 새어 들어오는 것을 원천 차단).
+import { shouldAutoAttachTranscript } from '../src/cli.ts';
+
+test('plain --watch (no file, no dir) never auto-attaches a transcript', () => {
+  assert.equal(
+    shouldAutoAttachTranscript({ filePath: null, watchDir: null }),
+    false,
+    '인자 없는 --watch는 자동 attach 대상이 아니다 (DB+hc SSOT만)'
+  );
+});
+
+test('explicit --watch <file.jsonl> auto-attaches the given transcript', () => {
+  assert.equal(
+    shouldAutoAttachTranscript({ filePath: '/path/to/t.jsonl', watchDir: null }),
+    true
+  );
+});
+
+test('explicit --watch-dir <dir> auto-attaches within the scoped dir', () => {
+  assert.equal(
+    shouldAutoAttachTranscript({ filePath: null, watchDir: '/path/to/dir' }),
+    true
+  );
+});
