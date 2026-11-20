@@ -74,6 +74,10 @@ git clone https://github.com/insightflo/dgate.git && cd dgate
 npm run setup            # 대화형 위저드 (환경 진단·로스터 맞춤 설정·선택 도구 안내)
 npm run setup:check      # 읽기전용 진단 리포트만 (파일 쓰기 0 — 안전 점검용)
 
+# 0-1) 전역 명령 설치 (일회성) — 이후 어떤 저장소에서든 dgate-tui·dg 실행 가능
+npm run install:global   # ~/.local/bin에 dgate-tui, dgate-gui, dg, dgate 래퍼 설치
+# 해제: npm run uninstall:global
+
 # 1) 오케스트레이션 계획 리허설 (모델 호출 0회, 실기동 0회 — 무조건 안전)
 npm run orchestrate:dry
 

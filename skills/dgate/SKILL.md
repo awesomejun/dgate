@@ -121,6 +121,7 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
 ## 4. 시각 모니터링 및 점검 명령 — 에이전트 내부 실행 레퍼런스
 
 - **실시간 TUI 대시보드**:
+  - 전역 설치(`npm run install:global`, 일회성) 후에는 어떤 저장소에서든 `dgate-tui`(전체 보기 `dgate-tui --all`)·`dgate-gui`·`dg`·`dgate`로 실행한다.
   - 백그라운드 모니터 세션 접속 *(선택 — `hc` 설치 시)*: `hc attach dg-monitor` (나오기: `Ctrl+\`)
   - 직접 실행: `node $DGATE_ROOT/src/cli.ts --watch-db ~/.local/state/dgate/decision.db --watch`
 - **비용·타이밍 통계 (읽기전용)**:

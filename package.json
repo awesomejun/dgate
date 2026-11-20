@@ -23,6 +23,8 @@
     "test": "node --test tests/",
     "setup": "node ./scripts/setup.ts",
     "setup:check": "node ./scripts/setup.ts --check",
+    "install:global": "node ./scripts/install-global.ts",
+    "uninstall:global": "node ./scripts/install-global.ts --uninstall",
     "dg": "node ./src/decision/dg.ts",
     "orchestrate:dry": "node ./scripts/herdr-quad-launch.ts --mode orchestrate --dry-run",
     "rust:build": "cargo build --release",
