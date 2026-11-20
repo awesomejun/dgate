@@ -803,6 +803,52 @@ impl LogPanelSize {
     }
 }
 
+/// Tab 키로 순환하는 6개 패널 포커스 — TUI `FOCUS_ORDER`와 동일 계약.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusPanel {
+    Lead,
+    Verifier,
+    Decision,
+    Workers,
+    Advisor,
+    Logs,
+}
+
+impl FocusPanel {
+    pub fn next(self) -> Self {
+        match self {
+            FocusPanel::Lead => FocusPanel::Verifier,
+            FocusPanel::Verifier => FocusPanel::Decision,
+            FocusPanel::Decision => FocusPanel::Workers,
+            FocusPanel::Workers => FocusPanel::Advisor,
+            FocusPanel::Advisor => FocusPanel::Logs,
+            FocusPanel::Logs => FocusPanel::Lead,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            FocusPanel::Lead => FocusPanel::Logs,
+            FocusPanel::Verifier => FocusPanel::Lead,
+            FocusPanel::Decision => FocusPanel::Verifier,
+            FocusPanel::Workers => FocusPanel::Decision,
+            FocusPanel::Advisor => FocusPanel::Workers,
+            FocusPanel::Logs => FocusPanel::Advisor,
+        }
+    }
+
+    pub fn detail_title(self) -> &'static str {
+        match self {
+            FocusPanel::Lead => "Lead · 리드 세션 상세",
+            FocusPanel::Verifier => "Verifier · 교차 검증 상세",
+            FocusPanel::Decision => "Decision Gate · 분기 확률·통계 상세",
+            FocusPanel::Workers => "Workers · 하위 워커 상세",
+            FocusPanel::Advisor => "Advisor · 자문 패널 상세",
+            FocusPanel::Logs => "세션 기록 · 전체 로그",
+        }
+    }
+}
+
 /// GPUI 뷰가 들고 다니는 UI 상태 — 스냅숏 적용·탭 선택·확인 상태 전이만 담당.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DashboardController {
@@ -827,6 +873,10 @@ pub struct DashboardController {
     pub log_panel_size: LogPanelSize,
     /// 드래그 가능 패널 치수 — Advisor/Verifier 폭 + 세션 기록 높이.
     pub panel_sizes: PanelSizes,
+    /// 현재 Tab 포커스 패널 (TUI Tab 이동과 동일).
+    pub focused_panel: FocusPanel,
+    /// 열려 있는 상세 모달(Enter로 열기, Esc/Enter로 닫기).
+    pub detail_modal: Option<FocusPanel>,
 }
 
 impl DashboardController {
@@ -844,7 +894,34 @@ impl DashboardController {
             worker_done_elapsed: HashMap::new(),
             log_panel_size: LogPanelSize::Compact,
             panel_sizes: PanelSizes::default(),
+            focused_panel: FocusPanel::Lead,
+            detail_modal: None,
         }
+    }
+
+    /// Tab / Shift+Tab 포커스 순환.
+    pub fn cycle_focus(&mut self, reverse: bool) {
+        self.focused_panel = if reverse {
+            self.focused_panel.prev()
+        } else {
+            self.focused_panel.next()
+        };
+    }
+
+    /// 지정 패널 포커스 + 상세 모달 열기.
+    pub fn open_detail(&mut self, panel: FocusPanel) {
+        self.focused_panel = panel;
+        self.detail_modal = Some(panel);
+    }
+
+    /// 현재 포커스 패널의 상세 모달 열기(Enter).
+    pub fn open_focused_detail(&mut self) {
+        self.detail_modal = Some(self.focused_panel);
+    }
+
+    /// 상세 모달 닫기(Esc).
+    pub fn close_detail(&mut self) {
+        self.detail_modal = None;
     }
 
     /// 폴러가 만든 새 스냅숏 반영 — 사라진 레포 탭 선택·확인 대상은 자동 해제.
@@ -2166,6 +2243,26 @@ mod tests {
         assert_eq!(live_only.recent_log.len(), 1);
         assert_eq!(live_only.recent_log[0].source, "live");
         assert!(live_only.recent_log[0].message.contains("w-alpha-1"));
+    }
+
+    #[test]
+    fn controller_focus_tab_enter_esc_cycle() {
+        let mut c = DashboardController::new(false);
+        assert_eq!(c.focused_panel, FocusPanel::Lead);
+        assert_eq!(c.detail_modal, None);
+        c.cycle_focus(false);
+        assert_eq!(c.focused_panel, FocusPanel::Verifier);
+        c.cycle_focus(false);
+        assert_eq!(c.focused_panel, FocusPanel::Decision);
+        c.open_focused_detail();
+        assert_eq!(c.detail_modal, Some(FocusPanel::Decision));
+        c.close_detail();
+        assert_eq!(c.detail_modal, None);
+        c.cycle_focus(true);
+        assert_eq!(c.focused_panel, FocusPanel::Verifier);
+        c.open_detail(FocusPanel::Logs);
+        assert_eq!(c.focused_panel, FocusPanel::Logs);
+        assert_eq!(c.detail_modal, Some(FocusPanel::Logs));
     }
 
     // ---------- 동적 N스템 · 라이브 모션 활동 판정 ----------

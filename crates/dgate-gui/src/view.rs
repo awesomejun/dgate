@@ -45,15 +45,16 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    div, prelude::*, px, relative, Context, FontWeight, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Render, Rgba, SharedString, Window,
+    div, prelude::*, px, relative, Context, FocusHandle, FontWeight, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, Rgba, SharedString, Window,
 };
 
 use crate::state::{
     continuous_phase, format_elapsed_mmss, has_active_work, kill_worker_safe, lead_display_count,
     partition_sessions_by_role, smooth_pulse_opacity, visible_worker_columns, DashboardController,
-    DashboardSnapshot, DecisionLabel, DefaultKillExecutor, DragTarget, GuiCliOptions, LogPanelSize,
-    PollerHandle, RecentLogEntry, RouteMetric, ACTIVE_ANIM_FRAME_MS, UI_REFRESH_TICK_MS,
+    DashboardSnapshot, DecisionLabel, DefaultKillExecutor, DragTarget, FocusPanel, GuiCliOptions,
+    LogPanelSize, PollerHandle, RecentLogEntry, RouteMetric, ACTIVE_ANIM_FRAME_MS,
+    UI_REFRESH_TICK_MS,
 };
 use dgate_core::live_sync::LiveWorkerInfo;
 use dgate_core::redact::redact_secrets;
@@ -99,6 +100,13 @@ const VERIFIER_NEON: Rgba = hex_rgba(0xe8d97a); // Verifier · 교차 검증
 const ROSE_DANGER: Rgba = hex_rgba(0xf16e69); // trafficRed — 강제분기/중단
 
 const ROSE_BG_HOVER: Rgba = hex_rgba(0x3a2230); // 중단 버튼 호버 배경
+const FOCUS_BORDER: Rgba = hex_rgba(0xfbbf24); // Tab 포커스 하이라이트 테두리
+const MODAL_BACKDROP: Rgba = Rgba {
+    r: 0.0,
+    g: 0.0,
+    b: 0.0,
+    a: 0.65,
+};
 
 /// 브라일 스피너 프레임 — 활동 중인 카드·역할 패널이 10Hz로 회전.
 const SPINNER_FRAMES: [char; 8] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
@@ -124,6 +132,8 @@ pub struct DashboardView {
     /// 진행 중인 스플리터 드래그 — (대상 축, 드래그 시작 마우스 축 좌표, 시작 크기).
     /// None이면 유휴 — 루트의 mouse_move 리스너는 아무 일도 하지 않는다.
     pub active_drag: Option<(DragTarget, f32, f32)>,
+    /// 키보드 포커스 핸들 — Tab 이동 / Enter 상세 / Esc 닫기 수신.
+    pub focus_handle: FocusHandle,
 }
 
 impl DashboardView {
@@ -207,6 +217,7 @@ impl DashboardView {
             anim_secs: 0.0,
             anim_epoch: Instant::now(),
             active_drag: None,
+            focus_handle: cx.focus_handle(),
         }
     }
 
@@ -499,7 +510,7 @@ impl DashboardView {
         cx: &Context<Self>,
         vw: Pixels,
     ) -> gpui::Stateful<gpui::Div> {
-        let advisor = self.render_advisor_panel(snap, vw);
+        let advisor = self.render_advisor_panel(snap, vw, cx);
         let pipeline = self.render_pipeline(snap, cx, vw);
         // 반응형 본문 — 넓은 창(≥960px) 2단 나란히(사이에 드래그 스플리터) /
         // 좁은 창 Advisor 위 스택(스플리터 없음).
@@ -534,14 +545,22 @@ impl DashboardView {
 
     /// 좌측 Advisor 자문 패널 — 보라 경계 + 3개 자문 게이트 + 최근 조언 카드.
     /// 좁은 창(<960px)에서는 전체 폭으로 파이프라인 위에 스택된다.
-    fn render_advisor_panel(&self, snap: &DashboardSnapshot, vw: Pixels) -> gpui::Div {
+    fn render_advisor_panel(
+        &self,
+        snap: &DashboardSnapshot,
+        vw: Pixels,
+        cx: &Context<Self>,
+    ) -> gpui::Div {
         let advisor_running = snap
             .workers
             .iter()
             .any(|w| w.slot.as_str() == "advisor" && worker_running(w));
         let advisors = partition_sessions_by_role(&snap.workers).advisors;
         let active = self.controller.demo_mode || advisor_running;
-        let border = if active {
+        let focused = self.controller.focused_panel == FocusPanel::Advisor;
+        let border = if focused {
+            FOCUS_BORDER
+        } else if active {
             ADVISOR_PURPLE
         } else {
             BORDER_ADVISORY_IDLE
@@ -614,6 +633,15 @@ impl DashboardView {
                 .min_h(px(18.))
                 .child(title)
                 .child(div().flex_1())
+                .child(detail_pill(
+                    "detail-advisor",
+                    focused,
+                    ADVISOR_PURPLE,
+                    cx.listener(|this, _, _, cx| {
+                        this.controller.open_detail(FocusPanel::Advisor);
+                        cx.notify();
+                    }),
+                ))
                 .child(pill(state_label, state_color, BG)),
         );
         // 명시적 advisor 세션 — 자문 카드 위에 세션마다 고정 높이 1행(주소 구분).
@@ -740,17 +768,17 @@ impl DashboardView {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(self.render_lead_card(snap))
+                .child(self.render_lead_card(snap, cx))
                 .child(horizontal_wire(self.verifier_motion(snap), self.anim_secs))
-                .child(self.render_verifier_card(snap, vw))
+                .child(self.render_verifier_card(snap, vw, cx))
         } else {
             div()
                 .flex()
                 .flex_row()
                 .gap_1()
-                .child(self.render_lead_card(snap))
+                .child(self.render_lead_card(snap, cx))
                 .child(self.render_verifier_drag_handle(snap, cx))
-                .child(self.render_verifier_card(snap, vw))
+                .child(self.render_verifier_card(snap, vw, cx))
         };
 
         div()
@@ -764,7 +792,7 @@ impl DashboardView {
             // Lead → Decision Gate 수직 와이어 — 모션 중 주황 점이 매끄럽게 내려간다.
             .child(vertical_wire(self.lead_motion(snap), self.anim_secs))
             // Stage 2 — Decision Gate · 분기 계층
-            .child(self.render_decision_gate(snap))
+            .child(self.render_decision_gate(snap, cx))
             // Stage 3 — Workers 로의 팬아웃(동적 N스템 + 초과분 '+M개 추가' 배지)
             .child(branching_connector(
                 cols,
@@ -905,8 +933,9 @@ impl DashboardView {
     /// Stage 1 좌측 — Lead 카드. 모션: lead 실행 중 또는 하위 워커 실행 중 / DEMO.
     /// 명시적 lead 세션이 있으면 세션마다 고정 높이 1행(주소로 구분 — 동일 레포
     /// 다중 lead도 각자 보인다), 없으면 기존 폴백(조율 중/대기 중) 표기.
-    fn render_lead_card(&self, snap: &DashboardSnapshot) -> gpui::Div {
+    fn render_lead_card(&self, snap: &DashboardSnapshot, cx: &Context<Self>) -> gpui::Div {
         let parts = partition_sessions_by_role(&snap.workers);
+        let focused = self.controller.focused_panel == FocusPanel::Lead;
         let subordinates_running = parts.sub_workers.iter().any(|w| worker_running(w));
         let motion = self.controller.demo_mode
             || parts.leads.iter().any(|w| worker_running(w))
@@ -935,7 +964,7 @@ impl DashboardView {
             .rounded_lg()
             .bg(BG_ELEVATED)
             .border_2()
-            .border_color(LEAD_ORANGE)
+            .border_color(if focused { FOCUS_BORDER } else { LEAD_ORANGE })
             .child(
                 div()
                     .flex()
@@ -952,6 +981,15 @@ impl DashboardView {
                             .child("Lead"),
                     )
                     .child(div().flex_1())
+                    .child(detail_pill(
+                        "detail-lead",
+                        focused,
+                        LEAD_ORANGE,
+                        cx.listener(|this, _, _, cx| {
+                            this.controller.open_detail(FocusPanel::Lead);
+                            cx.notify();
+                        }),
+                    ))
                     .child(state_pill),
             );
         // 실제 태스크 진행률 바 — 레포 마크다운 체크박스 기반(가짜 바 금지).
@@ -1061,9 +1099,15 @@ impl DashboardView {
     /// 좁은 창(<960px)에서는 전체 폭으로 Lead 아래 스택된다.
     /// 명시적 verifier 세션이 있으면 세션마다 (메타행 + 네온 슬라이딩 바 + 활동 1줄)
     /// 블록으로 나열 — 동일 레포 다중 검증 세션도 주소로 구분된다.
-    fn render_verifier_card(&self, snap: &DashboardSnapshot, vw: Pixels) -> gpui::Div {
+    fn render_verifier_card(
+        &self,
+        snap: &DashboardSnapshot,
+        vw: Pixels,
+        cx: &Context<Self>,
+    ) -> gpui::Div {
         let parts = partition_sessions_by_role(&snap.workers);
         let active = self.verifier_motion(snap);
+        let focused = self.controller.focused_panel == FocusPanel::Verifier;
         let badge_pill = if active {
             spinner_pill(
                 spinner_char(self.anim_secs, 0),
@@ -1082,7 +1126,13 @@ impl DashboardView {
             .rounded_lg()
             .bg(if active { BG_GLOW_NEON } else { BG_ELEVATED })
             .border_2()
-            .border_color(if active { VERIFIER_NEON } else { BORDER_WIRE });
+            .border_color(if focused {
+                FOCUS_BORDER
+            } else if active {
+                VERIFIER_NEON
+            } else {
+                BORDER_WIRE
+            });
         card = if vw < px(960.) {
             card.w_full()
         } else {
@@ -1105,6 +1155,15 @@ impl DashboardView {
                         .child("Verifier"),
                 )
                 .child(div().flex_1())
+                .child(detail_pill(
+                    "detail-verifier",
+                    focused,
+                    VERIFIER_NEON,
+                    cx.listener(|this, _, _, cx| {
+                        this.controller.open_detail(FocusPanel::Verifier);
+                        cx.notify();
+                    }),
+                ))
                 .child(badge_pill),
         );
         if parts.verifiers.is_empty() {
@@ -1182,7 +1241,8 @@ impl DashboardView {
     }
 
     /// Stage 2 — Decision Gate · 분기 계층 (라우트 확률 바 + 우측 compact 지표).
-    fn render_decision_gate(&self, snap: &DashboardSnapshot) -> gpui::Div {
+    fn render_decision_gate(&self, snap: &DashboardSnapshot, cx: &Context<Self>) -> gpui::Div {
+        let focused = self.controller.focused_panel == FocusPanel::Decision;
         let forks_label = match &snap.timing_summary {
             Some(t) if !t.intervals_unavailable && t.forks_total > 0 => {
                 format!("{}", t.forks_total)
@@ -1212,7 +1272,7 @@ impl DashboardView {
                 .rounded_lg()
                 .bg(BG_ELEVATED)
                 .border_1()
-                .border_color(GATE_GREEN)
+                .border_color(if focused { FOCUS_BORDER } else { GATE_GREEN })
                 .child(
                     div()
                         .flex()
@@ -1228,6 +1288,15 @@ impl DashboardView {
                                 .child("Decision Gate · 분기 계층"),
                         )
                         .child(div().flex_1())
+                        .child(detail_pill(
+                            "detail-decision",
+                            focused,
+                            GATE_GREEN,
+                            cx.listener(|this, _, _, cx| {
+                                this.controller.open_detail(FocusPanel::Decision);
+                                cx.notify();
+                            }),
+                        ))
                         .child(div().text_size(px(10.)).text_color(MUTED).truncate().child(
                             format!(
                                 "forks {} · 비용 {} · shadow {}",
@@ -1254,6 +1323,29 @@ impl DashboardView {
         sub_workers: &[LiveWorkerInfo],
         cols: usize,
     ) -> gpui::Div {
+        let focused = self.controller.focused_panel == FocusPanel::Workers;
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .px_1()
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(if focused { FOCUS_BORDER } else { WORKER_BLUE })
+                    .child(format!("Workers · {}개", sub_workers.len())),
+            )
+            .child(detail_pill(
+                "detail-workers",
+                focused,
+                WORKER_BLUE,
+                cx.listener(|this, _, _, cx| {
+                    this.controller.open_detail(FocusPanel::Workers);
+                    cx.notify();
+                }),
+            ));
         if sub_workers.is_empty() {
             // 라이브 워커 0 — 가짜 청사진 슬롯 없이 정직한 단일 빈 상태 박스.
             // 스냅숏 미수신이면 로딩 문구, 수신 후면 안내 문구만 보여준다.
@@ -1274,7 +1366,7 @@ impl DashboardView {
                 .h(px(56.))
                 .rounded_lg()
                 .border_1()
-                .border_color(BORDER_LOG)
+                .border_color(if focused { FOCUS_BORDER } else { BORDER_LOG })
                 .bg(BG_ELEVATED)
                 .child(
                     div()
@@ -1290,19 +1382,54 @@ impl DashboardView {
                         .child(subtitle),
                 );
             }
-            return div().flex().flex_row().justify_center().child(box_);
+            return div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .w_full()
+                .child(header)
+                .child(box_);
         }
         if cols == 1 {
             // 단일 워커 — 중앙 정렬 카드(단일 중앙 스템과 정렬, 가로 레일 없음)
-            return div().flex().flex_row().justify_center().child(
-                self.render_worker_card(&sub_workers[0], cx, 0, parent_of(snap, &sub_workers[0]))
-                    .w_full()
-                    .max_w(px(460.)),
-            );
+            return div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .w_full()
+                .when(focused, |el| {
+                    el.p_1()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(FOCUS_BORDER)
+                })
+                .child(header)
+                .child(
+                    div().flex().flex_row().justify_center().child(
+                        self.render_worker_card(
+                            &sub_workers[0],
+                            cx,
+                            0,
+                            parent_of(snap, &sub_workers[0]),
+                        )
+                        .w_full()
+                        .max_w(px(460.)),
+                    ),
+                );
         }
         // 2~4열 — 카드 flex_1·mx_1 → 셀 중심 = 스템 중심 정확 정렬.
         // cols 초과분은 cols열씩 랩하고 마지막 행 빈 열은 스페이서로 열 폭 유지.
-        let mut column = div().flex().flex_col().gap_2();
+        let mut column = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .when(focused, |el| {
+                el.p_1()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(FOCUS_BORDER)
+            })
+            .child(header);
         for (row_idx, chunk) in sub_workers.chunks(cols).enumerate() {
             let mut row = div().flex().flex_row();
             for (i, w) in chunk.iter().enumerate() {
@@ -1668,6 +1795,7 @@ impl DashboardView {
     fn render_session_log(&self, snap: &DashboardSnapshot, cx: &Context<Self>) -> gpui::Div {
         let size = self.controller.log_panel_size;
         let rows = self.controller.panel_sizes.visible_log_rows();
+        let focused = self.controller.focused_panel == FocusPanel::Logs;
         let mut panel = div()
             .flex()
             .flex_col()
@@ -1682,7 +1810,7 @@ impl DashboardView {
             .rounded_lg()
             .bg(BG_ELEVATED)
             .border_1()
-            .border_color(BORDER_LOG)
+            .border_color(if focused { FOCUS_BORDER } else { BORDER_LOG })
             // 헤더 바 — 제목·건수 + 크기 토글(접기/작게/크게, 현재 모드 강조)
             .child(
                 div()
@@ -1714,6 +1842,15 @@ impl DashboardView {
                             .text_color(MUTED)
                             .child(format!("{}건", snap.recent_log.len())),
                     )
+                    .child(detail_pill(
+                        "detail-logs",
+                        focused,
+                        TEXT_SOFT,
+                        cx.listener(|this, _, _, cx| {
+                            this.controller.open_detail(FocusPanel::Logs);
+                            cx.notify();
+                        }),
+                    ))
                     .child(div().flex_1())
                     .child(log_size_button(LogPanelSize::Compact, size, cx))
                     .child(log_size_button(LogPanelSize::Expanded, size, cx))
@@ -1787,6 +1924,12 @@ impl DashboardView {
                     .truncate()
                     .child(format!("DB {} · {}", snap.db_status, self.db_path_label)),
             )
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(DIM)
+                    .child("Tab:이동 · Enter:상세 · Esc:닫기"),
+            )
             .child(div().text_size(px(10.)).text_color(MUTED).child(format!(
                 "{} · {}",
                 self.poll_interval_label,
@@ -1842,19 +1985,338 @@ impl DashboardView {
             .child(left)
             .child(right)
     }
+    /// 상세 모달 오버레이 — Tab 포커스 후 Enter 또는 패널 '상세' 클릭 시 표시.
+    fn render_detail_modal(
+        &self,
+        snap: &DashboardSnapshot,
+        panel: FocusPanel,
+        cx: &Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let parts = partition_sessions_by_role(&snap.workers);
+        let mut body = div()
+            .id("detail-modal-body")
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .flex_1()
+            .min_h_0()
+            .p_3();
+
+        let render_sessions = |list: &[&LiveWorkerInfo], empty_msg: &str| -> gpui::Div {
+            let mut box_ = div().flex().flex_col().gap_2();
+            if list.is_empty() {
+                box_ = box_.child(div().text_size(px(11.)).text_color(MUTED).child(empty_msg.to_string()));
+            } else {
+                for (i, w) in list.iter().enumerate() {
+                    let elapsed = self
+                        .controller
+                        .worker_elapsed_secs(&w.address, Some(i))
+                        .map(format_elapsed_mmss)
+                        .unwrap_or_else(|| "--:--".to_string());
+                    let turn = w
+                        .turn
+                        .map(|t| format!(" · turn {}", t))
+                        .unwrap_or_default();
+                    let status = w.status.as_deref().unwrap_or("live");
+                    let mut row = div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .p_2()
+                        .rounded_md()
+                        .bg(BG)
+                        .border_1()
+                        .border_color(BORDER_HEADER)
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(TEXT)
+                                .child(format!(
+                                    "[{}] {} ({}) · {} · {}{}",
+                                    w.repo_tag, w.name, w.address, status, elapsed, turn
+                                )),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(WORKER_BLUE)
+                                .child(w.telemetry_line()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(TEXT_SOFT)
+                                .child(redact_secrets(&w.activity)),
+                        );
+                    if let Some(warn) = w.subagent_warning.as_deref() {
+                        row = row.child(
+                            div()
+                                .text_size(px(10.))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(ROSE_DANGER)
+                                .child(warn.to_string()),
+                        );
+                    }
+                    box_ = box_.child(row);
+                }
+            }
+            box_
+        };
+
+        match panel {
+            FocusPanel::Lead => {
+                let leads: Vec<&LiveWorkerInfo> = parts.leads.iter().collect();
+                body = body.child(render_sessions(&leads, "현재 실행 중인 Lead 세션이 없습니다."));
+                if let Some(tp) = &snap.task_progress {
+                    body = body.child(
+                        div()
+                            .p_2()
+                            .rounded_md()
+                            .bg(BG)
+                            .border_1()
+                            .border_color(GATE_GREEN)
+                            .text_size(px(11.))
+                            .text_color(GATE_GREEN)
+                            .child(format!(
+                                "태스크 진행률: {}/{} ({}%) · {}",
+                                tp.done, tp.total, tp.pct, tp.source_name
+                            )),
+                    );
+                }
+            }
+            FocusPanel::Verifier => {
+                let verifiers: Vec<&LiveWorkerInfo> = parts.verifiers.iter().collect();
+                body = body.child(render_sessions(
+                    &verifiers,
+                    "현재 실행 중인 Verifier 세션이 없습니다 (교차 검증 대기).",
+                ));
+            }
+            FocusPanel::Decision => {
+                let mut routes = snap.routes.clone();
+                routes.sort_by_key(route_rank);
+                for r in &routes {
+                    let badge = if r.forced_split {
+                        "강제 SPLIT!"
+                    } else if r.decision == DecisionLabel::Split {
+                        "split"
+                    } else {
+                        "sharp"
+                    };
+                    body = body.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .p_2()
+                            .rounded_md()
+                            .bg(BG)
+                            .border_1()
+                            .border_color(BORDER_HEADER)
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(TEXT)
+                                    .child(format!("{} ({})", r.name, r.id)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(if r.forced_split {
+                                        ROSE_DANGER
+                                    } else if r.decision == DecisionLabel::Split {
+                                        LEAD_ORANGE
+                                    } else {
+                                        GATE_GREEN
+                                    })
+                                    .child(format!(
+                                        "p={:.2} · {} · {} (n={})",
+                                        r.p, badge, r.basis, r.samples
+                                    )),
+                            ),
+                    );
+                }
+            }
+            FocusPanel::Workers => {
+                let subs: Vec<&LiveWorkerInfo> = parts.sub_workers.iter().collect();
+                body = body.child(render_sessions(
+                    &subs,
+                    "현재 실행 중인 하위 워커가 없습니다.",
+                ));
+            }
+            FocusPanel::Advisor => {
+                let advs: Vec<&LiveWorkerInfo> = parts.advisors.iter().collect();
+                body = body.child(render_sessions(
+                    &advs,
+                    "현재 실행 중인 Advisor 세션이 없습니다 (온디맨드 3관문 대기).",
+                ));
+            }
+            FocusPanel::Logs => {
+                if snap.recent_log.is_empty() {
+                    body = body.child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(MUTED)
+                            .child("표시할 세션 기록이 없습니다."),
+                    );
+                } else {
+                    for e in &snap.recent_log {
+                        body = body.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .p_2()
+                                .rounded_md()
+                                .bg(BG)
+                                .border_1()
+                                .border_color(BORDER_LOG)
+                                .child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(MUTED)
+                                        .child(format!("{} · {}", e.time_hhmmss, e.source_role)),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(TEXT)
+                                        .child(e.message.clone()),
+                                ),
+                        );
+                    }
+                }
+            }
+        }
+
+        let modal_card = div()
+            .flex()
+            .flex_col()
+            .w(px(660.))
+            .max_h(px(520.))
+            .rounded_lg()
+            .bg(BG_ELEVATED)
+            .border_2()
+            .border_color(FOCUS_BORDER)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                // 카드 내부 클릭은 백드롭 닫기로 전파하지 않는다.
+                cx.stop_propagation();
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .px_3()
+                    .py_2()
+                    .bg(BG_CHROME)
+                    .border_b_1()
+                    .border_color(BORDER_HEADER)
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(FOCUS_BORDER)
+                            .child(panel.detail_title()),
+                    )
+                    .child(
+                        div()
+                            .id("detail-modal-close")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(BG)
+                            .border_1()
+                            .border_color(BORDER_HEADER)
+                            .text_size(px(10.))
+                            .text_color(TEXT_SOFT)
+                            .cursor_pointer()
+                            .hover(|s| s.border_color(FOCUS_BORDER).text_color(TEXT))
+                            .child("Esc 닫기")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.controller.close_detail();
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(body);
+
+        div()
+            .id("detail-modal-backdrop")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(MODAL_BACKDROP)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.controller.close_detail();
+                    cx.notify();
+                }),
+            )
+            .child(modal_card)
+    }
 }
 
 impl Render for DashboardView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.focus_handle.is_focused(window) {
+            window.focus(&self.focus_handle);
+        }
         let snap = self.controller.filtered();
         // 뷰포트 폭 — 반응형 스택킹(960px)·열 상한(820px) 판정 기준
         let vw = window.viewport_size().width;
+        let detail_modal = self
+            .controller
+            .detail_modal
+            .map(|panel| self.render_detail_modal(&snap, panel, cx));
         div()
+            .relative()
             .flex()
             .flex_col()
             .size_full()
             .bg(BG)
             .text_color(TEXT)
+            .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
+                match ev.keystroke.key.as_str() {
+                    "tab" => {
+                        if this.controller.detail_modal.is_none() {
+                            this.controller.cycle_focus(ev.keystroke.modifiers.shift);
+                            cx.notify();
+                        }
+                    }
+                    "enter" => {
+                        if this.controller.detail_modal.is_some() {
+                            this.controller.close_detail();
+                        } else {
+                            this.controller.open_focused_detail();
+                        }
+                        cx.notify();
+                    }
+                    "escape" => {
+                        if this.controller.detail_modal.is_some() {
+                            this.controller.close_detail();
+                            cx.notify();
+                        }
+                    }
+                    "space" => {
+                        if this.controller.detail_modal.is_none() {
+                            let next = !this.controller.paused;
+                            this.controller.paused = next;
+                            this.poller.set_paused(next);
+                            cx.notify();
+                        }
+                    }
+                    _ => {}
+                }
+            }))
             // 스플리터 드래그 추적 — 루트가 창 전체를 커버해 드래그 중 마우스가
             // 패널 밖으로 나가도 축 이동량을 놓치지 않는다(유휴 시 0비용 분기).
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
@@ -1892,12 +2354,44 @@ impl Render for DashboardView {
             .child(self.render_log_splitter(cx))
             .child(self.render_session_log(&snap, cx))
             .child(self.render_footer(&snap))
+            .children(detail_modal)
     }
 }
 
 // ---------------------------------------------------------------------------
 // 공통 조립 헬퍼 — 스냅숏 파생 수치·와이어·카드 조각
 // ---------------------------------------------------------------------------
+
+/// 패널 헤더 우측 클릭 가능 '상세' / 'Enter:상세' 배지.
+fn detail_pill(
+    id: &'static str,
+    focused: bool,
+    accent: Rgba,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .px_2()
+        .h(px(16.))
+        .flex_none()
+        .rounded_sm()
+        .bg(BG)
+        .border_1()
+        .border_color(if focused { FOCUS_BORDER } else { BORDER_HEADER })
+        .hover(move |s| s.border_color(accent))
+        .text_size(px(9.))
+        .font_weight(if focused {
+            FontWeight::BOLD
+        } else {
+            FontWeight::MEDIUM
+        })
+        .text_color(if focused { FOCUS_BORDER } else { MUTED })
+        .cursor_pointer()
+        .child(if focused { "Enter:상세" } else { "상세" })
+        .on_click(on_click)
+}
 
 /// live 워커 중 해당 슬롯 세션 수.
 fn live_count(snap: &DashboardSnapshot, slot: &str) -> usize {
