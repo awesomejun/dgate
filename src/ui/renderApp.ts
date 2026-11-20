@@ -744,33 +744,53 @@ function renderNeonPanel(buf: CellBuffer, state: AppState, L: FullLayout): void 
     true
   );
 
-  // 2) 프로그레스 바 + 퍼센트(또는 idle 시 —) — 라이브 검증은 %를 못 주므로 부재 활성 바
+  // 2) 프로그레스 바 — 데모 모드 또는 명시 진행률(0<p<100)일 때만. LIVE/WATCH는
+  // 무의미한 빈·흐르는 바 대신 상태 한 줄로(0%/부재 바 금지).
   if (cy < R.y + R.h - 1) {
-    const barW = Math.max(6, iw - 5);
-    const startX = ix + Math.max(0, Math.floor((iw - (barW + 1 + 4)) / 2));
-    const fillCol = isFail ? THEME.trafficRed : THEME.neon;
-    if (isRun && state.neonProgress === 0) {
-      drawIndeterminateBar(buf, startX, cy, barW, fillCol, THEME.bgNeonTrack, state.simTime, 1);
-      buf.writeText(
-        startX + barW + 1,
+    const showBar = state.mode === 'demo' || (state.neonProgress > 0 && state.neonProgress < 100);
+    if (showBar) {
+      const barW = Math.max(6, iw - 5);
+      const startX = ix + Math.max(0, Math.floor((iw - (barW + 1 + 4)) / 2));
+      const fillCol = isFail ? THEME.trafficRed : THEME.neon;
+      if (isRun && state.neonProgress === 0) {
+        drawIndeterminateBar(buf, startX, cy, barW, fillCol, THEME.bgNeonTrack, state.simTime, 1);
+        buf.writeText(
+          startX + barW + 1,
+          cy,
+          `${spinnerFrame(state.simTime, 1)} RUN`,
+          THEME.neon,
+          panelBg,
+          true
+        );
+      } else {
+        const pctStr =
+          state.neonState === 'idle' ? '  — ' : padLeftWidth(`${state.neonProgress}%`, 4);
+        buf.drawProgressBar(
+          startX,
+          cy,
+          barW,
+          state.neonState === 'idle' ? 0 : state.neonProgress / 100,
+          fillCol,
+          THEME.bgNeonTrack
+        );
+        buf.writeText(startX + barW + 1, cy, pctStr, THEME.muted, panelBg);
+      }
+    } else if (isRun) {
+      buf.writeCentered(
+        ix,
         cy,
-        `${spinnerFrame(state.simTime, 1)} RUN`,
+        iw,
+        `${spinnerFrame(state.simTime, 1)} 교차 검증 중`,
         THEME.neon,
         panelBg,
         true
       );
+    } else if (isPass) {
+      buf.writeCentered(ix, cy, iw, '✓ 검증 통과', THEME.green, panelBg, true);
+    } else if (isFail) {
+      buf.writeCentered(ix, cy, iw, '✕ 검증 실패', THEME.trafficRed, panelBg, true);
     } else {
-      const pctStr =
-        state.neonState === 'idle' ? '  — ' : padLeftWidth(`${state.neonProgress}%`, 4);
-      buf.drawProgressBar(
-        startX,
-        cy,
-        barW,
-        state.neonState === 'idle' ? 0 : state.neonProgress / 100,
-        fillCol,
-        THEME.bgNeonTrack
-      );
-      buf.writeText(startX + barW + 1, cy, pctStr, THEME.muted, panelBg);
+      buf.writeCentered(ix, cy, iw, '○ 교차 검증 대기', THEME.muted, panelBg, false);
     }
     cy++;
   }
@@ -952,7 +972,8 @@ function renderSwarmSection(buf: CellBuffer, state: AppState, L: FullLayout): vo
     // idle 카드는 simTime과 무관하게 항상 동일하게 그린다(침착 대기 불변식).
     if (cy < cardRect.y + cardRect.h - 1) {
       const showBar = state.mode === 'demo' || (card.progress > 0 && card.progress < 100);
-      if (!showBar && motion) {
+      if (!showBar) {
+        // 비-데모(무바) 카드는 바를 절대 그리지 않는다 — 정적 상태 텍스트만.
         const isDoneLive = card.status === 'done' || card.progress >= 100;
         const isIdleLive = card.status === 'idle' || card.status === 'error';
         const turnSuffix = typeof card.turn === 'number' ? ` · turn ${card.turn}` : '';
@@ -970,13 +991,18 @@ function renderSwarmSection(buf: CellBuffer, state: AppState, L: FullLayout): vo
           line = card.status === 'error' ? '✕ 오류' : '▪ 대기 중';
           fg = card.status === 'error' ? THEME.trafficRed : THEME.muted;
           bold = false;
-        } else {
+        } else if (motion) {
           line =
             `${spinnerFrame(state.simTime, idx)} 실행 중 · ` +
             (typeof card.elapsedSec === 'number' ? formatElapsedMmss(card.elapsedSec) : 'RUN') +
             turnSuffix;
           fg = THEME.blue;
           bold = true;
+        } else {
+          // 비-모션(관측 폴백) 실행 카드 — 100% 정적 표기(침착 대기 불변식)
+          line = '◉ 실행 중';
+          fg = THEME.blue;
+          bold = false;
         }
         buf.writeCentered(ix, cy, iw, line, fg, cardBg, bold);
       } else if (motion && card.status === 'running' && card.progress === 0) {
@@ -1394,9 +1420,11 @@ function renderCompactLayout(buf: CellBuffer, state: AppState, L: CompactLayout)
       // GPUI 정렬 — 데모/명시 진행률(0<p<100)일 때만 바. LIVE/WATCH 실측 카드는
       // 스피너+실측 경과+턴 텔레메트리 라인으로 대체(빈/흐르는 바 금지).
       const showBar = state.mode === 'demo' || (c.progress > 0 && c.progress < 100);
-      if (!showBar && motion) {
+      if (!showBar) {
+        // 비-데모(무바) 카드는 바를 절대 그리지 않는다 — 정적 상태 텍스트만.
         const turnSuffix = typeof c.turn === 'number' ? ` · turn ${c.turn}` : '';
         const isDoneLive = c.status === 'done' || c.progress >= 100;
+        const isIdleLive = c.status === 'idle' || c.status === 'error';
         if (isDoneLive) {
           buf.writeRight(
             ix,
@@ -1409,7 +1437,9 @@ function renderCompactLayout(buf: CellBuffer, state: AppState, L: CompactLayout)
             THEME.bg,
             true
           );
-        } else if (c.status === 'running') {
+        } else if (isIdleLive) {
+          buf.writeRight(ix, cy, iw, c.status === 'error' ? '✕ 오류' : '▪ 대기 중', c.status === 'error' ? THEME.trafficRed : THEME.muted, THEME.bg, false);
+        } else if (motion) {
           buf.writeRight(
             ix,
             cy,
@@ -1422,7 +1452,8 @@ function renderCompactLayout(buf: CellBuffer, state: AppState, L: CompactLayout)
             true
           );
         } else {
-          buf.writeRight(ix, cy, iw, c.status === 'error' ? '✕ 오류' : '▪ 대기 중', THEME.muted, THEME.bg, false);
+          // 비-모션(관측 폴백) 실행 카드 — 100% 정적 표기(침착 대기 불변식)
+          buf.writeRight(ix, cy, iw, '◉ 실행 중', THEME.blue, THEME.bg, false);
         }
       } else if (motion && c.status === 'running' && c.progress === 0) {
         drawIndeterminateBar(buf, ix + 11, cy, barW, THEME.blue, THEME.bgBlueTrack, state.simTime, idx);
