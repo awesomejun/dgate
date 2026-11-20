@@ -625,19 +625,26 @@ function renderMainPanel(buf: CellBuffer, state: AppState, L: FullLayout): void 
   const baseBorder = glowing ? THEME.purple : THEME.orange;
   const borderColor = focused ? lerpColor(baseBorder, THEME.borderFocusBoost, 0.35) : baseBorder;
 
+  const hasSubagentWarn = Boolean(state.subagentWarning);
   buf.drawBox(R, {
-    style: glowing || focused ? 'heavy' : 'single',
-    borderColor,
+    style: glowing || focused || hasSubagentWarn ? 'heavy' : 'single',
+    borderColor: hasSubagentWarn ? THEME.trafficRed : borderColor,
     fillBg: panelBg,
-    rightLabel: focused
-      ? state.mode === 'watch' || state.mode === 'stream'
-        ? '관측 중'
-        : 'Enter:편집'
+    rightLabel: hasSubagentWarn
+      ? '⚠ 서브에이전트'
+      : focused
+        ? state.mode === 'watch' || state.mode === 'stream'
+          ? '관측 중'
+          : 'Enter:편집'
+        : glowing
+          ? 'Advisor 자문'
+          : undefined,
+    rightLabelColor: hasSubagentWarn
+      ? THEME.trafficRed
       : glowing
-        ? 'Advisor 자문'
-        : undefined,
-    rightLabelColor: glowing ? THEME.purple : THEME.orange,
-    boldBorder: glowing || focused,
+        ? THEME.purple
+        : THEME.orange,
+    boldBorder: glowing || focused || hasSubagentWarn,
   });
 
   // 우측 보더에서 Verifier 연결 분기점(├ / ┣) 마킹
@@ -659,7 +666,9 @@ function renderMainPanel(buf: CellBuffer, state: AppState, L: FullLayout): void 
 
   const leadHeader = state.mode === 'watch' ? 'Lead' : `Lead · ${state.rosterLabels.lead}`;
   buf.writeCentered(ix, cy++, iw, leadHeader, THEME.orange, panelBg, true);
-  if (cy < R.y + R.h - 1) {
+  if (state.subagentWarning && cy < R.y + R.h - 1) {
+    buf.writeCentered(ix, cy++, iw, state.subagentWarning, THEME.trafficRed, panelBg, true);
+  } else if (cy < R.y + R.h - 1) {
     buf.writeCentered(ix, cy++, iw, state.mainSummary, THEME.fg, panelBg, false);
   }
   if (cy < R.y + R.h - 1) {

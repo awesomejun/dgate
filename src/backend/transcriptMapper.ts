@@ -446,6 +446,19 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
           timeStr
         );
 
+        if (toolName === 'invoke_subagent') {
+          state.subagentWarning = '⚠ 내장 서브에이전트 실행 중 (1개 · 관측 불가)';
+          appendLog(
+            state,
+            'Lead',
+            'orange',
+            '⚠ 내장 서브에이전트(invoke_subagent) 호출 감지 — 관측 불가 · 워커 위임 권장',
+            timeStr
+          );
+        } else if (toolName === 'manage_subagents' && /kill_all/i.test(argHint)) {
+          state.subagentWarning = null;
+        }
+
         // 검증/테스트 관련 도구 시 Verifier 교차 검증 연동
         const isVerify =
           toolName.includes('test') ||

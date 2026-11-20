@@ -1031,6 +1031,7 @@ function main(): void {
       state.leadTelemetry,
       state.verifierTelemetry,
       state.advisorTelemetry,
+      state.subagentWarning,
       state.swarmActive,
       state.liveWorkers,
       state.workers,
@@ -1059,6 +1060,9 @@ function main(): void {
     state.leadTelemetry = merged.leadTelemetry ?? null;
     state.verifierTelemetry = merged.verifierTelemetry ?? null;
     state.advisorTelemetry = merged.advisorTelemetry ?? null;
+    if (merged.leadSubagentWarning !== undefined) {
+      state.subagentWarning = merged.leadSubagentWarning;
+    }
     // lead — 관측 중(watchedLead)이 아니면 매 틱 merged 값으로 갱신한다:
     // 라이브 리드 세션이 있으면 제목·modelName/modelFlag 모두 그 세션 기준이고,
     // 없으면 roster.json 대기 배치로 깨끗히 원복된다(스테일 --model 잔류 방지).

@@ -149,6 +149,8 @@ export interface AppState {
   leadTelemetry?: string | null;
   verifierTelemetry?: string | null;
   advisorTelemetry?: string | null;
+  /** 내장 서브에이전트(invoke_subagent) 실행 감지 시 리드 카드 경고 배지 */
+  subagentWarning?: string | null;
   phase: string;
   backSummary: string;
 

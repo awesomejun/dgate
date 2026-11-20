@@ -23,6 +23,7 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 import {
   createLiveRosterSyncer,
+  detectSubagentWarningFromTranscript,
   extractLastActivityLine,
   extractRepoTag,
   findWrapProcesses,
@@ -2019,4 +2020,26 @@ test('watch 역할 카드 하단 — Lead/Verifier/Advisor/Workers 모두 실측
   const idle = createInitialState('watch');
   const idleText = renderFrame(idle, 148, 43).toPlainString();
   assert.ok(!idleText.includes('pi:glm-5.3') && !idleText.includes('pi:gpt-6.2-sol'));
+});
+
+test('내장 서브에이전트 경고 배지 — invoke_subagent 실행 중 감지 및 완료 후 해제 + Lead 카드 표시', () => {
+  const runningTail = [
+    '{"step_index":10,"type":"PLANNER_RESPONSE","tool_calls":[{"name":"invoke_subagent","args":{"Role":"Reviewer"}}]}',
+    '{"step_index":11,"type":"GENERIC","content":"Created the following subagent:\\n{\\n  \\"conversationId\\": \\"657931dc-d5b0-4118-8d76-dc2089606369\\"\\n}"}',
+  ].join('\n');
+  const warn = detectSubagentWarningFromTranscript(runningTail);
+  assert.equal(warn, '⚠ 내장 서브에이전트 실행 중 (1개 · 관측 불가)');
+
+  // 완료(sender=<id> 수신) 시 경고 해제
+  const doneTail =
+    runningTail +
+    '\n{"step_index":15,"type":"SYSTEM_MESSAGE","content":"[Message] sender=657931dc-d5b0-4118-8d76-dc2089606369 content=done"}';
+  assert.equal(detectSubagentWarningFromTranscript(doneTail), null);
+
+  // TUI Lead 카드에 경고 배지 렌더링 검증
+  const st = createInitialState('watch');
+  st.subagentWarning = warn;
+  const rendered = renderFrame(st, 148, 43).toPlainString();
+  assert.ok(rendered.includes('⚠ 서브에이전트'), 'Lead 박스 우측 경고 라벨');
+  assert.ok(rendered.includes('⚠ 내장 서브에이전트 실행 중'), 'Lead 카드 본문 경고 배지');
 });

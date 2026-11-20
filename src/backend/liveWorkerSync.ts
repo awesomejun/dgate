@@ -98,6 +98,8 @@ export interface LiveWorkerInfo {
   effort?: string | null;
   /** 카드 하단 표시용 실측 요약 (예: 'agy · Gemini 4 Neon · medium'). */
   telemetryLine?: string;
+  /** 리드 세션이 내장 서브에이전트(invoke_subagent)를 실행 중일 때 경고 문구(없으면 null). */
+  subagentWarning?: string | null;
 }
 
 /** `mergeLiveRosterLabels` 결과 — cli.ts가 AppState에 반영할 값의 묶음. */
@@ -111,6 +113,8 @@ export interface MergedLiveRoster {
   leadTelemetry?: string | null;
   verifierTelemetry?: string | null;
   advisorTelemetry?: string | null;
+  /** 라이브 리드 세션의 내장 서브에이전트 실행 경고 배지(없으면 null). */
+  leadSubagentWarning?: string | null;
   workers: LiveWorkerInfo[];
   activeWorkerCount: number;
 }
@@ -372,6 +376,112 @@ export function formatLiveTelemetry(
   const e = (effort ?? '').trim().toLowerCase();
   if (e) parts.push(e);
   return parts.join(' · ') || c || 'live';
+}
+
+/** argv에서 `--conversation=<id>` 또는 `--conversation <id>`를 추출한다. */
+export function extractConversationIdFromArgv(argv: readonly string[]): string | null {
+  for (let i = 0; i < argv.length; i++) {
+    const t = argv[i] ?? '';
+    if (t.startsWith('--conversation=')) {
+      const id = t.slice('--conversation='.length).trim();
+      if (/^[0-9a-fA-F-]{8,}$/.test(id)) return id;
+    } else if (t === '--conversation' && i + 1 < argv.length) {
+      const id = (argv[i + 1] ?? '').trim();
+      if (/^[0-9a-fA-F-]{8,}$/.test(id)) return id;
+    }
+  }
+  return null;
+}
+
+/**
+ * Antigravity transcript.jsonl 꼬리(JSONL)에서 현재 실행 중인 내장 서브에이전트(`invoke_subagent`)를
+ * 감지해 경고 배지 문구를 반환한다. 모두 완료(sender=<id> 수신 또는 state:idle)되었으면 null.
+ */
+export function detectSubagentWarningFromTranscript(rawTail: string | null | undefined): string | null {
+  if (typeof rawTail !== 'string' || rawTail.length === 0) return null;
+  const activeIds = new Set<string>();
+  let pendingInvoke = false;
+
+  for (const line of rawTail.split(/\r?\n/)) {
+    if (!line) continue;
+    if (line.includes('"invoke_subagent"') && line.includes('"tool_calls"')) {
+      pendingInvoke = true;
+    }
+    if (line.includes('Created the following subagent:')) {
+      const m = line.match(/\\?"conversationId\\?"\s*:\s*\\?"([0-9a-fA-F-]{8,})\\?"/);
+      if (m?.[1]) {
+        activeIds.add(m[1]);
+        pendingInvoke = false;
+      }
+    }
+    if (line.includes('active subagent(s):')) {
+      activeIds.clear();
+      pendingInvoke = false;
+      const re =
+        /\\?"conversationId\\?"\s*:\s*\\?"([0-9a-fA-F-]{8,})\\?"[^}]*?\\?"state\\?"\s*:\s*\\?"(running|idle)\\?"/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(line)) !== null) {
+        if (m[2] === 'running' && m[1]) activeIds.add(m[1]);
+      }
+    }
+    if (line.includes('sender=')) {
+      const re = /sender=([0-9a-fA-F-]{8,})/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(line)) !== null) {
+        if (m[1]) activeIds.delete(m[1]);
+      }
+      pendingInvoke = false;
+    }
+    if (line.includes('"manage_subagents"') && line.includes('kill_all')) {
+      activeIds.clear();
+      pendingInvoke = false;
+    }
+  }
+
+  const count = activeIds.size + (pendingInvoke ? 1 : 0);
+  return count > 0 ? `⚠ 내장 서브에이전트 실행 중 (${count}개 · 관측 불가)` : null;
+}
+
+const TRANSCRIPT_TAIL_BYTES = 128 * 1024;
+
+/** conversationId의 transcript.jsonl 꼬리 128KB를 읽어 서브에이전트 경고를 판정한다(mtime 캐시). */
+function readConversationSubagentWarning(
+  convId: string,
+  cache: Map<string, { sig: string; warning: string | null }>
+): string | null {
+  const home = process.env.HOME || process.env.USERPROFILE;
+  if (!home) return null;
+  const txPath = path.join(
+    home,
+    '.gemini',
+    'antigravity-cli',
+    'brain',
+    convId,
+    '.system_generated',
+    'logs',
+    'transcript.jsonl'
+  );
+  try {
+    const st = fs.statSync(txPath);
+    const sig = `${st.mtimeMs}:${st.size}`;
+    const hit = cache.get(convId);
+    if (hit && hit.sig === sig) return hit.warning;
+    const fd = fs.openSync(txPath, 'r');
+    try {
+      const start = Math.max(0, st.size - TRANSCRIPT_TAIL_BYTES);
+      const len = st.size - start;
+      const buf = Buffer.alloc(len);
+      const bytesRead = fs.readSync(fd, buf, 0, len, start);
+      const raw = buf.subarray(0, bytesRead).toString('utf8');
+      const warning = detectSubagentWarningFromTranscript(raw);
+      cache.set(convId, { sig, warning });
+      return warning;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -797,6 +907,7 @@ export function mergeLiveRosterLabels(
       ? (advisorWorker.telemetryLine ??
         formatLiveTelemetry(advisorWorker.cli, advisorWorker.model, advisorWorker.effort))
       : null,
+    leadSubagentWarning: leadWorker?.subagentWarning ?? null,
     workers: [...workers],
     activeWorkerCount: workers.length,
   };
@@ -910,6 +1021,7 @@ export function createLiveRosterSyncer(opts: LiveRosterSyncerOptions): LiveRoste
   let lastWorkers: LiveWorkerInfo[] = [];
   const detailCache = new Map<string, HcTerminalDetail>();
   const screenCache = new Map<string, string>();
+  const subagentCache = new Map<string, { sig: string; warning: string | null }>();
   let inFlight = false;
   let stopped = false;
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -1079,6 +1191,14 @@ export function createLiveRosterSyncer(opts: LiveRosterSyncerOptions): LiveRoste
             !isWorkerTerminal(summary)
           ) {
             worker = normalizeTopLevelWorker(worker, summary);
+          }
+          if (worker && worker.slot === 'lead') {
+            const convId =
+              extractConversationIdFromArgv(detail.foregroundArgv ?? []) ??
+              extractConversationIdFromArgv(detail.argv ?? []);
+            if (convId) {
+              worker.subagentWarning = readConversationSubagentWarning(convId, subagentCache);
+            }
           }
           if (worker) workers.push(worker);
         }

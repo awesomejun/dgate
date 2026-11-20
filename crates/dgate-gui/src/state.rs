@@ -1444,6 +1444,7 @@ fn demo_worker(slot: RoleSlot, name: &str, activity: &str, short_model: &str) ->
         cli: short_model.split(':').next().unwrap_or(short_model).to_string(),
         model: short_model.split_once(':').map(|(_, m)| m.to_string()),
         effort: None,
+        subagent_warning: None,
     }
 }
 
@@ -1872,6 +1873,7 @@ mod tests {
             cli: "pi".to_string(),
             model: Some("glm-zcode/glm-5.3".to_string()),
             effort: None,
+            subagent_warning: None,
         }
     }
 

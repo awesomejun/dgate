@@ -1037,6 +1037,22 @@ impl DashboardView {
                     true,
                     false,
                 ));
+                if let Some(warn) = w.subagent_warning.as_deref() {
+                    card = card.child(
+                        div()
+                            .h(px(16.))
+                            .px_1()
+                            .rounded_sm()
+                            .bg(BG)
+                            .border_1()
+                            .border_color(ROSE_DANGER)
+                            .text_size(px(10.))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(ROSE_DANGER)
+                            .truncate()
+                            .child(warn.to_string()),
+                    );
+                }
             }
         }
         card.child(telemetry_bottom(parts.leads.first(), LEAD_ORANGE))

@@ -184,6 +184,8 @@ pub struct LiveWorkerInfo {
     pub model: Option<String>,
     /// 실측 effort/thinking (예: 'medium', 'max', 'high') — 미확인 시 None.
     pub effort: Option<String>,
+    /// 리드 세션이 내장 서브에이전트(invoke_subagent)를 실행 중일 때 경고 문구(없으면 None).
+    pub subagent_warning: Option<String>,
 }
 
 impl LiveWorkerInfo {
@@ -594,6 +596,156 @@ pub fn format_live_telemetry(
     }
 }
 
+/// argv에서 `--conversation=<id>` 또는 `--conversation <id>`를 추출한다.
+pub fn extract_conversation_id_from_argv(argv: &[String]) -> Option<String> {
+    let is_uuid = |s: &str| {
+        s.len() >= 8
+            && s.chars()
+                .all(|c| c.is_ascii_hexdigit() || c == '-')
+    };
+    let mut i = 0;
+    while i < argv.len() {
+        let t = argv[i].as_str();
+        if let Some(id) = t.strip_prefix("--conversation=").map(str::trim) {
+            if is_uuid(id) {
+                return Some(id.to_string());
+            }
+        } else if t == "--conversation" && i + 1 < argv.len() {
+            let id = argv[i + 1].trim();
+            if is_uuid(id) {
+                return Some(id.to_string());
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn re_subagent_created_id() -> &'static regex::Regex {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r#"\\?"conversationId\\?"\s*:\s*\\?"([0-9a-fA-F-]{8,})\\?""#).unwrap()
+    })
+}
+
+fn re_subagent_list_state() -> &'static regex::Regex {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(
+            r#"\\?"conversationId\\?"\s*:\s*\\?"([0-9a-fA-F-]{8,})\\?"[^}]*?\\?"state\\?"\s*:\s*\\?"(running|idle)\\?""#,
+        )
+        .unwrap()
+    })
+}
+
+fn re_subagent_sender() -> &'static regex::Regex {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"sender=([0-9a-fA-F-]{8,})").unwrap())
+}
+
+/// Antigravity transcript.jsonl 꼬리(JSONL)에서 현재 실행 중인 내장 서브에이전트(`invoke_subagent`)를
+/// 감지해 경고 배지 문구를 반환한다. 모두 완료되었으면 None.
+pub fn detect_subagent_warning_from_transcript(raw_tail: Option<&str>) -> Option<String> {
+    let raw = raw_tail.filter(|s| !s.is_empty())?;
+    let mut active_ids: HashSet<String> = HashSet::new();
+    let mut pending_invoke = false;
+
+    for line in raw.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        if line.contains("\"invoke_subagent\"") && line.contains("\"tool_calls\"") {
+            pending_invoke = true;
+        }
+        if line.contains("Created the following subagent:") {
+            if let Some(cap) = re_subagent_created_id().captures(line) {
+                if let Some(id) = cap.get(1) {
+                    active_ids.insert(id.as_str().to_string());
+                    pending_invoke = false;
+                }
+            }
+        }
+        if line.contains("active subagent(s):") {
+            active_ids.clear();
+            pending_invoke = false;
+            for cap in re_subagent_list_state().captures_iter(line) {
+                if cap.get(2).map(|m| m.as_str()) == Some("running") {
+                    if let Some(id) = cap.get(1) {
+                        active_ids.insert(id.as_str().to_string());
+                    }
+                }
+            }
+        }
+        if line.contains("sender=") {
+            for cap in re_subagent_sender().captures_iter(line) {
+                if let Some(id) = cap.get(1) {
+                    active_ids.remove(id.as_str());
+                }
+            }
+            pending_invoke = false;
+        }
+        if line.contains("\"manage_subagents\"") && line.contains("kill_all") {
+            active_ids.clear();
+            pending_invoke = false;
+        }
+    }
+
+    let count = active_ids.len() + usize::from(pending_invoke);
+    if count > 0 {
+        Some(format!(
+            "⚠ 내장 서브에이전트 실행 중 ({}개 · 관측 불가)",
+            count
+        ))
+    } else {
+        None
+    }
+}
+
+const TRANSCRIPT_TAIL_BYTES: u64 = 128 * 1024;
+
+fn read_conversation_subagent_warning(
+    conv_id: &str,
+    cache: &mut HashMap<String, (String, Option<String>)>,
+) -> Option<String> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()?;
+    let tx_path = PathBuf::from(home)
+        .join(".gemini")
+        .join("antigravity-cli")
+        .join("brain")
+        .join(conv_id)
+        .join(".system_generated")
+        .join("logs")
+        .join("transcript.jsonl");
+    let meta = std::fs::metadata(&tx_path).ok()?;
+    let mtime_ms = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let sig = format!("{}:{}", mtime_ms, meta.len());
+    if let Some((cached_sig, cached_warn)) = cache.get(conv_id) {
+        if cached_sig == &sig {
+            return cached_warn.clone();
+        }
+    }
+    use std::io::Seek;
+    let mut f = std::fs::File::open(&tx_path).ok()?;
+    let start = meta.len().saturating_sub(TRANSCRIPT_TAIL_BYTES);
+    let _ = f.seek(std::io::SeekFrom::Start(start));
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    let raw = String::from_utf8_lossy(&buf);
+    let warn = detect_subagent_warning_from_transcript(Some(&raw));
+    cache.insert(conv_id.to_string(), (sig, warn.clone()));
+    warn
+}
+
 /// 터미널 화면 원문에서 "의미 있는 마지막 1줄"을 뽑는다.
 /// 아래에서 위로 훑으며 빈 줄·`[hc] …` 상태줄·박스/구분선·스피너 전용 줄·CLI 하단 상태줄은 건너뛴다.
 /// 후보 줄은 가장자리 박스 장식(`│` 등)을 떼고, `redact_secrets`로 시크릿을 마스킹한
@@ -913,6 +1065,7 @@ pub fn infer_live_worker_slot(
         cli: display_cli,
         model: live_model,
         effort: live_effort,
+        subagent_warning: None,
     })
 }
 
@@ -1103,6 +1256,7 @@ pub fn wrap_proc_to_worker(p: &WrapProc, parent: &HcTerminalSummary) -> LiveWork
         cli: p.cli.clone(),
         model: p.model.clone(),
         effort: p.effort.clone(),
+        subagent_warning: None,
     }
 }
 
@@ -1420,6 +1574,7 @@ pub struct LiveSyncSnapshotter {
     last_workers: Vec<LiveWorkerInfo>,
     detail_cache: HashMap<String, HcTerminalDetail>,
     screen_cache: HashMap<String, String>,
+    subagent_cache: HashMap<String, (String, Option<String>)>,
     in_flight: bool,
     stopped: bool,
 }
@@ -1440,6 +1595,7 @@ impl LiveSyncSnapshotter {
             last_workers: Vec::new(),
             detail_cache: HashMap::new(),
             screen_cache: HashMap::new(),
+            subagent_cache: HashMap::new(),
             in_flight: false,
             stopped: false,
         }
@@ -1570,6 +1726,24 @@ impl LiveSyncSnapshotter {
                     // shortModel 폴백을 정규화한다. 워커 규약 터미널은 그대로 둔다.
                     if is_active_top_level_session(summary) && !is_worker_terminal(summary) {
                         normalize_top_level_worker(&mut worker, summary);
+                    }
+                    if worker.slot == RoleSlot::Lead {
+                        let conv_id = detail
+                            .foreground_argv
+                            .as_deref()
+                            .and_then(extract_conversation_id_from_argv)
+                            .or_else(|| {
+                                detail
+                                    .argv
+                                    .as_deref()
+                                    .and_then(extract_conversation_id_from_argv)
+                            });
+                        if let Some(cid) = conv_id {
+                            worker.subagent_warning = read_conversation_subagent_warning(
+                                &cid,
+                                &mut self.subagent_cache,
+                            );
+                        }
                     }
                     workers.push(worker);
                 }
@@ -2209,6 +2383,29 @@ mod tests {
     }
 
     #[test]
+    fn subagent_warning_detected_when_running_and_cleared_when_finished() {
+        let running = concat!(
+            r#"{"step_index":10,"type":"PLANNER_RESPONSE","tool_calls":[{"name":"invoke_subagent"}]}"#,
+            "\n",
+            r#"{"step_index":11,"type":"GENERIC","content":"Created the following subagent:\n{\n  \"conversationId\": \"657931dc-d5b0-4118-8d76-dc2089606369\"\n}"}"#
+        );
+        assert_eq!(
+            detect_subagent_warning_from_transcript(Some(running)).as_deref(),
+            Some("⚠ 내장 서브에이전트 실행 중 (1개 · 관측 불가)")
+        );
+
+        let finished = format!(
+            "{}\n{}",
+            running,
+            r#"{"step_index":15,"type":"SYSTEM_MESSAGE","content":"[Message] sender=657931dc-d5b0-4118-8d76-dc2089606369 content=done"}"#
+        );
+        assert_eq!(
+            detect_subagent_warning_from_transcript(Some(&finished)),
+            None
+        );
+    }
+
+    #[test]
     fn infer_requires_address() {
         let mut d = detail("a", "w-1", "pi", &[], None);
         assert!(infer_live_worker_slot(&d, None).is_some());
@@ -2482,6 +2679,7 @@ mod tests {
             cli: short.split(':').next().unwrap_or(short).to_string(),
             model: model.map(str::to_string),
             effort: None,
+            subagent_warning: None,
         }
     }
 
