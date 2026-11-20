@@ -25,6 +25,7 @@ import {
   createLiveRosterSyncer,
   extractLastActivityLine,
   extractRepoTag,
+  findWrapProcesses,
   inferLiveWorkerSlot,
   isActiveTopLevelSession,
   isObservableTerminal,
@@ -33,6 +34,7 @@ import {
   matchesSessionScope,
   mergeLiveRosterLabels,
   normalizeTopLevelWorker,
+  parsePsRows,
   type HcTerminalDetail,
   type LiveWorkerInfo,
   type MergedLiveRoster,
@@ -1937,4 +1939,60 @@ test('foreground.argv 우선 — 초기 셸 런치의 스테일 --model을 현�
   assert.equal(piWithFooter?.effort, 'max');
   assert.equal(piWithFooter?.telemetryLine, 'pi · glm-5.3 · max');
   assert.equal(piWithFooter?.activity, '작업 완료');
+});
+
+test('dg wrap 백그라운드 워커 — hc 터미널이 아니어도 상위 세션 소속으로 Workers에 잡힌다', async () => {
+  const ps = [
+    '  500     1 /bin/zsh -l',
+    '  600   500 agy --dangerously-skip-permissions --conversation=abc',
+    '  700   600 node /x/src/decision/dg.ts wrap --route file_select --tool-class file_edit --fork fk_1 --project /w/.worktrees/pi-cli-manager --stall-ms 1 --require-stdout',
+    '  701   700 /home/u/.local/bin/devin -p --permission-mode dangerous -- 작업 내용 공백 포함',
+    '  702   701 /home/u/.local/bin/devin acp --process-model=in-process',
+    '  800   500 node /x/other.js',
+  ].join('\n');
+  const procs = findWrapProcesses(parsePsRows(ps));
+  assert.equal(procs.length, 1);
+  assert.equal(procs[0]?.cli, 'devin');
+  assert.equal(procs[0]?.project, 'pi-cli-manager');
+  assert.equal(procs[0]?.route, 'file_select');
+  assert.ok(procs[0]?.ancestors.includes(600));
+
+  const calls: string[][] = [];
+  const syncerWorkers: LiveWorkerInfo[] = [];
+  const syncer = createLiveRosterSyncer({
+    repoDir: REPO_ROOT,
+    onUpdate: (m) => {
+      syncerWorkers.splice(0, syncerWorkers.length, ...m.workers);
+    },
+    intervalMs: 3_600_000,
+    psRunner: async () => ps,
+    execRunner: async (_file, args) => {
+      calls.push([...args]);
+      if (args[0] === 'ls') {
+        return JSON.stringify({
+          terminals: [
+            { address: 't155', agent: 'antigravity', state: 'live', status: 'working', cwd: '/tmp/paperwork-operations' },
+            { address: 't1x', agent: 'antigravity', state: 'live', status: 'idle', cwd: '/tmp/other-repo' },
+          ],
+        });
+      }
+      if (args[0] === 'get') {
+        const pid = args[1] === 't155' ? 600 : 999;
+        return JSON.stringify({ address: args[1], agent: 'antigravity', state: 'live', pid: 1, foreground: { pid, argv: ['agy'] } });
+      }
+      return '';
+    },
+  });
+  try {
+    await waitFor(() => syncerWorkers.some((w) => w.address === 'pid:700'));
+    const wrapped = syncerWorkers.find((w) => w.address === 'pid:700');
+    assert.ok(wrapped, 'wrap 워커 카드 생성');
+    assert.equal(wrapped?.slot, 'coder');
+    assert.equal(wrapped?.name, 'pi-cli-manager');
+    assert.equal(wrapped?.repoTag, 'paperwork-operations');
+    assert.equal(wrapped?.cli, 'devin');
+    assert.equal(wrapped?.status, 'working');
+  } finally {
+    syncer.stop();
+  }
 });

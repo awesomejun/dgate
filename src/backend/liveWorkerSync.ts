@@ -561,6 +561,139 @@ export function inferLiveWorkerSlot(
   };
 }
 
+// ---------- dg wrap 프로세스 워커 (hc 터미널이 아닌 자식 프로세스) ----------
+
+/** `ps` 한 줄 — pid·ppid·전체 커맨드. */
+export interface PsRow {
+  pid: number;
+  ppid: number;
+  command: string;
+}
+
+/** `ps -axo pid=,ppid=,command=` 출력 파싱. */
+export function parsePsRows(out: string): PsRow[] {
+  const rows: PsRow[] = [];
+  for (const line of out.split(/\r?\n/)) {
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.*\S)\s*$/);
+    if (!m) continue;
+    rows.push({ pid: Number(m[1]), ppid: Number(m[2]), command: m[3]! });
+  }
+  return rows;
+}
+
+/** 라이브 `dg wrap` 실행 1건 — 에이전트(리드)가 hc 터미널 없이 백그라운드로 띄운 워커. */
+export interface WrapProc {
+  wrapPid: number;
+  /** wrap 프로세스부터 위로 올라가는 조상 pid 체인(자기 자신 제외). */
+  ancestors: number[];
+  cli: string;
+  model: string | null;
+  effort: string | null;
+  project: string | null;
+  route: string | null;
+}
+
+const WRAP_LAUNCHERS = new Set(['node', 'bun', 'deno', 'tsx', 'dg', 'dg.ts']);
+
+function flagValue(tokens: readonly string[], flag: string): string | null {
+  const i = tokens.indexOf(flag);
+  if (i >= 0 && i + 1 < tokens.length) return tokens[i + 1]!;
+  return null;
+}
+
+/**
+ * ps 목록에서 `node …/dg.ts wrap …` 프로세스와 그 실제 워커 자식(devin/pi/claude/…)을 찾는다.
+ * 워커 자식이 아직 없고 `--` 이후 커맨드도 없으면 건너뛴다(허위 카드 금지).
+ */
+export function findWrapProcesses(rows: readonly PsRow[]): WrapProc[] {
+  const byPid = new Map<number, PsRow>();
+  const children = new Map<number, PsRow[]>();
+  for (const r of rows) {
+    byPid.set(r.pid, r);
+    const list = children.get(r.ppid);
+    if (list) list.push(r);
+    else children.set(r.ppid, [r]);
+  }
+  const out: WrapProc[] = [];
+  for (const row of rows) {
+    const tokens = row.command.split(/\s+/).filter((t) => t.length > 0);
+    if (tokens.length < 3 || !WRAP_LAUNCHERS.has(tokenBase(tokens[0]!))) continue;
+    const dgIdx = tokens.findIndex((t) => t === 'dg' || tokenBase(t) === 'dg.ts' || tokenBase(t) === 'dg');
+    if (dgIdx < 0 || tokens[dgIdx + 1] !== 'wrap') continue;
+
+    // BFS — 가장 가까운 워커 CLI 자식
+    let workerTokens: string[] | null = null;
+    const queue: number[] = [row.pid];
+    for (let qi = 0; qi < queue.length && qi < 64 && !workerTokens; qi++) {
+      for (const child of children.get(queue[qi]!) ?? []) {
+        const ct = child.command.split(/\s+/).filter((t) => t.length > 0);
+        const head = tokenBase(ct[0] ?? '');
+        const second = tokenBase(ct[1] ?? '');
+        if (WORKER_CLI_SET.has(head) || (head === 'node' && WORKER_CLI_SET.has(second))) {
+          workerTokens = ct;
+          break;
+        }
+        queue.push(child.pid);
+      }
+    }
+    if (!workerTokens) {
+      const dash = tokens.indexOf('--', dgIdx);
+      if (dash >= 0 && dash + 1 < tokens.length) workerTokens = tokens.slice(dash + 1);
+    }
+    if (!workerTokens) continue;
+
+    const { cli, model } = parseWorkerCliAndModel(workerTokens);
+    const ancestors: number[] = [];
+    let cur = byPid.get(row.ppid);
+    for (let hop = 0; cur && hop < 40; hop++) {
+      ancestors.push(cur.pid);
+      cur = byPid.get(cur.ppid);
+    }
+    if (row.ppid > 1 && !ancestors.includes(row.ppid)) ancestors.unshift(row.ppid);
+    const projectPath = flagValue(tokens, '--project');
+    out.push({
+      wrapPid: row.pid,
+      ancestors,
+      cli,
+      model,
+      effort: parseWorkerEffort(workerTokens),
+      project: projectPath ? tokenBase(projectPath.replace(/[\\/]+$/, '')) || null : null,
+      route: flagValue(tokens, '--route'),
+    });
+  }
+  return out;
+}
+
+/** wrap 프로세스를 상위 hc 세션(parent) 카드 정보로 변환 — slot=coder, 실행 중. */
+export function wrapProcToWorker(p: WrapProc, parent: HcTerminalSummary): LiveWorkerInfo {
+  const shortModel = formatRoleBadge(p.model ? { cli: p.cli, model: p.model } : { cli: p.cli });
+  return {
+    slot: 'coder',
+    badge: `${shortModel} (실행 중)`,
+    shortModel,
+    modelName: p.model ?? p.cli,
+    address: `pid:${p.wrapPid}`,
+    name: p.project ?? `wrap-${p.wrapPid}`,
+    cwd: parent.cwd ?? null,
+    repoTag: extractRepoTag(parent.cwd),
+    activity: `dg wrap 실행 중${p.route ? ` · ${p.route}` : ''} (상위 ${parent.address})`,
+    status: 'working',
+    cli: p.cli,
+    model: p.model,
+    effort: p.effort,
+    telemetryLine: formatLiveTelemetry(p.cli, p.model, p.effort),
+  };
+}
+
+async function defaultPsRunner(): Promise<string> {
+  if (process.platform === 'win32') return '';
+  const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,ppid=,command='], {
+    timeout: 1500,
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  return stdout;
+}
+
 // ---------- 라벨 병합 ----------
 
 /**
@@ -708,6 +841,8 @@ export interface LiveRosterSyncerOptions {
   execRunner?: HcExecRunner;
   /** `hc` 실행 파일(기본 'hc'). */
   hcBin?: string;
+  /** `ps -axo pid=,ppid=,command=` 출력 공급자(테스트용). execRunner를 주입하면 기본 비활성. */
+  psRunner?: () => Promise<string>;
 }
 
 export interface LiveRosterSyncer {
@@ -766,6 +901,9 @@ export function createLiveRosterSyncer(opts: LiveRosterSyncerOptions): LiveRoste
   const intervalMs = opts.intervalMs ?? DEFAULT_SYNC_INTERVAL_MS;
   const repoFilterDir = opts.repoFilterDir ?? null;
   const sessionId = opts.sessionId;
+  const psRunner: (() => Promise<string>) | null =
+    opts.psRunner ?? (opts.execRunner ? null : defaultPsRunner);
+  const pidCache = new Map<string, number[]>();
 
   let baseLabels: RosterDisplayLabels | null = null;
   let rosterSignature: string | null = null;
@@ -824,6 +962,7 @@ export function createLiveRosterSyncer(opts: LiveRosterSyncerOptions): LiveRoste
       // 1) `hc ls --json` — 실행 오류·JSON 파싱 실패 모두 이전 워커 상태 유지(fail-safe).
       //    (파싱 실패 시 빈 목록으로 방송하면 워커 0건 + 허위 종료 로그가 터진다.)
       let summaries: HcTerminalSummary[] | null = null;
+      let allTerminals: HcTerminalSummary[] = [];
       try {
         const raw = await execRunner(hcBin, ['ls', '--json'], { timeout: HC_LS_TIMEOUT_MS });
         const parsed = parseJsonOrNull(raw);
@@ -834,11 +973,12 @@ export function createLiveRosterSyncer(opts: LiveRosterSyncerOptions): LiveRoste
           if (!Array.isArray(terminals)) {
             summaries = null; // terminals 누락·비정상 — 이전 워커 보존 ({} / {"terminals":null})
           } else {
-          summaries = terminals
+          allTerminals = terminals
             .map((t) =>
               t && typeof t === 'object' ? normalizeTerminal(t as Record<string, unknown>) : null
             )
-            .filter((t): t is HcTerminalSummary => t !== null)
+            .filter((t): t is HcTerminalSummary => t !== null);
+          summaries = allTerminals
             .filter(
               (t) =>
                 isObservableTerminal(t) &&
@@ -942,6 +1082,58 @@ export function createLiveRosterSyncer(opts: LiveRosterSyncerOptions): LiveRoste
           }
           if (worker) workers.push(worker);
         }
+
+        // 3.5) `dg wrap`으로 에이전트가 백그라운드로 띄운 워커 — hc 터미널이 아니라 ps 프로세스
+        //      트리에서만 보인다. 조상 pid가 hc 세션(pid/foreground.pid)과 맞으면 그 세션 소속.
+        if (psRunner) {
+          try {
+            const procs = findWrapProcesses(parsePsRows(await psRunner()));
+            if (procs.length > 0) {
+              for (const addr of [...pidCache.keys()]) {
+                if (!allTerminals.some((t) => t.address === addr)) pidCache.delete(addr);
+              }
+              let fetched = 0;
+              const pidOwner = new Map<number, HcTerminalSummary>();
+              for (const t of allTerminals) {
+                if (t.state !== 'live' || t.parent) continue;
+                let pids = pidCache.get(t.address);
+                if (!pids && fetched < 12) {
+                  fetched++;
+                  try {
+                    const raw = await execRunner(hcBin, ['get', t.address, '--json'], {
+                      timeout: HC_LS_TIMEOUT_MS,
+                    });
+                    const parsed = parseJsonOrNull(raw);
+                    const list: number[] = [];
+                    if (parsed) {
+                      if (typeof parsed['pid'] === 'number') list.push(parsed['pid']);
+                      const fg = parsed['foreground'];
+                      if (fg && typeof fg === 'object' && !Array.isArray(fg)) {
+                        const fp = (fg as Record<string, unknown>)['pid'];
+                        if (typeof fp === 'number') list.push(fp);
+                      }
+                    }
+                    pids = list;
+                    pidCache.set(t.address, pids);
+                  } catch {
+                    pids = undefined;
+                  }
+                }
+                for (const pid of pids ?? []) pidOwner.set(pid, t);
+              }
+              for (const p of procs) {
+                const owner = p.ancestors.map((a) => pidOwner.get(a)).find((t) => t !== undefined);
+                if (!owner) continue;
+                if (!matchesRepoScope(owner.cwd, repoFilterDir) || !matchesSessionScope(owner, sessionId)) {
+                  continue;
+                }
+                workers.push(wrapProcToWorker(p, owner));
+              }
+            }
+          } catch {
+            // ps 실패는 조용히 무시 — hc 기반 목록은 그대로 유지
+          }
+        }
         lastWorkers = workers;
       }
 
@@ -969,6 +1161,7 @@ export function createLiveRosterSyncer(opts: LiveRosterSyncerOptions): LiveRoste
       }
       detailCache.clear();
       screenCache.clear();
+      pidCache.clear();
     },
     tickNow(): Promise<void> {
       return runTick();

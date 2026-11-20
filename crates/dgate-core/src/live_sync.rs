@@ -917,6 +917,228 @@ pub fn infer_live_worker_slot(
 }
 
 // ---------------------------------------------------------------------------
+// dg wrap 프로세스 워커 (hc 터미널이 아닌 자식 프로세스)
+// ---------------------------------------------------------------------------
+
+/// `ps` 한 줄 — pid·ppid·전체 커맨드.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PsRow {
+    pub pid: u64,
+    pub ppid: u64,
+    pub command: String,
+}
+
+/// `ps -axo pid=,ppid=,command=` 출력 파싱.
+pub fn parse_ps_rows(out: &str) -> Vec<PsRow> {
+    let mut rows = Vec::new();
+    for line in out.lines() {
+        let t = line.trim_start();
+        let Some((a, rest)) = t.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some((b, cmd)) = rest.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let cmd = cmd.trim();
+        if let (Ok(pid), Ok(ppid)) = (a.parse::<u64>(), b.parse::<u64>()) {
+            if !cmd.is_empty() {
+                rows.push(PsRow {
+                    pid,
+                    ppid,
+                    command: cmd.to_string(),
+                });
+            }
+        }
+    }
+    rows
+}
+
+/// 라이브 `dg wrap` 실행 1건 — 에이전트(리드)가 hc 터미널 없이 백그라운드로 띄운 워커.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WrapProc {
+    pub wrap_pid: u64,
+    /// wrap 프로세스부터 위로 올라가는 조상 pid 체인(자기 자신 제외).
+    pub ancestors: Vec<u64>,
+    pub cli: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub project: Option<String>,
+    pub route: Option<String>,
+}
+
+fn flag_value(tokens: &[String], flag: &str) -> Option<String> {
+    let i = tokens.iter().position(|t| t == flag)?;
+    tokens.get(i + 1).cloned()
+}
+
+fn split_tokens(command: &str) -> Vec<String> {
+    command
+        .split_whitespace()
+        .map(str::to_string)
+        .collect::<Vec<String>>()
+}
+
+/// ps 목록에서 `node …/dg.ts wrap …` 프로세스와 그 실제 워커 자식(devin/pi/claude/…)을 찾는다.
+/// 워커 자식이 아직 없고 `--` 이후 커맨드도 없으면 건너뛴다(허위 카드 금지).
+pub fn find_wrap_processes(rows: &[PsRow]) -> Vec<WrapProc> {
+    let by_pid: HashMap<u64, &PsRow> = rows.iter().map(|r| (r.pid, r)).collect();
+    let mut children: HashMap<u64, Vec<&PsRow>> = HashMap::new();
+    for r in rows {
+        children.entry(r.ppid).or_default().push(r);
+    }
+    let launchers = ["node", "bun", "deno", "tsx", "dg", "dg.ts"];
+    let mut out = Vec::new();
+    for row in rows {
+        let tokens = split_tokens(&row.command);
+        if tokens.len() < 3 || !launchers.contains(&token_base(&tokens[0]).as_str()) {
+            continue;
+        }
+        let Some(dg_idx) = tokens
+            .iter()
+            .position(|t| t == "dg" || token_base(t) == "dg.ts" || token_base(t) == "dg")
+        else {
+            continue;
+        };
+        if tokens.get(dg_idx + 1).map(String::as_str) != Some("wrap") {
+            continue;
+        }
+
+        // BFS — 가장 가까운 워커 CLI 자식
+        let mut worker_tokens: Option<Vec<String>> = None;
+        let mut queue: Vec<u64> = vec![row.pid];
+        let mut qi = 0;
+        while qi < queue.len() && qi < 64 && worker_tokens.is_none() {
+            let cur = queue[qi];
+            qi += 1;
+            if let Some(kids) = children.get(&cur) {
+                for child in kids {
+                    let ct = split_tokens(&child.command);
+                    let head = ct.first().map(|t| token_base(t)).unwrap_or_default();
+                    let second = ct.get(1).map(|t| token_base(t)).unwrap_or_default();
+                    if WORKER_CLI_SET.contains(&head.as_str())
+                        || (head == "node" && WORKER_CLI_SET.contains(&second.as_str()))
+                    {
+                        worker_tokens = Some(ct);
+                        break;
+                    }
+                    queue.push(child.pid);
+                }
+            }
+        }
+        if worker_tokens.is_none() {
+            if let Some(dash) = tokens.iter().skip(dg_idx).position(|t| t == "--") {
+                let start = dg_idx + dash + 1;
+                if start < tokens.len() {
+                    worker_tokens = Some(tokens[start..].to_vec());
+                }
+            }
+        }
+        let Some(worker_tokens) = worker_tokens else {
+            continue;
+        };
+
+        let (cli, model) = parse_worker_cli_and_model(&worker_tokens, None);
+        let mut ancestors: Vec<u64> = Vec::new();
+        let mut cur = by_pid.get(&row.ppid).copied();
+        let mut hops = 0;
+        while let Some(p) = cur {
+            if hops >= 40 {
+                break;
+            }
+            ancestors.push(p.pid);
+            cur = by_pid.get(&p.ppid).copied();
+            hops += 1;
+        }
+        if row.ppid > 1 && !ancestors.contains(&row.ppid) {
+            ancestors.insert(0, row.ppid);
+        }
+        let project = flag_value(&tokens, "--project").and_then(|p| {
+            let trimmed = p.trim_end_matches(['/', '\\']).to_string();
+            let base = token_base(&trimmed);
+            if base.is_empty() {
+                None
+            } else {
+                Some(base)
+            }
+        });
+        out.push(WrapProc {
+            wrap_pid: row.pid,
+            ancestors,
+            cli,
+            model,
+            effort: parse_worker_effort(&worker_tokens),
+            project,
+            route: flag_value(&tokens, "--route"),
+        });
+    }
+    out
+}
+
+/// wrap 프로세스를 상위 hc 세션(parent) 카드 정보로 변환 — slot=coder, 실행 중.
+pub fn wrap_proc_to_worker(p: &WrapProc, parent: &HcTerminalSummary) -> LiveWorkerInfo {
+    let short_model = format_role_badge(&p.cli, p.model.as_deref());
+    LiveWorkerInfo {
+        slot: RoleSlot::Coder,
+        badge: format!("{} (실행 중)", short_model),
+        model_name: p.model.clone().unwrap_or_else(|| p.cli.clone()),
+        short_model,
+        address: format!("pid:{}", p.wrap_pid),
+        name: p
+            .project
+            .clone()
+            .unwrap_or_else(|| format!("wrap-{}", p.wrap_pid)),
+        cwd: parent.cwd.clone(),
+        repo_tag: extract_repo_tag(parent.cwd.as_deref()),
+        activity: format!(
+            "dg wrap 실행 중{} (상위 {})",
+            p.route
+                .as_deref()
+                .map(|r| format!(" · {}", r))
+                .unwrap_or_default(),
+            parent.address
+        ),
+        status: Some("working".to_string()),
+        turn: None,
+        cli: p.cli.clone(),
+        model: p.model.clone(),
+        effort: p.effort.clone(),
+    }
+}
+
+/// 기본 프로세스 목록 공급자 — Windows·테스트에서는 비활성(None).
+fn default_proc_lister() -> Option<String> {
+    if cfg!(windows) || cfg!(test) {
+        return None;
+    }
+    let out = std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid=,command="])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    String::from_utf8(out.stdout).ok()
+}
+
+/// `hc get --json` 출력에서 터미널 자신과 포그라운드 프로세스 pid를 모은다.
+fn parse_hc_get_pids(raw: &str) -> Vec<u64> {
+    let Ok(parsed) = serde_json::from_str::<Value>(raw) else {
+        return Vec::new();
+    };
+    let mut pids = Vec::new();
+    if let Some(p) = parsed.get("pid").and_then(Value::as_u64) {
+        pids.push(p);
+    }
+    if let Some(p) = parsed
+        .get("foreground")
+        .and_then(|f| f.get("pid"))
+        .and_then(Value::as_u64)
+    {
+        pids.push(p);
+    }
+    pids
+}
+
+// ---------------------------------------------------------------------------
 // 라벨 병합
 // ---------------------------------------------------------------------------
 
@@ -1159,6 +1381,8 @@ pub struct LiveSyncOptions {
     pub get_watched_lead: Option<Arc<dyn Fn() -> Option<String> + Send + Sync>>,
     /// 병합 결과 수신자 — 매 틱 호출(변경 여부 판정은 수신자 책임).
     pub on_update: Option<Arc<Mutex<dyn FnMut(&MergedLiveRoster) + Send + Sync>>>,
+    /// `ps -axo pid=,ppid=,command=` 출력 공급자 — `dg wrap` 백그라운드 워커 탐지용(None=비활성).
+    pub proc_lister: Arc<dyn Fn() -> Option<String> + Send + Sync>,
 }
 
 impl LiveSyncOptions {
@@ -1170,6 +1394,7 @@ impl LiveSyncOptions {
             exec_runner: Arc::new(DefaultHcRunner),
             get_watched_lead: None,
             on_update: None,
+            proc_lister: Arc::new(default_proc_lister),
         }
     }
 }
@@ -1188,6 +1413,8 @@ pub struct LiveSyncSnapshotter {
     runner: Arc<dyn HcExecRunner>,
     get_watched_lead: Option<Arc<dyn Fn() -> Option<String> + Send + Sync>>,
     on_update: Option<Arc<Mutex<dyn FnMut(&MergedLiveRoster) + Send + Sync>>>,
+    proc_lister: Arc<dyn Fn() -> Option<String> + Send + Sync>,
+    pid_cache: HashMap<String, Vec<u64>>,
     base_labels: Option<RosterDisplayLabels>,
     roster_signature: Option<String>,
     last_workers: Vec<LiveWorkerInfo>,
@@ -1206,6 +1433,8 @@ impl LiveSyncSnapshotter {
             runner: opts.exec_runner,
             get_watched_lead: opts.get_watched_lead,
             on_update: opts.on_update,
+            proc_lister: opts.proc_lister,
+            pid_cache: HashMap::new(),
             base_labels: None,
             roster_signature: None,
             last_workers: Vec::new(),
@@ -1257,23 +1486,24 @@ impl LiveSyncSnapshotter {
 
         // 1) `hc ls --json` — 실행 오류·JSON 파싱 실패 모두 이전 워커 상태 유지(fail-safe).
         //    (파싱 실패 시 빈 목록으로 방송하면 워커 0건 + 허위 종료 로그가 터진다.)
-        let summaries: Option<Vec<HcTerminalSummary>> = self
+        let all_terminals: Option<Vec<HcTerminalSummary>> = self
             .runner
             .exec(&self.hc_bin, &["ls", "--json"], HC_LS_TIMEOUT_MS)
             .ok()
-            .and_then(|raw| parse_hc_ls_json(&raw))
-            .map(|terminals| {
-                terminals
-                    .into_iter()
-                    .filter(|t| {
-                        is_observable_terminal(t)
-                            && matches_repo_scope(
-                                t.cwd.as_deref(),
-                                self.repo_filter_dir.as_deref().and_then(|p| p.to_str()),
-                            )
-                    })
-                    .collect()
-            });
+            .and_then(|raw| parse_hc_ls_json(&raw));
+        let summaries: Option<Vec<HcTerminalSummary>> = all_terminals.as_ref().map(|terminals| {
+            terminals
+                .iter()
+                .filter(|t| {
+                    is_observable_terminal(t)
+                        && matches_repo_scope(
+                            t.cwd.as_deref(),
+                            self.repo_filter_dir.as_deref().and_then(|p| p.to_str()),
+                        )
+                })
+                .cloned()
+                .collect()
+        });
 
         // 2) 상세 캐시 갱신 — 떠난 주소는 즉시 증발
         if let Some(summaries) = summaries {
@@ -1342,6 +1572,50 @@ impl LiveSyncSnapshotter {
                         normalize_top_level_worker(&mut worker, summary);
                     }
                     workers.push(worker);
+                }
+            }
+            // 3.5) `dg wrap`으로 에이전트가 백그라운드로 띄운 워커 — hc 터미널이 아니라 ps
+            //      프로세스 트리에서만 보인다. 조상 pid가 hc 세션(pid/foreground.pid)과 맞으면
+            //      그 세션 소속으로 Workers에 올린다.
+            if let Some(ps_out) = (self.proc_lister)() {
+                let procs = find_wrap_processes(&parse_ps_rows(&ps_out));
+                if !procs.is_empty() {
+                    let terminals: &[HcTerminalSummary] =
+                        all_terminals.as_deref().unwrap_or(&[]);
+                    self.pid_cache
+                        .retain(|addr, _| terminals.iter().any(|t| &t.address == addr));
+                    let mut fetched = 0usize;
+                    let mut pid_owner: HashMap<u64, &HcTerminalSummary> = HashMap::new();
+                    for t in terminals {
+                        if t.state.as_deref() != Some("live") || t.parent.is_some() {
+                            continue;
+                        }
+                        if !self.pid_cache.contains_key(&t.address) && fetched < 12 {
+                            fetched += 1;
+                            if let Ok(raw) = self.runner.exec(
+                                &self.hc_bin,
+                                &["get", t.address.as_str(), "--json"],
+                                HC_LS_TIMEOUT_MS,
+                            ) {
+                                self.pid_cache
+                                    .insert(t.address.clone(), parse_hc_get_pids(&raw));
+                            }
+                        }
+                        if let Some(pids) = self.pid_cache.get(&t.address) {
+                            for pid in pids {
+                                pid_owner.insert(*pid, t);
+                            }
+                        }
+                    }
+                    let repo_scope = self.repo_filter_dir.as_deref().and_then(|p| p.to_str());
+                    for p in &procs {
+                        let owner = p.ancestors.iter().find_map(|a| pid_owner.get(a).copied());
+                        let Some(owner) = owner else { continue };
+                        if !matches_repo_scope(owner.cwd.as_deref(), repo_scope) {
+                            continue;
+                        }
+                        workers.push(wrap_proc_to_worker(p, owner));
+                    }
                 }
             }
             self.last_workers = workers;
@@ -1904,6 +2178,37 @@ mod tests {
     }
 
     #[test]
+    fn wrap_process_worker_attaches_to_parent_session() {
+        let ps = "  500     1 /bin/zsh -l\n\
+  600   500 agy --dangerously-skip-permissions --conversation=abc\n\
+  700   600 node /x/src/decision/dg.ts wrap --route file_select --tool-class file_edit --fork fk_1 --project /w/.worktrees/pi-cli-manager --stall-ms 1 --require-stdout\n\
+  701   700 /home/u/.local/bin/devin -p --permission-mode dangerous -- 작업 내용 공백 포함\n\
+  702   701 /home/u/.local/bin/devin acp --process-model=in-process\n\
+  800   500 node /x/other.js\n";
+        let procs = find_wrap_processes(&parse_ps_rows(ps));
+        assert_eq!(procs.len(), 1);
+        assert_eq!(procs[0].cli, "devin");
+        assert_eq!(procs[0].project.as_deref(), Some("pi-cli-manager"));
+        assert_eq!(procs[0].route.as_deref(), Some("file_select"));
+        assert!(procs[0].ancestors.contains(&600));
+
+        let parent = HcTerminalSummary {
+            address: "t155".into(),
+            agent: Some("antigravity".into()),
+            cwd: Some("/tmp/paperwork-operations".into()),
+            state: Some("live".into()),
+            ..Default::default()
+        };
+        let w = wrap_proc_to_worker(&procs[0], &parent);
+        assert_eq!(w.slot, RoleSlot::Coder);
+        assert_eq!(w.address, "pid:700");
+        assert_eq!(w.name, "pi-cli-manager");
+        assert_eq!(w.repo_tag, "paperwork-operations");
+        assert_eq!(w.cli, "devin");
+        assert_eq!(w.status.as_deref(), Some("working"));
+    }
+
+    #[test]
     fn infer_requires_address() {
         let mut d = detail("a", "w-1", "pi", &[], None);
         assert!(infer_live_worker_slot(&d, None).is_some());
@@ -2342,6 +2647,7 @@ mod tests {
             hc_bin: "hc".to_string(),
             exec_runner: mock,
             get_watched_lead: None,
+            proc_lister: Arc::new(|| None),
             on_update: None,
         })
     }
@@ -2376,6 +2682,7 @@ mod tests {
             hc_bin: "hc".to_string(),
             exec_runner: mock.clone(),
             get_watched_lead: None,
+            proc_lister: Arc::new(|| None),
             on_update: Some(Arc::new(Mutex::new(move |m: &MergedLiveRoster| {
                 sink.lock().unwrap().push(m.clone());
             }))),
@@ -2569,6 +2876,7 @@ mod tests {
             hc_bin: "hc".to_string(),
             exec_runner: mock,
             get_watched_lead: None,
+            proc_lister: Arc::new(|| None),
             on_update: None,
         });
         let merged = snap.tick_now();
@@ -2591,6 +2899,7 @@ mod tests {
             hc_bin: "definitely-not-a-real-hc-binary-xyz".to_string(),
             exec_runner: Arc::new(DefaultHcRunner),
             get_watched_lead: None,
+            proc_lister: Arc::new(|| None),
             on_update: None,
         });
         let merged = snap.tick_now();
