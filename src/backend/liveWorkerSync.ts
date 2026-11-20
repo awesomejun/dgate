@@ -731,28 +731,38 @@ export function findWrapProcesses(rows: readonly PsRow[]): WrapProc[] {
     const dgIdx = tokens.findIndex((t) => t === 'dg' || tokenBase(t) === 'dg.ts' || tokenBase(t) === 'dg');
     if (dgIdx < 0 || tokens[dgIdx + 1] !== 'wrap') continue;
 
-    // BFS — 가장 가까운 워커 CLI 자식
-    let workerTokens: string[] | null = null;
+    // 1) `dg wrap ... -- <cmd...>` 뒤 원본 커맨드 (자식이 process.title을 'pi'로 덮어도 --model/--thinking 보존)
+    const dash = tokens.indexOf('--', dgIdx);
+    const dashTokens = dash >= 0 && dash + 1 < tokens.length ? tokens.slice(dash + 1) : null;
+
+    // 2) BFS — 가장 가까운 워커 CLI 자식
+    let childTokens: string[] | null = null;
     const queue: number[] = [row.pid];
-    for (let qi = 0; qi < queue.length && qi < 64 && !workerTokens; qi++) {
+    for (let qi = 0; qi < queue.length && qi < 64 && !childTokens; qi++) {
       for (const child of children.get(queue[qi]!) ?? []) {
         const ct = child.command.split(/\s+/).filter((t) => t.length > 0);
         const head = tokenBase(ct[0] ?? '');
         const second = tokenBase(ct[1] ?? '');
         if (WORKER_CLI_SET.has(head) || (head === 'node' && WORKER_CLI_SET.has(second))) {
-          workerTokens = ct;
+          childTokens = ct;
           break;
         }
         queue.push(child.pid);
       }
     }
-    if (!workerTokens) {
-      const dash = tokens.indexOf('--', dgIdx);
-      if (dash >= 0 && dash + 1 < tokens.length) workerTokens = tokens.slice(dash + 1);
-    }
-    if (!workerTokens) continue;
+    if (!dashTokens && !childTokens) continue;
 
-    const { cli, model } = parseWorkerCliAndModel(workerTokens);
+    const fromDash = dashTokens ? parseWorkerCliAndModel(dashTokens) : null;
+    const fromChild = childTokens ? parseWorkerCliAndModel(childTokens) : null;
+    const cli =
+      (fromDash && fromDash.cli !== 'custom' ? fromDash.cli : null) ??
+      fromChild?.cli ??
+      fromDash?.cli ??
+      'custom';
+    const model = fromDash?.model ?? fromChild?.model ?? null;
+    const effort =
+      (dashTokens ? parseWorkerEffort(dashTokens) : null) ??
+      (childTokens ? parseWorkerEffort(childTokens) : null);
     const ancestors: number[] = [];
     let cur = byPid.get(row.ppid);
     for (let hop = 0; cur && hop < 40; hop++) {
@@ -761,13 +771,14 @@ export function findWrapProcesses(rows: readonly PsRow[]): WrapProc[] {
     }
     if (row.ppid > 1 && !ancestors.includes(row.ppid)) ancestors.unshift(row.ppid);
     const projectPath = flagValue(tokens, '--project');
+    const label = flagValue(tokens, '--label');
     out.push({
       wrapPid: row.pid,
       ancestors,
       cli,
       model,
-      effort: parseWorkerEffort(workerTokens),
-      project: projectPath ? tokenBase(projectPath.replace(/[\\/]+$/, '')) || null : null,
+      effort,
+      project: label ?? (projectPath ? tokenBase(projectPath.replace(/[\\/]+$/, '')) || null : null),
       route: flagValue(tokens, '--route'),
     });
   }

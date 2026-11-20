@@ -1157,11 +1157,21 @@ pub fn find_wrap_processes(rows: &[PsRow]) -> Vec<WrapProc> {
             continue;
         }
 
-        // BFS — 가장 가까운 워커 CLI 자식
-        let mut worker_tokens: Option<Vec<String>> = None;
+        // 1) `dg wrap ... -- <cmd...>` 뒤 원본 커맨드 (자식이 process.title을 'pi'로 덮어도 --model/--thinking 보존)
+        let dash_tokens: Option<Vec<String>> = tokens
+            .iter()
+            .skip(dg_idx)
+            .position(|t| t == "--")
+            .and_then(|dash| {
+                let start = dg_idx + dash + 1;
+                (start < tokens.len()).then(|| tokens[start..].to_vec())
+            });
+
+        // 2) BFS — 가장 가까운 워커 CLI 자식
+        let mut child_tokens: Option<Vec<String>> = None;
         let mut queue: Vec<u64> = vec![row.pid];
         let mut qi = 0;
-        while qi < queue.len() && qi < 64 && worker_tokens.is_none() {
+        while qi < queue.len() && qi < 64 && child_tokens.is_none() {
             let cur = queue[qi];
             qi += 1;
             if let Some(kids) = children.get(&cur) {
@@ -1172,26 +1182,37 @@ pub fn find_wrap_processes(rows: &[PsRow]) -> Vec<WrapProc> {
                     if WORKER_CLI_SET.contains(&head.as_str())
                         || (head == "node" && WORKER_CLI_SET.contains(&second.as_str()))
                     {
-                        worker_tokens = Some(ct);
+                        child_tokens = Some(ct);
                         break;
                     }
                     queue.push(child.pid);
                 }
             }
         }
-        if worker_tokens.is_none() {
-            if let Some(dash) = tokens.iter().skip(dg_idx).position(|t| t == "--") {
-                let start = dg_idx + dash + 1;
-                if start < tokens.len() {
-                    worker_tokens = Some(tokens[start..].to_vec());
-                }
-            }
-        }
-        let Some(worker_tokens) = worker_tokens else {
+        if dash_tokens.is_none() && child_tokens.is_none() {
             continue;
-        };
+        }
 
-        let (cli, model) = parse_worker_cli_and_model(&worker_tokens, None);
+        let from_dash = dash_tokens
+            .as_deref()
+            .map(|t| parse_worker_cli_and_model(t, None));
+        let from_child = child_tokens
+            .as_deref()
+            .map(|t| parse_worker_cli_and_model(t, None));
+        let cli = from_dash
+            .as_ref()
+            .filter(|(c, _)| c != "custom")
+            .map(|(c, _)| c.clone())
+            .or_else(|| from_child.as_ref().map(|(c, _)| c.clone()))
+            .or_else(|| from_dash.as_ref().map(|(c, _)| c.clone()))
+            .unwrap_or_else(|| "custom".to_string());
+        let model = from_dash
+            .and_then(|(_, m)| m)
+            .or_else(|| from_child.and_then(|(_, m)| m));
+        let effort = dash_tokens
+            .as_deref()
+            .and_then(parse_worker_effort)
+            .or_else(|| child_tokens.as_deref().and_then(parse_worker_effort));
         let mut ancestors: Vec<u64> = Vec::new();
         let mut cur = by_pid.get(&row.ppid).copied();
         let mut hops = 0;
@@ -1206,21 +1227,23 @@ pub fn find_wrap_processes(rows: &[PsRow]) -> Vec<WrapProc> {
         if row.ppid > 1 && !ancestors.contains(&row.ppid) {
             ancestors.insert(0, row.ppid);
         }
-        let project = flag_value(&tokens, "--project").and_then(|p| {
-            let trimmed = p.trim_end_matches(['/', '\\']).to_string();
-            let base = token_base(&trimmed);
-            if base.is_empty() {
-                None
-            } else {
-                Some(base)
-            }
+        let project = flag_value(&tokens, "--label").or_else(|| {
+            flag_value(&tokens, "--project").and_then(|p| {
+                let trimmed = p.trim_end_matches(['/', '\\']).to_string();
+                let base = token_base(&trimmed);
+                if base.is_empty() {
+                    None
+                } else {
+                    Some(base)
+                }
+            })
         });
         out.push(WrapProc {
             wrap_pid: row.pid,
             ancestors,
             cli,
             model,
-            effort: parse_worker_effort(&worker_tokens),
+            effort,
             project,
             route: flag_value(&tokens, "--route"),
         });
@@ -2380,6 +2403,18 @@ mod tests {
         assert_eq!(w.repo_tag, "paperwork-operations");
         assert_eq!(w.cli, "devin");
         assert_eq!(w.status.as_deref(), Some("working"));
+
+        // 자식 프로세스가 bare 'pi'여도 dg wrap -- 뒤 --model/--thinking 및 --label을 보존한다
+        let ps2 = "57156 77038 /x/dg wrap --route delegate_swarm --label engine-rust-phase1-explore -- pi -p --model command-code/deepseek-deepseek-v4.1-flash --thinking medium -- Analyze\n57182 57156 pi\n";
+        let p2 = find_wrap_processes(&parse_ps_rows(ps2));
+        assert_eq!(p2.len(), 1);
+        assert_eq!(p2[0].cli, "pi");
+        assert_eq!(
+            p2[0].model.as_deref(),
+            Some("command-code/deepseek-deepseek-v4.1-flash")
+        );
+        assert_eq!(p2[0].effort.as_deref(), Some("medium"));
+        assert_eq!(p2[0].project.as_deref(), Some("engine-rust-phase1-explore"));
     }
 
     #[test]

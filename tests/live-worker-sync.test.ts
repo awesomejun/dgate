@@ -2043,3 +2043,16 @@ test('내장 서브에이전트 경고 배지 — invoke_subagent 실행 중 감
   assert.ok(rendered.includes('⚠ 서브에이전트'), 'Lead 박스 우측 경고 라벨');
   assert.ok(rendered.includes('⚠ 내장 서브에이전트 실행 중'), 'Lead 카드 본문 경고 배지');
 });
+
+test('dg wrap -- 뒤 --model/--thinking 및 --label 추출 (자식 프로세스가 bare pi여도 유지)', () => {
+  const ps = [
+    '57156 77038 /x/target/release/dg wrap --route delegate_swarm --tool-class explore --label engine-rust-phase1-explore --stall-ms 240000 -- pi -p --mode json --model command-code/deepseek-deepseek-v4.1-flash --thinking medium -- Analyze',
+    '57182 57156 pi',
+  ].join('\n');
+  const procs = findWrapProcesses(parsePsRows(ps));
+  assert.equal(procs.length, 1);
+  assert.equal(procs[0]?.cli, 'pi');
+  assert.equal(procs[0]?.model, 'command-code/deepseek-deepseek-v4.1-flash');
+  assert.equal(procs[0]?.effort, 'medium');
+  assert.equal(procs[0]?.project, 'engine-rust-phase1-explore');
+});
