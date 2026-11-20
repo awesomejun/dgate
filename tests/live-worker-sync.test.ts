@@ -2071,4 +2071,43 @@ test('리드 transcript 최근 입출력 추출 — USER_INPUT / PLANNER_RESPONS
   assert.ok(!io[0]?.text.includes('sk-secret1234567890abcd'), '시크릿 리덕션');
   assert.equal(io[1]?.role, 'assistant');
   assert.equal(io[1]?.text, '정상 동작 확인했습니다.');
+
+  // Claude Code / Codex / Gemini CLI 포맷 + opencode·hermes CLI 인식
+  const claudeTail = [
+    '{"type":"user","timestamp":"2026-11-20T09:00:00Z","message":{"content":"클로드 질문"}}',
+    '{"type":"assistant","timestamp":"2026-11-20T09:00:02Z","message":{"content":[{"type":"text","text":"클로드 답변"}]}}',
+  ].join('\n');
+  assert.deepEqual(
+    extractRecentIoFromTranscript(claudeTail, 10).map((e) => [e.role, e.text]),
+    [
+      ['user', '클로드 질문'],
+      ['assistant', '클로드 답변'],
+    ]
+  );
+  const codexTail = [
+    '{"type":"event_msg","timestamp":"2026-11-20T09:00:00Z","payload":{"type":"user_message","message":"코덱스 요청"}}',
+    '{"type":"event_msg","timestamp":"2026-11-20T09:00:03Z","payload":{"type":"agent_message","message":"코덱스 응답"}}',
+  ].join('\n');
+  assert.deepEqual(
+    extractRecentIoFromTranscript(codexTail, 10).map((e) => [e.role, e.text]),
+    [
+      ['user', '코덱스 요청'],
+      ['assistant', '코덱스 응답'],
+    ]
+  );
+  const geminiJson = JSON.stringify({
+    messages: [
+      { type: 'user', content: '제미나이 질문' },
+      { type: 'gemini', content: '제미나이 답변' },
+    ],
+  });
+  assert.deepEqual(
+    extractRecentIoFromTranscript(geminiJson, 10).map((e) => [e.role, e.text]),
+    [
+      ['user', '제미나이 질문'],
+      ['assistant', '제미나이 답변'],
+    ]
+  );
+  assert.equal(isActiveTopLevelSession({ address: 'tO', agent: 'opencode', state: 'live', status: 'working' }), true);
+  assert.equal(isActiveTopLevelSession({ address: 'tH', agent: 'hermes', state: 'live', status: 'working' }), true);
 });

@@ -240,7 +240,9 @@ const SHELL_AGENTS: [&str; 9] = [
 ];
 
 /// parent 매칭 판정에 쓰는 워커 CLI 에이전트 목록.
-const PARENT_MATCH_AGENTS: [&str; 5] = ["pi", "devin", "claude", "codex", "gemini"];
+const PARENT_MATCH_AGENTS: [&str; 7] = [
+    "pi", "devin", "claude", "codex", "gemini", "opencode", "hermes",
+];
 
 /// 워커 세션명 접두 — herdr-quad-launch/dispatch가 만드는 이름 규약.
 const WORKER_NAME_PREFIXES: [&str; 9] = [
@@ -287,7 +289,7 @@ pub fn is_worker_terminal(t: &HcTerminalSummary) -> bool {
 
 /// 최상위 활성 AI 에이전트 세션으로 인정하는 에이전트 집합 — 관측 대상 확장용.
 /// 셸(zsh/bash/…)·python3·dgate-gui는 절대 포함하지 않는다.
-const TOP_LEVEL_AI_AGENTS: [&str; 7] = [
+const TOP_LEVEL_AI_AGENTS: [&str; 9] = [
     "antigravity",
     "pi",
     "claude",
@@ -295,6 +297,8 @@ const TOP_LEVEL_AI_AGENTS: [&str; 7] = [
     "devin",
     "gemini",
     "agy",
+    "opencode",
+    "hermes",
 ];
 
 /// 모니터·GUI 전용 세션명 — 최상위 세션 관측에서도 제외.
@@ -747,8 +751,8 @@ fn strip_xml_block(input: &str, tag: &str) -> String {
     s
 }
 
-/// Antigravity(`USER_INPUT`/`PLANNER_RESPONSE`) 및 Pi(`type:"message"`, `message.role:"user"|"assistant"`)
-/// transcript JSONL 꼬리에서 최근 사용자 입력·리드 응답을 최대 `limit`건 추출한다(오래된→최신 순, 시크릿 리덕션 적용).
+/// Antigravity / Pi / Claude Code / Codex / Gemini CLI transcript 꼬리에서
+/// 최근 사용자 입력·리드 응답을 최대 `limit`건 추출한다(오래된→최신 순, 시크릿 리덕션 적용).
 pub fn extract_recent_io_from_transcript(
     raw_tail: Option<&str>,
     limit: usize,
@@ -757,73 +761,14 @@ pub fn extract_recent_io_from_transcript(
         return Vec::new();
     };
     let mut entries = Vec::new();
-    for line in raw.lines() {
-        if !line.contains("\"USER_INPUT\"")
-            && !line.contains("\"PLANNER_RESPONSE\"")
-            && !line.contains("\"type\":\"message\"")
-            && !line.contains("\"type\": \"message\"")
-        {
-            continue;
-        }
-        let Ok(val) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let Some(obj) = val.as_object() else {
-            continue;
-        };
-        let ty = obj.get("type").and_then(Value::as_str).unwrap_or("");
-        let (role, content, iso_ts): (&str, String, Option<&str>) =
-            if ty == "USER_INPUT" || ty == "PLANNER_RESPONSE" {
-                (
-                    if ty == "USER_INPUT" {
-                        "user"
-                    } else {
-                        "assistant"
-                    },
-                    obj.get("content")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                    obj.get("created_at").and_then(Value::as_str),
-                )
-            } else if ty == "message" {
-                let Some(msg) = obj.get("message").and_then(Value::as_object) else {
-                    continue;
-                };
-                let r = msg.get("role").and_then(Value::as_str).unwrap_or("");
-                if r != "user" && r != "assistant" {
-                    continue;
-                }
-                let txt = match msg.get("content") {
-                    Some(Value::String(s)) => s.clone(),
-                    Some(Value::Array(arr)) => arr
-                        .iter()
-                        .filter_map(|b| {
-                            let bo = b.as_object()?;
-                            if bo.get("type").and_then(Value::as_str) == Some("text") {
-                                bo.get("text").and_then(Value::as_str)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                    _ => String::new(),
-                };
-                (
-                    r,
-                    txt,
-                    obj.get("timestamp")
-                        .and_then(Value::as_str)
-                        .or_else(|| msg.get("timestamp").and_then(Value::as_str)),
-                )
-            } else {
-                continue;
-            };
+    let push_clean = |entries: &mut Vec<TranscriptIoEntry>,
+                      role: &str,
+                      content: &str,
+                      iso_ts: Option<&str>| {
         if content.trim().is_empty() {
-            continue;
+            return;
         }
-        let mut redacted = redact_secrets(&content);
+        let mut redacted = redact_secrets(content);
         redacted = strip_xml_block(&redacted, "CONTEXT_SUMMARY");
         redacted = strip_xml_block(&redacted, "ADDITIONAL_METADATA");
         redacted = strip_xml_block(&redacted, "USER_SETTINGS_CHANGE");
@@ -834,21 +779,173 @@ pub fn extract_recent_io_from_transcript(
             .replace_all(&redacted, " ")
             .trim()
             .to_string();
-        if cleaned.is_empty() || cleaned == "." {
-            continue;
+        if cleaned.is_empty() || cleaned == "." || cleaned.starts_with("# AGENTS.md instructions") {
+            return;
         }
-        let time_hhmmss = format_iso_hhmmss(iso_ts);
         entries.push(TranscriptIoEntry {
-            time_hhmmss,
+            time_hhmmss: format_iso_hhmmss(iso_ts),
             role: role.to_string(),
             text: truncate_chars(&cleaned, 160),
         });
+    };
+    let extract_blocks = |val: Option<&Value>, types: &[&str]| -> String {
+        match val {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Array(arr)) => arr
+                .iter()
+                .filter_map(|b| {
+                    let bo = b.as_object()?;
+                    let bt = bo.get("type").and_then(Value::as_str).unwrap_or("");
+                    if types.contains(&bt) {
+                        bo.get("text").and_then(Value::as_str)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+            _ => String::new(),
+        }
+    };
+
+    // Gemini CLI session JSON (`{ messages: [{ type: "user"|"gemini", content }] }`)
+    let trimmed = raw.trim_start();
+    if trimmed.starts_with('{') && trimmed.contains("\"messages\"") && !trimmed.contains("\n{") {
+        if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(trimmed) {
+            if let Some(Value::Array(msgs)) = obj.get("messages") {
+                for m in msgs {
+                    let Some(mo) = m.as_object() else { continue };
+                    let mt = mo.get("type").and_then(Value::as_str).unwrap_or("");
+                    if mt == "user" || mt == "gemini" {
+                        let txt = extract_blocks(mo.get("content"), &["text"]);
+                        push_clean(
+                            &mut entries,
+                            if mt == "user" { "user" } else { "assistant" },
+                            &txt,
+                            mo.get("timestamp").and_then(Value::as_str),
+                        );
+                    }
+                }
+                return if entries.len() > limit {
+                    entries.split_off(entries.len() - limit)
+                } else {
+                    entries
+                };
+            }
+        }
+    }
+
+    for line in raw.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let ty = obj.get("type").and_then(Value::as_str).unwrap_or("");
+        match ty {
+            "USER_INPUT" | "PLANNER_RESPONSE" => {
+                let txt = obj.get("content").and_then(Value::as_str).unwrap_or("");
+                push_clean(
+                    &mut entries,
+                    if ty == "USER_INPUT" {
+                        "user"
+                    } else {
+                        "assistant"
+                    },
+                    txt,
+                    obj.get("created_at").and_then(Value::as_str),
+                );
+            }
+            "message" => {
+                // Pi
+                if let Some(msg) = obj.get("message").and_then(Value::as_object) {
+                    let r = msg.get("role").and_then(Value::as_str).unwrap_or("");
+                    if r == "user" || r == "assistant" {
+                        let txt = extract_blocks(msg.get("content"), &["text"]);
+                        let ts = obj
+                            .get("timestamp")
+                            .and_then(Value::as_str)
+                            .or_else(|| msg.get("timestamp").and_then(Value::as_str));
+                        push_clean(&mut entries, r, &txt, ts);
+                    }
+                }
+            }
+            "user" | "assistant" => {
+                // Claude Code
+                if let Some(msg) = obj.get("message").and_then(Value::as_object) {
+                    let txt = extract_blocks(msg.get("content"), &["text"]);
+                    push_clean(
+                        &mut entries,
+                        ty,
+                        &txt,
+                        obj.get("timestamp").and_then(Value::as_str),
+                    );
+                }
+            }
+            "event_msg" => {
+                // Codex event_msg
+                if let Some(p) = obj.get("payload").and_then(Value::as_object) {
+                    let pt = p.get("type").and_then(Value::as_str).unwrap_or("");
+                    if pt == "user_message" || pt == "agent_message" {
+                        let txt = p.get("message").and_then(Value::as_str).unwrap_or("");
+                        push_clean(
+                            &mut entries,
+                            if pt == "user_message" {
+                                "user"
+                            } else {
+                                "assistant"
+                            },
+                            txt,
+                            obj.get("timestamp").and_then(Value::as_str),
+                        );
+                    }
+                }
+            }
+            "response_item" => {
+                // Codex response_item
+                if let Some(p) = obj.get("payload").and_then(Value::as_object) {
+                    if p.get("type").and_then(Value::as_str) == Some("message") {
+                        let r = p.get("role").and_then(Value::as_str).unwrap_or("");
+                        if r == "user" || r == "assistant" {
+                            let txt = extract_blocks(
+                                p.get("content"),
+                                &["input_text", "output_text", "text"],
+                            );
+                            push_clean(
+                                &mut entries,
+                                r,
+                                &txt,
+                                obj.get("timestamp").and_then(Value::as_str),
+                            );
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
     }
     if entries.len() > limit {
         entries.split_off(entries.len() - limit)
     } else {
         entries
     }
+}
+
+fn find_newest_file_in_dir(dir: &Path, ext: &str) -> Option<PathBuf> {
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|e| e.to_str()) != Some(ext) || !p.is_file() {
+            continue;
+        }
+        if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
+            if best.as_ref().is_none_or(|(t, _)| modified > *t) {
+                best = Some((modified, p));
+            }
+        }
+    }
+    best.map(|(_, p)| p)
 }
 
 /// Pi 세션 디렉터리(`~/.pi/agent/sessions/--<cwd>--/`)에서 가장 최근 `.jsonl` 경로를 찾는다.
@@ -860,28 +957,104 @@ fn find_latest_pi_session_path(cwd: Option<&str>) -> Option<PathBuf> {
     let real_cwd = resolve_path_best(cwd);
     let slug = format!(
         "-{}--",
-        real_cwd
-            .to_string_lossy()
-            .replace(['/', '\\'], "-")
+        real_cwd.to_string_lossy().replace(['/', '\\'], "-")
     );
     let dir = PathBuf::from(home)
         .join(".pi")
         .join("agent")
         .join("sessions")
         .join(slug);
-    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in std::fs::read_dir(&dir).ok()?.flatten() {
-        let p = entry.path();
-        if p.extension().and_then(|e| e.to_str()) != Some("jsonl") || !p.is_file() {
-            continue;
-        }
-        if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
-            if best.as_ref().is_none_or(|(t, _)| modified > *t) {
-                best = Some((modified, p));
+    find_newest_file_in_dir(&dir, "jsonl")
+}
+
+/// Claude Code 세션 디렉터리(`~/.claude/projects/<cwd-slug>/`)에서 가장 최근 `.jsonl` 경로를 찾는다.
+fn find_latest_claude_session_path(cwd: Option<&str>) -> Option<PathBuf> {
+    let cwd = cwd.filter(|s| !s.is_empty())?;
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()?;
+    let real_cwd = resolve_path_best(cwd);
+    let slug = real_cwd.to_string_lossy().replace(['/', '\\', '.'], "-");
+    let dir = PathBuf::from(home)
+        .join(".claude")
+        .join("projects")
+        .join(slug);
+    find_newest_file_in_dir(&dir, "jsonl")
+}
+
+/// Gemini CLI 세션 디렉터리(`~/.gemini/tmp/<repoTag>/chats/`)에서 가장 최근 `.json`을 찾는다.
+fn find_latest_gemini_session_path(cwd: Option<&str>) -> Option<PathBuf> {
+    let cwd = cwd.filter(|s| !s.is_empty())?;
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()?;
+    let tag = extract_repo_tag(Some(cwd));
+    if tag.is_empty() || tag == "unknown" {
+        return None;
+    }
+    let dir = PathBuf::from(home)
+        .join(".gemini")
+        .join("tmp")
+        .join(tag)
+        .join("chats");
+    find_newest_file_in_dir(&dir, "json")
+}
+
+/// Codex 세션(`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`) 중 첫 줄 session_meta.cwd 일치 최신 파일.
+fn find_latest_codex_session_path(cwd: Option<&str>) -> Option<PathBuf> {
+    let cwd = cwd.filter(|s| !s.is_empty())?;
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()?;
+    let target = resolve_path_best(cwd);
+    let root = PathBuf::from(home).join(".codex").join("sessions");
+    let sorted_desc = |dir: &Path| -> Vec<PathBuf> {
+        let mut items: Vec<PathBuf> = std::fs::read_dir(dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        items.sort();
+        items.reverse();
+        items
+    };
+    let mut checked = 0usize;
+    for y in sorted_desc(&root) {
+        for m in sorted_desc(&y) {
+            for d in sorted_desc(&m) {
+                for f in sorted_desc(&d) {
+                    if f.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                        continue;
+                    }
+                    checked += 1;
+                    if checked > 15 {
+                        return None;
+                    }
+                    if let Ok(mut file) = std::fs::File::open(&f) {
+                        let mut buf = [0u8; 4096];
+                        if let Ok(n) = file.read(&mut buf) {
+                            let first = String::from_utf8_lossy(&buf[..n]);
+                            let line = first.lines().next().unwrap_or("");
+                            if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(line) {
+                                if let Some(scwd) = obj
+                                    .get("payload")
+                                    .and_then(|p| p.get("cwd"))
+                                    .and_then(Value::as_str)
+                                {
+                                    if resolve_path_best(scwd) == target {
+                                        return Some(f);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
-    best.map(|(_, p)| p)
+    None
 }
 
 type TranscriptCacheEntry = (String, Option<String>, Vec<TranscriptIoEntry>);
@@ -1007,8 +1180,10 @@ fn re_env_assign_arg() -> &'static regex::Regex {
     RE.get_or_init(|| regex::Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*=").unwrap())
 }
 
-/// 파서가 인정하는 워커 CLI 집합 — parent 매칭 5종에 agy를 더한다.
-const WORKER_CLI_SET: [&str; 6] = ["pi", "devin", "claude", "codex", "gemini", "agy"];
+/// 파서가 인정하는 워커 CLI 집합 — parent 매칭 7종에 agy를 더한다.
+const WORKER_CLI_SET: [&str; 8] = [
+    "pi", "devin", "claude", "codex", "gemini", "agy", "opencode", "hermes",
+];
 
 /// 토큰(절대경로 포함)의 basename — CLI 이름 추출용.
 fn token_base(token: &str) -> String {
@@ -1968,14 +2143,19 @@ impl LiveSyncSnapshotter {
                             );
                             worker.subagent_warning = warn;
                             worker.recent_io = io;
-                        } else if worker.cli == "pi" {
-                            if let Some(pi_path) =
-                                find_latest_pi_session_path(worker.cwd.as_deref())
-                            {
-                                let key = format!("pi:{}", worker.address);
+                        } else {
+                            let tx_path = match worker.cli.as_str() {
+                                "pi" => find_latest_pi_session_path(worker.cwd.as_deref()),
+                                "claude" => find_latest_claude_session_path(worker.cwd.as_deref()),
+                                "codex" => find_latest_codex_session_path(worker.cwd.as_deref()),
+                                "gemini" => find_latest_gemini_session_path(worker.cwd.as_deref()),
+                                _ => None,
+                            };
+                            if let Some(p) = tx_path {
+                                let key = format!("{}:{}", worker.cli, worker.address);
                                 let (_, io) = read_transcript_file_info(
                                     &key,
-                                    &pi_path,
+                                    &p,
                                     &mut self.subagent_cache,
                                 );
                                 worker.recent_io = io;

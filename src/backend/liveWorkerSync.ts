@@ -146,7 +146,15 @@ const SHELL_AGENTS = new Set([
 ]);
 
 /** parent 매칭 판정에 쓰는 워커 CLI 에이전트 목록. */
-const PARENT_MATCH_AGENTS = new Set(['pi', 'devin', 'claude', 'codex', 'gemini']);
+const PARENT_MATCH_AGENTS = new Set([
+  'pi',
+  'devin',
+  'claude',
+  'codex',
+  'gemini',
+  'opencode',
+  'hermes',
+]);
 
 /** 워커 세션명 접두 — herdr-quad-launch/dispatch가 만드는 이름 규약. */
 const WORKER_NAME_PREFIXES = [
@@ -173,6 +181,8 @@ const TOP_LEVEL_AI_AGENTS = new Set([
   'devin',
   'gemini',
   'agy',
+  'opencode',
+  'hermes',
 ]);
 
 /** 모니터·GUI 전용 세션명 — 최상위 세션 관측에서도 제외. */
@@ -465,8 +475,8 @@ function formatIsoToLocalHhmmss(iso: unknown): string {
 }
 
 /**
- * Antigravity(`USER_INPUT`/`PLANNER_RESPONSE`) 및 Pi(`type:"message"`, `message.role:"user"|"assistant"`)
- * transcript JSONL 꼬리에서 최근 사용자 입력·리드 응답을 최대 `limit`건 추출한다(오래된→최신 순, 시크릿 리덕션 적용).
+ * Antigravity / Pi / Claude Code / Codex / Gemini CLI transcript 꼬리에서
+ * 최근 사용자 입력·리드 응답을 최대 `limit`건 추출한다(오래된→최신 순, 시크릿 리덕션 적용).
  */
 export function extractRecentIoFromTranscript(
   rawTail: string | null | undefined,
@@ -474,16 +484,60 @@ export function extractRecentIoFromTranscript(
 ): TranscriptIoEntry[] {
   if (typeof rawTail !== 'string' || rawTail.length === 0) return [];
   const entries: TranscriptIoEntry[] = [];
-  for (const line of rawTail.split(/\r?\n/)) {
-    if (
-      !line ||
-      (!line.includes('"USER_INPUT"') &&
-        !line.includes('"PLANNER_RESPONSE"') &&
-        !line.includes('"type":"message"') &&
-        !line.includes('"type": "message"'))
-    ) {
-      continue;
+  const pushClean = (role: 'user' | 'assistant', rawContent: string, isoTs: unknown) => {
+    if (!rawContent.trim()) return;
+    const cleaned = redactSecrets(rawContent)
+      .replace(/<CONTEXT_SUMMARY>[\s\S]*?<\/CONTEXT_SUMMARY>/gi, '')
+      .replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/gi, '')
+      .replace(/<USER_SETTINGS_CHANGE>[\s\S]*?<\/USER_SETTINGS_CHANGE>/gi, '')
+      .replace(/<\/?USER_REQUEST>/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!cleaned || cleaned === '.' || cleaned.startsWith('# AGENTS.md instructions')) return;
+    entries.push({
+      time: formatIsoToLocalHhmmss(isoTs),
+      role,
+      text: truncateChars(cleaned, 160),
+    });
+  };
+  const extractBlocks = (c: unknown, types: readonly string[]): string => {
+    if (typeof c === 'string') return c;
+    if (!Array.isArray(c)) return '';
+    return c
+      .filter(
+        (b): b is Record<string, unknown> =>
+          Boolean(b) &&
+          typeof b === 'object' &&
+          types.includes(String((b as Record<string, unknown>)['type'] ?? ''))
+      )
+      .map((b) => (typeof b['text'] === 'string' ? b['text'] : ''))
+      .join(' ');
+  };
+
+  // Gemini CLI session JSON (`{ messages: [{ type: "user"|"gemini", content }] }`)
+  const trimmed = rawTail.trimStart();
+  if (trimmed.startsWith('{') && trimmed.includes('"messages"') && !trimmed.includes('\n{')) {
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+      if (Array.isArray(parsed['messages'])) {
+        for (const m of parsed['messages']) {
+          if (!m || typeof m !== 'object') continue;
+          const mo = m as Record<string, unknown>;
+          const mt = mo['type'];
+          if (mt === 'user' || mt === 'gemini') {
+            const txt = extractBlocks(mo['content'], ['text']);
+            pushClean(mt === 'user' ? 'user' : 'assistant', txt, mo['timestamp']);
+          }
+        }
+        return entries.length > limit ? entries.slice(entries.length - limit) : entries;
+      }
+    } catch {
+      // fall through to JSONL
     }
+  }
+
+  for (const line of rawTail.split(/\r?\n/)) {
+    if (!line) continue;
     let obj: Record<string, unknown>;
     try {
       const parsed: unknown = JSON.parse(line);
@@ -493,48 +547,74 @@ export function extractRecentIoFromTranscript(
       continue;
     }
     const type = obj['type'];
-    let role: 'user' | 'assistant' | null = null;
-    let rawContent = '';
-    let isoTs: unknown = obj['created_at'];
-
     if (type === 'USER_INPUT' || type === 'PLANNER_RESPONSE') {
-      role = type === 'USER_INPUT' ? 'user' : 'assistant';
-      rawContent = typeof obj['content'] === 'string' ? obj['content'] : '';
+      // Antigravity
+      pushClean(
+        type === 'USER_INPUT' ? 'user' : 'assistant',
+        typeof obj['content'] === 'string' ? obj['content'] : '',
+        obj['created_at']
+      );
     } else if (type === 'message' && obj['message'] && typeof obj['message'] === 'object') {
+      // Pi
       const msg = obj['message'] as Record<string, unknown>;
       if (msg['role'] === 'user' || msg['role'] === 'assistant') {
-        role = msg['role'];
-        isoTs = obj['timestamp'] ?? msg['timestamp'];
-        const c = msg['content'];
-        if (typeof c === 'string') {
-          rawContent = c;
-        } else if (Array.isArray(c)) {
-          rawContent = c
-            .filter(
-              (b): b is Record<string, unknown> =>
-                Boolean(b) && typeof b === 'object' && (b as Record<string, unknown>)['type'] === 'text'
-            )
-            .map((b) => (typeof b['text'] === 'string' ? b['text'] : ''))
-            .join(' ');
-        }
+        pushClean(
+          msg['role'],
+          extractBlocks(msg['content'], ['text']),
+          obj['timestamp'] ?? msg['timestamp']
+        );
+      }
+    } else if ((type === 'user' || type === 'assistant') && obj['message'] && typeof obj['message'] === 'object') {
+      // Claude Code
+      const msg = obj['message'] as Record<string, unknown>;
+      pushClean(type, extractBlocks(msg['content'], ['text']), obj['timestamp']);
+    } else if (type === 'event_msg' && obj['payload'] && typeof obj['payload'] === 'object') {
+      // Codex event_msg
+      const p = obj['payload'] as Record<string, unknown>;
+      if (p['type'] === 'user_message' || p['type'] === 'agent_message') {
+        pushClean(
+          p['type'] === 'user_message' ? 'user' : 'assistant',
+          typeof p['message'] === 'string' ? p['message'] : '',
+          obj['timestamp']
+        );
+      }
+    } else if (type === 'response_item' && obj['payload'] && typeof obj['payload'] === 'object') {
+      // Codex response_item
+      const p = obj['payload'] as Record<string, unknown>;
+      if (p['type'] === 'message' && (p['role'] === 'user' || p['role'] === 'assistant')) {
+        pushClean(
+          p['role'],
+          extractBlocks(p['content'], ['input_text', 'output_text', 'text']),
+          obj['timestamp']
+        );
       }
     }
-    if (!role || !rawContent.trim()) continue;
-    const cleaned = redactSecrets(rawContent)
-      .replace(/<CONTEXT_SUMMARY>[\s\S]*?<\/CONTEXT_SUMMARY>/gi, '')
-      .replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/gi, '')
-      .replace(/<USER_SETTINGS_CHANGE>[\s\S]*?<\/USER_SETTINGS_CHANGE>/gi, '')
-      .replace(/<\/?USER_REQUEST>/gi, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-    if (!cleaned || cleaned === '.') continue;
-    entries.push({
-      time: formatIsoToLocalHhmmss(isoTs),
-      role,
-      text: truncateChars(cleaned, 160),
-    });
   }
   return entries.length > limit ? entries.slice(entries.length - limit) : entries;
+}
+
+/** 디렉터리에서 지정 확장자의 가장 최근 파일 1개를 찾는다. */
+function findNewestFileInDir(dir: string, ext: string): string | null {
+  try {
+    let bestPath: string | null = null;
+    let bestMtime = -1;
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (!ent.isFile() || !ent.name.endsWith(ext)) continue;
+      const full = path.join(dir, ent.name);
+      try {
+        const st = fs.statSync(full);
+        if (st.mtimeMs > bestMtime) {
+          bestMtime = st.mtimeMs;
+          bestPath = full;
+        }
+      } catch {
+        // ignore
+      }
+    }
+    return bestPath;
+  } catch {
+    return null;
+  }
 }
 
 /** Pi 세션 디렉터리(`~/.pi/agent/sessions/--<cwd>--/`)에서 가장 최근 `.jsonl` 경로를 찾는다. */
@@ -544,27 +624,87 @@ function findLatestPiSessionPath(cwd: string | null | undefined): string | null 
   if (!home) return null;
   const realCwd = resolvePathBest(cwd);
   const slug = `-${realCwd.replace(/[\\/]/g, '-')}--`;
-  const dir = path.join(home, '.pi', 'agent', 'sessions', slug);
+  return findNewestFileInDir(path.join(home, '.pi', 'agent', 'sessions', slug), '.jsonl');
+}
+
+/** Claude Code 세션 디렉터리(`~/.claude/projects/<cwd-slug>/`)에서 가장 최근 `.jsonl` 경로를 찾는다. */
+function findLatestClaudeSessionPath(cwd: string | null | undefined): string | null {
+  if (!cwd) return null;
+  const home = process.env.HOME || process.env.USERPROFILE;
+  if (!home) return null;
+  const realCwd = resolvePathBest(cwd);
+  const slug = realCwd.replace(/[\\/.]/g, '-');
+  return findNewestFileInDir(path.join(home, '.claude', 'projects', slug), '.jsonl');
+}
+
+/** Gemini CLI 세션 디렉터리(`~/.gemini/tmp/<repoTag>/chats/`)에서 가장 최근 `session-*.json`을 찾는다. */
+function findLatestGeminiSessionPath(cwd: string | null | undefined): string | null {
+  if (!cwd) return null;
+  const home = process.env.HOME || process.env.USERPROFILE;
+  if (!home) return null;
+  const tag = extractRepoTag(cwd);
+  if (!tag || tag === 'unknown') return null;
+  return findNewestFileInDir(path.join(home, '.gemini', 'tmp', tag, 'chats'), '.json');
+}
+
+/** Codex 세션(`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`) 중 첫 줄 session_meta.cwd가 일치하는 최신 파일을 찾는다. */
+function findLatestCodexSessionPath(cwd: string | null | undefined): string | null {
+  if (!cwd) return null;
+  const home = process.env.HOME || process.env.USERPROFILE;
+  if (!home) return null;
+  const target = resolvePathBest(cwd);
+  const root = path.join(home, '.codex', 'sessions');
   try {
-    let bestPath: string | null = null;
-    let bestMtime = -1;
-    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (!ent.isFile() || !ent.name.endsWith('.jsonl')) continue;
-      const full = path.join(dir, ent.name);
+    const years = fs.readdirSync(root).sort().reverse();
+    let checked = 0;
+    for (const y of years) {
+      const yDir = path.join(root, y);
+      let months: string[];
       try {
-        const st = fs.statSync(full);
-        if (st.mtimeMs > bestMtime) {
-          bestMtime = st.mtimeMs;
-          bestPath = full;
-        }
+        months = fs.readdirSync(yDir).sort().reverse();
       } catch {
-        // ignore unreadable file
+        continue;
+      }
+      for (const m of months) {
+        const mDir = path.join(yDir, m);
+        let days: string[];
+        try {
+          days = fs.readdirSync(mDir).sort().reverse();
+        } catch {
+          continue;
+        }
+        for (const d of days) {
+          const dDir = path.join(mDir, d);
+          let files: string[];
+          try {
+            files = fs.readdirSync(dDir).filter((f) => f.endsWith('.jsonl')).sort().reverse();
+          } catch {
+            continue;
+          }
+          for (const f of files) {
+            if (++checked > 15) return null;
+            const full = path.join(dDir, f);
+            try {
+              const fd = fs.openSync(full, 'r');
+              const buf = Buffer.alloc(4096);
+              const n = fs.readSync(fd, buf, 0, 4096, 0);
+              fs.closeSync(fd);
+              const firstLine = buf.subarray(0, n).toString('utf8').split(/\r?\n/)[0] ?? '';
+              const meta = JSON.parse(firstLine) as { payload?: { cwd?: string } };
+              if (meta.payload?.cwd && resolvePathBest(meta.payload.cwd) === target) {
+                return full;
+              }
+            } catch {
+              // ignore
+            }
+          }
+        }
       }
     }
-    return bestPath;
   } catch {
     return null;
   }
+  return null;
 }
 
 interface ConversationTranscriptCacheEntry {
@@ -659,7 +799,16 @@ export function extractLastActivityLine(
 // ---------- 슬롯·모델 추론 ----------
 
 const HERDR_ROLE_RE = /^HERDR_ROLE=(lead|explore|verifier|advisor|carbon|coder)$/i;
-const WORKER_CLI_SET = new Set(['pi', 'devin', 'claude', 'codex', 'gemini', 'agy']);
+const WORKER_CLI_SET = new Set([
+  'pi',
+  'devin',
+  'claude',
+  'codex',
+  'gemini',
+  'agy',
+  'opencode',
+  'hermes',
+]);
 const ENV_ASSIGN_ARG_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
 /** 토큰(절대경로 포함)의 basename — CLI 이름 추출용. */
@@ -1351,10 +1500,23 @@ export function createLiveRosterSyncer(opts: LiveRosterSyncerOptions): LiveRoste
               const info = readConversationTranscriptInfo(convId, subagentCache);
               worker.subagentWarning = info.warning;
               worker.recentIo = info.recentIo;
-            } else if (worker.cli === 'pi') {
-              const piPath = findLatestPiSessionPath(worker.cwd);
-              if (piPath) {
-                const info = readTranscriptFileInfo(`pi:${worker.address}`, piPath, subagentCache);
+            } else {
+              const txPath =
+                worker.cli === 'pi'
+                  ? findLatestPiSessionPath(worker.cwd)
+                  : worker.cli === 'claude'
+                    ? findLatestClaudeSessionPath(worker.cwd)
+                    : worker.cli === 'codex'
+                      ? findLatestCodexSessionPath(worker.cwd)
+                      : worker.cli === 'gemini'
+                        ? findLatestGeminiSessionPath(worker.cwd)
+                        : null;
+              if (txPath) {
+                const info = readTranscriptFileInfo(
+                  `${worker.cli}:${worker.address}`,
+                  txPath,
+                  subagentCache
+                );
                 worker.recentIo = info.recentIo;
               }
             }
