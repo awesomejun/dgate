@@ -465,8 +465,8 @@ function formatIsoToLocalHhmmss(iso: unknown): string {
 }
 
 /**
- * Antigravity transcript.jsonl 꼬리에서 최근 사용자 입력(`USER_INPUT`)·리드 응답(`PLANNER_RESPONSE`)을
- * 최대 `limit`건 추출한다(오래된→최신 순, 시크릿 리덕션 적용).
+ * Antigravity(`USER_INPUT`/`PLANNER_RESPONSE`) 및 Pi(`type:"message"`, `message.role:"user"|"assistant"`)
+ * transcript JSONL 꼬리에서 최근 사용자 입력·리드 응답을 최대 `limit`건 추출한다(오래된→최신 순, 시크릿 리덕션 적용).
  */
 export function extractRecentIoFromTranscript(
   rawTail: string | null | undefined,
@@ -475,7 +475,15 @@ export function extractRecentIoFromTranscript(
   if (typeof rawTail !== 'string' || rawTail.length === 0) return [];
   const entries: TranscriptIoEntry[] = [];
   for (const line of rawTail.split(/\r?\n/)) {
-    if (!line || (!line.includes('"USER_INPUT"') && !line.includes('"PLANNER_RESPONSE"'))) continue;
+    if (
+      !line ||
+      (!line.includes('"USER_INPUT"') &&
+        !line.includes('"PLANNER_RESPONSE"') &&
+        !line.includes('"type":"message"') &&
+        !line.includes('"type": "message"'))
+    ) {
+      continue;
+    }
     let obj: Record<string, unknown>;
     try {
       const parsed: unknown = JSON.parse(line);
@@ -485,28 +493,114 @@ export function extractRecentIoFromTranscript(
       continue;
     }
     const type = obj['type'];
-    const rawContent = typeof obj['content'] === 'string' ? obj['content'] : '';
-    if (!rawContent.trim()) continue;
-    if (type !== 'USER_INPUT' && type !== 'PLANNER_RESPONSE') continue;
+    let role: 'user' | 'assistant' | null = null;
+    let rawContent = '';
+    let isoTs: unknown = obj['created_at'];
+
+    if (type === 'USER_INPUT' || type === 'PLANNER_RESPONSE') {
+      role = type === 'USER_INPUT' ? 'user' : 'assistant';
+      rawContent = typeof obj['content'] === 'string' ? obj['content'] : '';
+    } else if (type === 'message' && obj['message'] && typeof obj['message'] === 'object') {
+      const msg = obj['message'] as Record<string, unknown>;
+      if (msg['role'] === 'user' || msg['role'] === 'assistant') {
+        role = msg['role'];
+        isoTs = obj['timestamp'] ?? msg['timestamp'];
+        const c = msg['content'];
+        if (typeof c === 'string') {
+          rawContent = c;
+        } else if (Array.isArray(c)) {
+          rawContent = c
+            .filter(
+              (b): b is Record<string, unknown> =>
+                Boolean(b) && typeof b === 'object' && (b as Record<string, unknown>)['type'] === 'text'
+            )
+            .map((b) => (typeof b['text'] === 'string' ? b['text'] : ''))
+            .join(' ');
+        }
+      }
+    }
+    if (!role || !rawContent.trim()) continue;
     const cleaned = redactSecrets(rawContent)
       .replace(/<CONTEXT_SUMMARY>[\s\S]*?<\/CONTEXT_SUMMARY>/gi, '')
+      .replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/gi, '')
+      .replace(/<USER_SETTINGS_CHANGE>[\s\S]*?<\/USER_SETTINGS_CHANGE>/gi, '')
       .replace(/<\/?USER_REQUEST>/gi, '')
       .replace(/\s+/g, ' ')
       .trim();
     if (!cleaned || cleaned === '.') continue;
     entries.push({
-      time: formatIsoToLocalHhmmss(obj['created_at']),
-      role: type === 'USER_INPUT' ? 'user' : 'assistant',
+      time: formatIsoToLocalHhmmss(isoTs),
+      role,
       text: truncateChars(cleaned, 160),
     });
   }
   return entries.length > limit ? entries.slice(entries.length - limit) : entries;
 }
 
+/** Pi 세션 디렉터리(`~/.pi/agent/sessions/--<cwd>--/`)에서 가장 최근 `.jsonl` 경로를 찾는다. */
+function findLatestPiSessionPath(cwd: string | null | undefined): string | null {
+  if (!cwd) return null;
+  const home = process.env.HOME || process.env.USERPROFILE;
+  if (!home) return null;
+  const realCwd = resolvePathBest(cwd);
+  const slug = `-${realCwd.replace(/[\\/]/g, '-')}--`;
+  const dir = path.join(home, '.pi', 'agent', 'sessions', slug);
+  try {
+    let bestPath: string | null = null;
+    let bestMtime = -1;
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (!ent.isFile() || !ent.name.endsWith('.jsonl')) continue;
+      const full = path.join(dir, ent.name);
+      try {
+        const st = fs.statSync(full);
+        if (st.mtimeMs > bestMtime) {
+          bestMtime = st.mtimeMs;
+          bestPath = full;
+        }
+      } catch {
+        // ignore unreadable file
+      }
+    }
+    return bestPath;
+  } catch {
+    return null;
+  }
+}
+
 interface ConversationTranscriptCacheEntry {
   sig: string;
   warning: string | null;
   recentIo: TranscriptIoEntry[];
+}
+
+/** 주어진 transcript 파일 경로의 꼬리 128KB를 1회 읽어 경고 + 최근 입출력을 반환(mtime 캐시). */
+function readTranscriptFileInfo(
+  cacheKey: string,
+  txPath: string,
+  cache: Map<string, ConversationTranscriptCacheEntry>
+): { warning: string | null; recentIo: TranscriptIoEntry[] } {
+  try {
+    const st = fs.statSync(txPath);
+    const sig = `${txPath}:${st.mtimeMs}:${st.size}`;
+    const hit = cache.get(cacheKey);
+    if (hit && hit.sig === sig) return { warning: hit.warning, recentIo: hit.recentIo };
+    const fd = fs.openSync(txPath, 'r');
+    try {
+      const start = Math.max(0, st.size - TRANSCRIPT_TAIL_BYTES);
+      const len = st.size - start;
+      const buf = Buffer.alloc(len);
+      const bytesRead = fs.readSync(fd, buf, 0, len, start);
+      const raw = buf.subarray(0, bytesRead).toString('utf8');
+      const warning = detectSubagentWarningFromTranscript(raw);
+      const recentIo = extractRecentIoFromTranscript(raw, MAX_RECENT_IO_ENTRIES);
+      cache.set(cacheKey, { sig, warning, recentIo });
+      return { warning, recentIo };
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return { warning: null, recentIo: [] };
+  }
 }
 
 /** conversationId의 transcript.jsonl 꼬리 128KB를 1회 읽어 서브에이전트 경고 + 최근 입출력을 함께 반환(mtime 캐시). */
@@ -526,28 +620,7 @@ function readConversationTranscriptInfo(
     'logs',
     'transcript.jsonl'
   );
-  try {
-    const st = fs.statSync(txPath);
-    const sig = `${st.mtimeMs}:${st.size}`;
-    const hit = cache.get(convId);
-    if (hit && hit.sig === sig) return { warning: hit.warning, recentIo: hit.recentIo };
-    const fd = fs.openSync(txPath, 'r');
-    try {
-      const start = Math.max(0, st.size - TRANSCRIPT_TAIL_BYTES);
-      const len = st.size - start;
-      const buf = Buffer.alloc(len);
-      const bytesRead = fs.readSync(fd, buf, 0, len, start);
-      const raw = buf.subarray(0, bytesRead).toString('utf8');
-      const warning = detectSubagentWarningFromTranscript(raw);
-      const recentIo = extractRecentIoFromTranscript(raw, MAX_RECENT_IO_ENTRIES);
-      cache.set(convId, { sig, warning, recentIo });
-      return { warning, recentIo };
-    } finally {
-      fs.closeSync(fd);
-    }
-  } catch {
-    return { warning: null, recentIo: [] };
-  }
+  return readTranscriptFileInfo(convId, txPath, cache);
 }
 
 /**
@@ -1278,6 +1351,12 @@ export function createLiveRosterSyncer(opts: LiveRosterSyncerOptions): LiveRoste
               const info = readConversationTranscriptInfo(convId, subagentCache);
               worker.subagentWarning = info.warning;
               worker.recentIo = info.recentIo;
+            } else if (worker.cli === 'pi') {
+              const piPath = findLatestPiSessionPath(worker.cwd);
+              if (piPath) {
+                const info = readTranscriptFileInfo(`pi:${worker.address}`, piPath, subagentCache);
+                worker.recentIo = info.recentIo;
+              }
             }
           }
           if (worker) workers.push(worker);

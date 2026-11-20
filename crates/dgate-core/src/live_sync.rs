@@ -733,8 +733,22 @@ fn format_iso_hhmmss(iso: Option<&str>) -> String {
     String::new()
 }
 
-/// Antigravity transcript.jsonl 꼬리에서 최근 `USER_INPUT` / `PLANNER_RESPONSE`를
-/// 최대 `limit`건 추출한다(오래된→최신 순, 시크릿 리덕션 적용).
+fn strip_xml_block(input: &str, tag: &str) -> String {
+    let open = format!("<{}>", tag);
+    let close = format!("</{}>", tag);
+    let mut s = input.to_string();
+    while let Some(start) = s.find(&open) {
+        if let Some(end_rel) = s[start..].find(&close) {
+            s.replace_range(start..start + end_rel + close.len(), "");
+        } else {
+            break;
+        }
+    }
+    s
+}
+
+/// Antigravity(`USER_INPUT`/`PLANNER_RESPONSE`) 및 Pi(`type:"message"`, `message.role:"user"|"assistant"`)
+/// transcript JSONL 꼬리에서 최근 사용자 입력·리드 응답을 최대 `limit`건 추출한다(오래된→최신 순, 시크릿 리덕션 적용).
 pub fn extract_recent_io_from_transcript(
     raw_tail: Option<&str>,
     limit: usize,
@@ -744,7 +758,11 @@ pub fn extract_recent_io_from_transcript(
     };
     let mut entries = Vec::new();
     for line in raw.lines() {
-        if !line.contains("\"USER_INPUT\"") && !line.contains("\"PLANNER_RESPONSE\"") {
+        if !line.contains("\"USER_INPUT\"")
+            && !line.contains("\"PLANNER_RESPONSE\"")
+            && !line.contains("\"type\":\"message\"")
+            && !line.contains("\"type\": \"message\"")
+        {
             continue;
         }
         let Ok(val) = serde_json::from_str::<Value>(line) else {
@@ -754,14 +772,62 @@ pub fn extract_recent_io_from_transcript(
             continue;
         };
         let ty = obj.get("type").and_then(Value::as_str).unwrap_or("");
-        if ty != "USER_INPUT" && ty != "PLANNER_RESPONSE" {
-            continue;
-        }
-        let content = obj.get("content").and_then(Value::as_str).unwrap_or("");
+        let (role, content, iso_ts): (&str, String, Option<&str>) =
+            if ty == "USER_INPUT" || ty == "PLANNER_RESPONSE" {
+                (
+                    if ty == "USER_INPUT" {
+                        "user"
+                    } else {
+                        "assistant"
+                    },
+                    obj.get("content")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    obj.get("created_at").and_then(Value::as_str),
+                )
+            } else if ty == "message" {
+                let Some(msg) = obj.get("message").and_then(Value::as_object) else {
+                    continue;
+                };
+                let r = msg.get("role").and_then(Value::as_str).unwrap_or("");
+                if r != "user" && r != "assistant" {
+                    continue;
+                }
+                let txt = match msg.get("content") {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::Array(arr)) => arr
+                        .iter()
+                        .filter_map(|b| {
+                            let bo = b.as_object()?;
+                            if bo.get("type").and_then(Value::as_str) == Some("text") {
+                                bo.get("text").and_then(Value::as_str)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    _ => String::new(),
+                };
+                (
+                    r,
+                    txt,
+                    obj.get("timestamp")
+                        .and_then(Value::as_str)
+                        .or_else(|| msg.get("timestamp").and_then(Value::as_str)),
+                )
+            } else {
+                continue;
+            };
         if content.trim().is_empty() {
             continue;
         }
-        let redacted = redact_secrets(content)
+        let mut redacted = redact_secrets(&content);
+        redacted = strip_xml_block(&redacted, "CONTEXT_SUMMARY");
+        redacted = strip_xml_block(&redacted, "ADDITIONAL_METADATA");
+        redacted = strip_xml_block(&redacted, "USER_SETTINGS_CHANGE");
+        redacted = redacted
             .replace("<USER_REQUEST>", "")
             .replace("</USER_REQUEST>", "");
         let cleaned = re_whitespace_run()
@@ -771,14 +837,10 @@ pub fn extract_recent_io_from_transcript(
         if cleaned.is_empty() || cleaned == "." {
             continue;
         }
-        let time_hhmmss = format_iso_hhmmss(obj.get("created_at").and_then(Value::as_str));
+        let time_hhmmss = format_iso_hhmmss(iso_ts);
         entries.push(TranscriptIoEntry {
             time_hhmmss,
-            role: if ty == "USER_INPUT" {
-                "user".to_string()
-            } else {
-                "assistant".to_string()
-            },
+            role: role.to_string(),
             text: truncate_chars(&cleaned, 160),
         });
     }
@@ -789,7 +851,80 @@ pub fn extract_recent_io_from_transcript(
     }
 }
 
+/// Pi 세션 디렉터리(`~/.pi/agent/sessions/--<cwd>--/`)에서 가장 최근 `.jsonl` 경로를 찾는다.
+fn find_latest_pi_session_path(cwd: Option<&str>) -> Option<PathBuf> {
+    let cwd = cwd.filter(|s| !s.is_empty())?;
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()?;
+    let real_cwd = resolve_path_best(cwd);
+    let slug = format!(
+        "-{}--",
+        real_cwd
+            .to_string_lossy()
+            .replace(['/', '\\'], "-")
+    );
+    let dir = PathBuf::from(home)
+        .join(".pi")
+        .join("agent")
+        .join("sessions")
+        .join(slug);
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(&dir).ok()?.flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|e| e.to_str()) != Some("jsonl") || !p.is_file() {
+            continue;
+        }
+        if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
+            if best.as_ref().is_none_or(|(t, _)| modified > *t) {
+                best = Some((modified, p));
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
 type TranscriptCacheEntry = (String, Option<String>, Vec<TranscriptIoEntry>);
+
+fn read_transcript_file_info(
+    cache_key: &str,
+    tx_path: &Path,
+    cache: &mut HashMap<String, TranscriptCacheEntry>,
+) -> (Option<String>, Vec<TranscriptIoEntry>) {
+    let Ok(meta) = std::fs::metadata(tx_path) else {
+        return (None, Vec::new());
+    };
+    let mtime_ms = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let sig = format!("{}:{}:{}", tx_path.display(), mtime_ms, meta.len());
+    if let Some((cached_sig, cached_warn, cached_io)) = cache.get(cache_key) {
+        if cached_sig == &sig {
+            return (cached_warn.clone(), cached_io.clone());
+        }
+    }
+    use std::io::Seek;
+    let Ok(mut f) = std::fs::File::open(tx_path) else {
+        return (None, Vec::new());
+    };
+    let start = meta.len().saturating_sub(TRANSCRIPT_TAIL_BYTES);
+    let _ = f.seek(std::io::SeekFrom::Start(start));
+    let mut buf = Vec::new();
+    if f.read_to_end(&mut buf).is_err() {
+        return (None, Vec::new());
+    }
+    let raw = String::from_utf8_lossy(&buf);
+    let warn = detect_subagent_warning_from_transcript(Some(&raw));
+    let recent_io = extract_recent_io_from_transcript(Some(&raw), MAX_RECENT_IO_ENTRIES);
+    cache.insert(
+        cache_key.to_string(),
+        (sig, warn.clone(), recent_io.clone()),
+    );
+    (warn, recent_io)
+}
 
 fn read_conversation_transcript_info(
     conv_id: &str,
@@ -806,39 +941,7 @@ fn read_conversation_transcript_info(
         .join(".system_generated")
         .join("logs")
         .join("transcript.jsonl");
-    let Ok(meta) = std::fs::metadata(&tx_path) else {
-        return (None, Vec::new());
-    };
-    let mtime_ms = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let sig = format!("{}:{}", mtime_ms, meta.len());
-    if let Some((cached_sig, cached_warn, cached_io)) = cache.get(conv_id) {
-        if cached_sig == &sig {
-            return (cached_warn.clone(), cached_io.clone());
-        }
-    }
-    use std::io::Seek;
-    let Ok(mut f) = std::fs::File::open(&tx_path) else {
-        return (None, Vec::new());
-    };
-    let start = meta.len().saturating_sub(TRANSCRIPT_TAIL_BYTES);
-    let _ = f.seek(std::io::SeekFrom::Start(start));
-    let mut buf = Vec::new();
-    if f.read_to_end(&mut buf).is_err() {
-        return (None, Vec::new());
-    }
-    let raw = String::from_utf8_lossy(&buf);
-    let warn = detect_subagent_warning_from_transcript(Some(&raw));
-    let recent_io = extract_recent_io_from_transcript(Some(&raw), MAX_RECENT_IO_ENTRIES);
-    cache.insert(
-        conv_id.to_string(),
-        (sig, warn.clone(), recent_io.clone()),
-    );
-    (warn, recent_io)
+    read_transcript_file_info(conv_id, &tx_path, cache)
 }
 
 /// 터미널 화면 원문에서 "의미 있는 마지막 1줄"을 뽑는다.
@@ -1865,6 +1968,18 @@ impl LiveSyncSnapshotter {
                             );
                             worker.subagent_warning = warn;
                             worker.recent_io = io;
+                        } else if worker.cli == "pi" {
+                            if let Some(pi_path) =
+                                find_latest_pi_session_path(worker.cwd.as_deref())
+                            {
+                                let key = format!("pi:{}", worker.address);
+                                let (_, io) = read_transcript_file_info(
+                                    &key,
+                                    &pi_path,
+                                    &mut self.subagent_cache,
+                                );
+                                worker.recent_io = io;
+                            }
                         }
                     }
                     workers.push(worker);
