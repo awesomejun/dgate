@@ -689,14 +689,22 @@ pub fn infer_live_worker_slot(
     let name = detail.name.clone().unwrap_or_default();
     if !role_from_argv && !name.is_empty() {
         let lower = name.to_lowercase();
-        // TS `/verify|verifier/i` — 'verifier'에는 'y'가 없어 'verify'만으론 안 걸린다.
-        if lower.contains("verify") || lower.contains("verifier") {
+        let stem = lower.strip_prefix("w-").unwrap_or(lower.as_str());
+        let has_role_prefix = |s: &str, prefix: &str| -> bool {
+            s.strip_prefix(prefix).is_some_and(|rest| {
+                rest.is_empty()
+                    || rest.starts_with('-')
+                    || rest.starts_with('_')
+                    || rest.as_bytes()[0].is_ascii_digit()
+            })
+        };
+        if has_role_prefix(stem, "verify") || has_role_prefix(stem, "verifier") {
             slot = RoleSlot::Verifier;
-        } else if lower.contains("exp-") || lower.contains("explore") {
+        } else if stem.starts_with("exp-") || has_role_prefix(stem, "explore") {
             slot = RoleSlot::Explore;
-        } else if lower.contains("advisor") || lower.contains("carbon") {
+        } else if has_role_prefix(stem, "advisor") || has_role_prefix(stem, "carbon") {
             slot = RoleSlot::Advisor;
-        } else if lower.contains("lead-") {
+        } else if has_role_prefix(&lower, "lead") && detail.parent.is_none() {
             slot = RoleSlot::Lead;
         } else {
             slot = RoleSlot::Coder;
@@ -1753,11 +1761,23 @@ mod tests {
             ("lead-1", RoleSlot::Lead),
             ("w-plain", RoleSlot::Coder),
             ("coderr", RoleSlot::Coder), // 'coder' 접두가 아니라 contains 아님 — name은 규약 접두
+            ("w-live-lead-rust", RoleSlot::Coder),
+            ("w-live-lead-node", RoleSlot::Coder),
+            ("w-fix-advisor-width", RoleSlot::Coder),
+            ("w-fix-verify-panel", RoleSlot::Coder),
+            ("w-fix-explore-layout", RoleSlot::Coder),
         ] {
             let d = detail("a", name, "pi", &["pi"], None);
             let w = infer_live_worker_slot(&d, None).unwrap();
             assert_eq!(w.slot, expect, "name={}", name);
         }
+        // parent가 있는 하위 워커는 `lead-*` 이름이어도 lead가 아닌 coder로 분류된다.
+        let mut child_lead = detail("a", "lead-sub", "pi", &["pi"], None);
+        child_lead.parent = Some("t165".to_string());
+        assert_eq!(
+            infer_live_worker_slot(&child_lead, None).unwrap().slot,
+            RoleSlot::Coder
+        );
     }
 
     #[test]

@@ -420,10 +420,10 @@ export function inferLiveWorkerSlot(
   }
   const name = detail.name ?? '';
   if (!roleFromArgv && name.length > 0) {
-    if (/verify|verifier/i.test(name)) slot = 'verifier';
-    else if (/exp-|explore/i.test(name)) slot = 'explore';
-    else if (/advisor|carbon/i.test(name)) slot = 'advisor';
-    else if (/lead-/i.test(name)) slot = 'lead';
+    if (/^(?:w-)?(?:verify|verifier)(?:[-_\d]|$)/i.test(name)) slot = 'verifier';
+    else if (/^(?:w-)?(?:exp-|explore(?:[-_\d]|$))/i.test(name)) slot = 'explore';
+    else if (/^(?:w-)?(?:advisor|carbon)(?:[-_\d]|$)/i.test(name)) slot = 'advisor';
+    else if (/^lead(?:[-_\d]|$)/i.test(name) && !detail.parent) slot = 'lead';
     else slot = 'coder';
   }
 

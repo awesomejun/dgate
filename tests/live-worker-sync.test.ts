@@ -222,7 +222,7 @@ test('1. inferLiveWorkerSlot — pi --model / dg wrap / devin / HERDR_ROLE / 모
   });
   assert.equal(advisor?.slot, 'advisor');
 
-  // (f) lead — 이름 규약
+  // (f) lead — 이름 규약 (최상위만 lead, 하위 워커·부분문자열은 coder)
   const lead = inferLiveWorkerSlot({
     address: 't6',
     agent: 'pi',
@@ -232,6 +232,31 @@ test('1. inferLiveWorkerSlot — pi --model / dg wrap / devin / HERDR_ROLE / 모
     argv: ['env', 'HERDR_ROLE=lead', '/tools/pi', '--model', 'glm-zcode/glm-5.3'],
   });
   assert.equal(lead?.slot, 'lead');
+
+  for (const [name, parent, expected] of [
+    ['w-live-lead-rust', 't165', 'coder'],
+    ['w-live-lead-node', 't165', 'coder'],
+    ['w-fix-advisor-width', 't165', 'coder'],
+    ['w-fix-verify-panel', 't165', 'coder'],
+    ['w-fix-explore-layout', 't165', 'coder'],
+    ['lead-sub', 't165', 'coder'],
+    ['lead-top', undefined, 'lead'],
+    ['verify-1', 't165', 'verifier'],
+    ['w-verifier', 't165', 'verifier'],
+    ['advisor-1', 't165', 'advisor'],
+    ['exp-2', 't165', 'explore'],
+  ] as const) {
+    const inferred = inferLiveWorkerSlot({
+      address: `t-${name}`,
+      agent: 'pi',
+      name,
+      parent,
+      state: 'live',
+      cwd: '/tmp/my-repo',
+      argv: ['/tools/pi', '--model', 'glm-zcode/glm-5.3'],
+    });
+    assert.equal(inferred?.slot, expected, `name=${name} parent=${parent ?? 'none'}`);
+  }
 
   // (g) 모니터·셸·비라이브 제외 — 워커 집계 대상 아님
   assert.equal(isWorkerTerminal({ address: 'a', agent: 'node', name: 'dg-monitor', state: 'live' }), false);
