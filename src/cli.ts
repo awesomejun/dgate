@@ -739,8 +739,15 @@ export function resolveTuiScope(
       scopeLabel: 'session=' + opts.sessionId,
     };
   }
+  const resolveRealOrAbs = (p: string): string => {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      return path.resolve(p);
+    }
+  };
   if (opts.repoDir) {
-    const dir = path.resolve(opts.repoDir);
+    const dir = resolveRealOrAbs(opts.repoDir);
     return {
       kind: 'repo',
       repoFilterDir: dir,
@@ -748,7 +755,7 @@ export function resolveTuiScope(
       scopeLabel: path.basename(dir) || dir,
     };
   }
-  const dir = path.resolve(cwd);
+  const dir = resolveRealOrAbs(cwd);
   return {
     kind: 'repo',
     repoFilterDir: dir,

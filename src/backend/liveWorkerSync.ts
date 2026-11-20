@@ -228,7 +228,7 @@ export function extractRepoTag(cwd: string | null | undefined): string {
     const base = repoPart.split('/').filter(Boolean).pop();
     if (base) return base;
   }
-  const base = path.basename(path.resolve(cwd));
+  const base = path.basename(resolvePathBest(cwd));
   return base.length > 0 ? base : 'unknown';
 }
 
