@@ -604,7 +604,7 @@ impl DashboardView {
                 .w(px(self.controller.panel_sizes.advisor_width))
                 .flex_shrink_0()
         };
-        let advisor_telemetry = advisors.first().map(|w| w.telemetry_line());
+        let advisor_bottom = telemetry_bottom(advisors.first(), ADVISOR_PURPLE);
         panel = panel.child(
             div()
                 .flex()
@@ -616,16 +616,6 @@ impl DashboardView {
                 .child(div().flex_1())
                 .child(pill(state_label, state_color, BG)),
         );
-        if let Some(tel) = advisor_telemetry {
-            panel = panel.child(
-                div()
-                    .h(px(14.))
-                    .text_size(px(10.))
-                    .text_color(if active { ADVISOR_PURPLE } else { MUTED })
-                    .truncate()
-                    .child(tel),
-            );
-        }
         // 명시적 advisor 세션 — 자문 카드 위에 세션마다 고정 높이 1행(주소 구분).
         // 동일 레포에 여러 자문 세션이 떠 있어도 각자 보인다.
         for (i, w) in advisors.iter().enumerate() {
@@ -703,6 +693,7 @@ impl DashboardView {
                 active,
             ))
             .child(div().flex_1())
+            .child(advisor_bottom)
             .child(
                 div()
                     .text_size(px(10.))
@@ -1042,13 +1033,13 @@ impl DashboardView {
                     LEAD_ORANGE,
                     elapsed,
                     self.anim_secs,
-                    true,
+                    false,
                     true,
                     false,
                 ));
             }
         }
-        card
+        card.child(telemetry_bottom(parts.leads.first(), LEAD_ORANGE))
     }
 
     /// Stage 1 우측 — Verifier 교차 검증 카드. 모션: verifier 실행 중 / DEMO.
@@ -1172,7 +1163,7 @@ impl DashboardView {
                     );
             }
         }
-        card
+        card.child(telemetry_bottom(parts.verifiers.first(), VERIFIER_NEON))
     }
 
     /// Stage 2 — Decision Gate · 분기 계층 (라우트 확률 바 + 우측 compact 지표).
@@ -1911,6 +1902,22 @@ fn parent_of<'a>(snap: &'a DashboardSnapshot, w: &LiveWorkerInfo) -> Option<&'a 
 /// 1줄 활동(truncate). 동일 레포 다중 세션도 고유 터미널 주소(t155/t182/t165…)로
 /// 명확히 구분된다. 모든 슬롯이 고정 폭·truncate라 어떤 폭에서도 줄바꿈·높이
 /// 점프가 없다(무지터).
+/// 역할 카드 하단 실측 텔레메트리 한 줄 — `cli · model · effort`(없으면 `대기 중`).
+/// roster.json은 읽지 않고 실행 중 세션에서 읽은 값만 표시한다.
+fn telemetry_bottom(session: Option<&LiveWorkerInfo>, color: Rgba) -> gpui::Div {
+    let (text, c) = match session {
+        Some(w) => (w.telemetry_line(), color),
+        None => ("대기 중".to_string(), MUTED),
+    };
+    div()
+        .h(px(14.))
+        .flex_none()
+        .text_size(px(10.))
+        .text_color(c)
+        .truncate()
+        .child(text)
+}
+
 fn role_session_row(
     w: &LiveWorkerInfo,
     idx: usize,

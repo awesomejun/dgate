@@ -519,11 +519,14 @@ function renderAdvisorPanel(buf: CellBuffer, state: AppState, L: FullLayout): vo
     buf.writeCentered(ix, hy++, iw, advisorTitle, THEME.purple, THEME.bg, advisorActive);
   }
   if (hy < L.tr0Row) {
-    const subLine =
-      state.mode === 'watch' && state.advisorTelemetry
-        ? state.advisorTelemetry
-        : `세션 ${state.sessionId} · session: ${state.sessionId}`;
-    buf.writeCentered(ix, hy++, iw, subLine, THEME.muted, THEME.bg);
+    buf.writeCentered(
+      ix,
+      hy++,
+      iw,
+      `세션 ${state.sessionId} · session: ${state.sessionId}`,
+      THEME.muted,
+      THEME.bg
+    );
   }
 
   // 트리거 3개 행 렌더링 (활성 시 보라 하이라이트 배경 바)
@@ -597,12 +600,19 @@ function renderAdvisorPanel(buf: CellBuffer, state: AppState, L: FullLayout): vo
   const expStart = L.tr1Row + 1;
   const expEnd = L.tr2Row - 1;
   if (expEnd >= expStart) {
+    // watch 모드: 하단 마지막 줄은 실측 cli · model · effort (없으면 대기 중)
+    const telRow = state.mode === 'watch' && expEnd - expStart >= 3 ? expEnd : -1;
+    const textEnd = telRow >= 0 ? telRow - 1 : expEnd;
     let ey = expStart + (expEnd - expStart >= 2 ? 1 : 0);
-    if (ey <= expEnd) {
+    if (ey <= textEnd) {
       buf.writeText(ix + 1, ey++, '코드는 직접 쓰지 않습니다.', THEME.muted, THEME.bg, false, iw - 1);
     }
-    if (ey <= expEnd) {
+    if (ey <= textEnd) {
       buf.writeText(ix + 1, ey++, '조언은 Lead가 적용합니다.', THEME.muted, THEME.bg, false, iw - 1);
+    }
+    if (telRow >= 0) {
+      const tel = state.advisorTelemetry;
+      buf.writeCentered(ix, telRow, iw, tel ?? '대기 중', tel ? THEME.purple : THEME.muted, THEME.bg);
     }
   }
 }

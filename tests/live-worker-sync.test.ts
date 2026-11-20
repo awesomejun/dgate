@@ -1996,3 +1996,27 @@ test('dg wrap 백그라운드 워커 — hc 터미널이 아니어도 상위 세
     syncer.stop();
   }
 });
+
+test('watch 역할 카드 하단 — Lead/Verifier/Advisor/Workers 모두 실측 cli · model · effort 표시', () => {
+  const st = createInitialState('watch');
+  st.phase = '대기 중';
+  st.leadTelemetry = 'agy · Gemini 4 Argon · medium';
+  st.verifierTelemetry = 'pi · glm-5.3 · max';
+  st.advisorTelemetry = 'pi · kimi-k3.1-pro · high';
+  st.liveWorkers = [
+    { name: 'pi-cli-manager', model: 'devin · auto · high', progress: 0, description: 'dg wrap', status: 'running' },
+  ];
+  const text = renderFrame(st, 148, 43).toPlainString();
+  for (const line of [
+    'agy · Gemini 4 Argon · medium',
+    'pi · glm-5.3 · max',
+    'pi · kimi-k3.1-pro · high',
+    'devin · auto · high',
+  ]) {
+    assert.ok(text.includes(line), `하단 텔레메트리 노출: ${line}`);
+  }
+  // 실측 없으면 각 역할 하단은 '대기 중' — roster 모델명 미노출
+  const idle = createInitialState('watch');
+  const idleText = renderFrame(idle, 148, 43).toPlainString();
+  assert.ok(!idleText.includes('pi:glm-5.3') && !idleText.includes('pi:gpt-6.2-sol'));
+});
