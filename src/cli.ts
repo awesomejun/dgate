@@ -1464,7 +1464,17 @@ function main(): void {
     renderNow();
   });
 
-  // 80ms (약 12.5fps) 애니메이션 루프 — 와이어 펄스 및 시뮬레이션 시간 갱신
+  // 애니메이션 루프:
+  // - demo: 80ms (~12.5fps)
+  // - watch/live: 250ms (4fps) + 유휴(실행 중인 세션 0)일 때는 렌더 0회(0fps)로
+  //   CellBuffer GC·터미널 컴포지터 부하와 인접 패인(pi 등) 입력 지연을 제거한다.
+  const hasActiveMotion = (): boolean =>
+    state.mode === 'demo' ||
+    state.liveRunning ||
+    state.neonState === 'run' ||
+    state.advisorState === '자문 중' ||
+    (state.liveWorkers?.some((w) => w.status === 'running') ?? false);
+  const loopIntervalMs = state.mode === 'demo' ? 80 : 250;
   setInterval(() => {
     if (isSyncedClient) return;
     state.tickCount += 1;
@@ -1473,18 +1483,15 @@ function main(): void {
         const elapsed = (Date.now() - baseWallMs) / 1000;
         applyDemoTime(state, timeOffsetSec + elapsed, demoCtrl);
       }
-    } else {
-      // 라이브 스트림 모드에서도 와이어 흐름과 커서 점멸이 살아 움직이도록 시간 전진.
-      // 일시정지 중에는 시간 전진과 렌더를 건너뛴다(키 입력은 stdin 핸들러에서 즉시 렌더).
-      if (!state.paused) {
-        state.simTime += 0.08;
-        refreshLiveElapsed();
-        renderNow();
-      }
+      renderNow();
       return;
     }
-    renderNow();
-  }, 80);
+    if (!state.paused && hasActiveMotion()) {
+      state.simTime += loopIntervalMs / 1000;
+      refreshLiveElapsed();
+      renderNow();
+    }
+  }, loopIntervalMs);
 
   renderNow();
 }

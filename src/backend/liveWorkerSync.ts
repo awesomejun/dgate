@@ -40,8 +40,8 @@ const execFileAsync = promisify(execFile);
 export const HC_LS_TIMEOUT_MS = 1500;
 /** `hc read` 타임아웃 — 화면 캡처는 더 짧게 끊는다. */
 export const HC_READ_TIMEOUT_MS = 800;
-/** 기본 동기화 주기. */
-export const DEFAULT_SYNC_INTERVAL_MS = 2000;
+/** 기본 동기화 주기 (3초 — 터미널·herdr-core 부하 최소화). */
+export const DEFAULT_SYNC_INTERVAL_MS = 3000;
 /** 틱당 `hc read` 활동 캡처 상한 — 터미널 많아도 TUI가 느려지지 않게 한다. */
 export const MAX_ACTIVITY_READS_PER_TICK = 6;
 
@@ -1315,6 +1315,8 @@ export function createLiveRosterSyncer(opts: LiveRosterSyncerOptions): LiveRoste
   const psRunner: (() => Promise<string>) | null =
     opts.psRunner ?? (opts.execRunner ? null : defaultPsRunner);
   const pidCache = new Map<string, number[]>();
+  let lastWrapWorkers: LiveWorkerInfo[] = [];
+  let psTickCounter = 0;
 
   let baseLabels: RosterDisplayLabels | null = null;
   let rosterSignature: string | null = null;
@@ -1525,54 +1527,64 @@ export function createLiveRosterSyncer(opts: LiveRosterSyncerOptions): LiveRoste
         }
 
         // 3.5) `dg wrap`으로 에이전트가 백그라운드로 띄운 워커 — hc 터미널이 아니라 ps 프로세스
-        //      트리에서만 보인다. 조상 pid가 hc 세션(pid/foreground.pid)과 맞으면 그 세션 소속.
+        //      트리에서만 보인다. 첫 틱과 짝수 틱(6초 간격)에만 ps를 실행해 스폰 부하를 절반으로 줄인다.
         if (psRunner) {
-          try {
-            const procs = findWrapProcesses(parsePsRows(await psRunner()));
-            if (procs.length > 0) {
-              for (const addr of [...pidCache.keys()]) {
-                if (!allTerminals.some((t) => t.address === addr)) pidCache.delete(addr);
-              }
-              let fetched = 0;
-              const pidOwner = new Map<number, HcTerminalSummary>();
-              for (const t of allTerminals) {
-                if (t.state !== 'live' || t.parent) continue;
-                let pids = pidCache.get(t.address);
-                if (!pids && fetched < 12) {
-                  fetched++;
-                  try {
-                    const raw = await execRunner(hcBin, ['get', t.address, '--json'], {
-                      timeout: HC_LS_TIMEOUT_MS,
-                    });
-                    const parsed = parseJsonOrNull(raw);
-                    const list: number[] = [];
-                    if (parsed) {
-                      if (typeof parsed['pid'] === 'number') list.push(parsed['pid']);
-                      const fg = parsed['foreground'];
-                      if (fg && typeof fg === 'object' && !Array.isArray(fg)) {
-                        const fp = (fg as Record<string, unknown>)['pid'];
-                        if (typeof fp === 'number') list.push(fp);
+          const runPsThisTick = psTickCounter % 2 === 0;
+          psTickCounter += 1;
+          if (!runPsThisTick) {
+            workers.push(...lastWrapWorkers);
+          } else {
+            try {
+              const foundWrap: LiveWorkerInfo[] = [];
+              const procs = findWrapProcesses(parsePsRows(await psRunner()));
+              if (procs.length > 0) {
+                for (const addr of [...pidCache.keys()]) {
+                  if (!allTerminals.some((t) => t.address === addr)) pidCache.delete(addr);
+                }
+                let fetched = 0;
+                const pidOwner = new Map<number, HcTerminalSummary>();
+                for (const t of allTerminals) {
+                  if (t.state !== 'live' || t.parent) continue;
+                  let pids = pidCache.get(t.address);
+                  if (!pids && fetched < 12) {
+                    fetched++;
+                    try {
+                      const raw = await execRunner(hcBin, ['get', t.address, '--json'], {
+                        timeout: HC_LS_TIMEOUT_MS,
+                      });
+                      const parsed = parseJsonOrNull(raw);
+                      const list: number[] = [];
+                      if (parsed) {
+                        if (typeof parsed['pid'] === 'number') list.push(parsed['pid']);
+                        const fg = parsed['foreground'];
+                        if (fg && typeof fg === 'object' && !Array.isArray(fg)) {
+                          const fp = (fg as Record<string, unknown>)['pid'];
+                          if (typeof fp === 'number') list.push(fp);
+                        }
                       }
+                      pids = list;
+                      pidCache.set(t.address, pids);
+                    } catch {
+                      pids = undefined;
                     }
-                    pids = list;
-                    pidCache.set(t.address, pids);
-                  } catch {
-                    pids = undefined;
                   }
+                  for (const pid of pids ?? []) pidOwner.set(pid, t);
                 }
-                for (const pid of pids ?? []) pidOwner.set(pid, t);
-              }
-              for (const p of procs) {
-                const owner = p.ancestors.map((a) => pidOwner.get(a)).find((t) => t !== undefined);
-                if (!owner) continue;
-                if (!matchesRepoScope(owner.cwd, repoFilterDir) || !matchesSessionScope(owner, sessionId)) {
-                  continue;
+                for (const p of procs) {
+                  const owner = p.ancestors.map((a) => pidOwner.get(a)).find((t) => t !== undefined);
+                  if (!owner) continue;
+                  if (!matchesRepoScope(owner.cwd, repoFilterDir) || !matchesSessionScope(owner, sessionId)) {
+                    continue;
+                  }
+                  foundWrap.push(wrapProcToWorker(p, owner));
                 }
-                workers.push(wrapProcToWorker(p, owner));
               }
+              lastWrapWorkers = foundWrap;
+              workers.push(...foundWrap);
+            } catch {
+              // ps 실패는 조용히 무시 — hc 기반 목록은 그대로 유지
+              workers.push(...lastWrapWorkers);
             }
-          } catch {
-            // ps 실패는 조용히 무시 — hc 기반 목록은 그대로 유지
           }
         }
         lastWorkers = workers;
