@@ -292,6 +292,8 @@ pub struct RepoStatsBundle {
     pub cost: Option<CostStatsResult>,
     pub timing: Option<TimingStatsResult>,
     pub shadow: Option<DecisionApiShadowSummary>,
+    /// 이 레포 전용 최신 DB 세션 기록(전역 TOP 20 절단에 밀리지 않도록 project_id로 직접 조회).
+    pub recent_log: Vec<RecentLogEntry>,
 }
 
 /// 폴러 1틱이 만드는 불변 대시보드 스냅숏.
@@ -375,16 +377,41 @@ pub fn event_source_role(source: &str, route: &str) -> &'static str {
 /// 모든 오류(테이블 부재·컬럼 불일치 외래 DB 등)는 빈 벡터로 폴백 — 절대 패닉하지 않는다.
 /// 반드시 `read_only: true`로 연 커넥션만 넣는다(호출 계약 — 이 함수는 쓰기를 하지 않는다).
 pub fn fetch_recent_log(conn: &rusqlite::Connection, limit: usize) -> Vec<RecentLogEntry> {
-    let mut stmt = match conn.prepare(
+    fetch_recent_log_for_project(conn, None, limit)
+}
+
+/// 특정 project_id(None이면 전역)의 최신 `decision_events`를 조회한다.
+pub fn fetch_recent_log_for_project(
+    conn: &rusqlite::Connection,
+    project_id_filter: Option<&str>,
+    limit: usize,
+) -> Vec<RecentLogEntry> {
+    let sql = if project_id_filter.is_some() {
+        "SELECT created_at_ms, project_id, source, route, tool_name, ok, error_snippet
+         FROM decision_events
+         WHERE project_id = ?1
+         ORDER BY created_at_ms DESC, event_id DESC
+         LIMIT ?2"
+    } else {
         "SELECT created_at_ms, project_id, source, route, tool_name, ok, error_snippet
          FROM decision_events
          ORDER BY created_at_ms DESC, event_id DESC
-         LIMIT ?1",
-    ) {
+         LIMIT ?1"
+    };
+    let mut stmt = match conn.prepare(sql) {
         Ok(stmt) => stmt,
         Err(_) => return Vec::new(),
     };
-    let rows = match stmt.query_map([limit as i64], |row| {
+    type LogRow = (
+        i64,
+        Option<String>,
+        String,
+        String,
+        String,
+        i64,
+        Option<String>,
+    );
+    let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<LogRow> {
         Ok((
             row.get::<_, i64>(0)?,
             row.get::<_, Option<String>>(1)?,
@@ -394,12 +421,19 @@ pub fn fetch_recent_log(conn: &rusqlite::Connection, limit: usize) -> Vec<Recent
             row.get::<_, i64>(5)?,
             row.get::<_, Option<String>>(6)?,
         ))
-    }) {
-        Ok(rows) => rows,
-        Err(_) => return Vec::new(),
+    };
+    let collected: Vec<LogRow> = match project_id_filter {
+        Some(pid) => match stmt.query_map(rusqlite::params![pid, limit as i64], map_row) {
+            Ok(rows) => rows.flatten().collect(),
+            Err(_) => return Vec::new(),
+        },
+        None => match stmt.query_map([limit as i64], map_row) {
+            Ok(rows) => rows.flatten().collect(),
+            Err(_) => return Vec::new(),
+        },
     };
     let mut out = Vec::new();
-    for row in rows.flatten() {
+    for row in collected {
         let (created_ms, project_id, source, route, tool_name, ok, error_snippet) = row;
         let source_role = event_source_role(&source, &route).to_string();
         // 리댁션은 절단 이전에 적용(레드시스템 계약) — 잘린 경계의 패턴 누락을 막는다.
@@ -484,13 +518,18 @@ pub fn filter_snapshot_by_repo(
         .filter(|w| w.repo_tag == name)
         .cloned()
         .collect();
+    let mut bundle_pid: Option<String> = None;
     if let Some(bundle) = snapshot.repo_stats.get(name) {
         out.routes = bundle.routes.clone();
         out.cost_summary = bundle.cost.clone();
         out.timing_summary = bundle.timing.clone();
         out.shadow_summary = bundle.shadow.clone();
-        // 세션 기록도 선택 레포의 project_id로 필터링(번들 project_id 미상이면 전체 유지).
-        if let Some(pid) = bundle.project_id.as_deref() {
+        bundle_pid = bundle.project_id.clone();
+        // 1) 레포 전용 DB 조회 결과가 있으면 우선 사용(전역 TOP 20 절단 방지)
+        if !bundle.recent_log.is_empty() {
+            out.recent_log = bundle.recent_log.clone();
+        } else if let Some(pid) = bundle.project_id.as_deref() {
+            // 2) 테스트/레거시 스냅숏 호환 — 전역 recent_log에서 project_id 매칭
             out.recent_log = snapshot
                 .recent_log
                 .iter()
@@ -498,6 +537,38 @@ pub fn filter_snapshot_by_repo(
                 .cloned()
                 .collect();
         }
+    }
+    // 3) 선택 레포에 DB 이벤트가 0건이어도(예: 타 워크트리에서 dg wrap 실행) 현재 살아 있는
+    //    세션이 있으면 라이브 활동 로그를 합성해 빈 화면 대신 TUI와 동일하게 보여준다.
+    if out.recent_log.is_empty() && !out.workers.is_empty() {
+        out.recent_log = out
+            .workers
+            .iter()
+            .map(|w| {
+                let role = match w.slot.as_str() {
+                    "lead" => "Lead",
+                    "verifier" => "Verifier",
+                    "advisor" => "Advisor",
+                    _ => "Worker",
+                };
+                let status = w.status.as_deref().unwrap_or("live");
+                let act = redact_secrets(&w.activity);
+                RecentLogEntry {
+                    time_hhmmss: snapshot.updated_at_label.clone(),
+                    source: "live".to_string(),
+                    source_role: role.to_string(),
+                    message: format!(
+                        "[{}] {} ({}) · {} — {}",
+                        w.address,
+                        w.name,
+                        w.telemetry_line(),
+                        status,
+                        act
+                    ),
+                    project_id: bundle_pid.clone(),
+                }
+            })
+            .collect();
     }
     out
 }
@@ -1367,6 +1438,10 @@ pub fn poll_once(cfg: &PollerConfig, snapshotter: &mut LiveSyncSnapshotter) -> D
             }
             None => (None, None, None),
         };
+        let repo_recent_log = match (&conn, project_id.as_deref()) {
+            (Some(db), Some(pid)) => fetch_recent_log_for_project(db, Some(pid), RECENT_LOG_LIMIT),
+            _ => Vec::new(),
+        };
         repo_stats.insert(
             tag.clone(),
             RepoStatsBundle {
@@ -1375,6 +1450,7 @@ pub fn poll_once(cfg: &PollerConfig, snapshotter: &mut LiveSyncSnapshotter) -> D
                 cost,
                 timing,
                 shadow,
+                recent_log: repo_recent_log,
             },
         );
     }
@@ -1630,6 +1706,7 @@ pub fn demo_snapshot() -> DashboardSnapshot {
                 cost: Some(cost.clone()),
                 timing: Some(timing.clone()),
                 shadow: Some(shadow.clone()),
+                recent_log: recent_log.clone(),
             },
         )]),
         routes,
@@ -1895,6 +1972,7 @@ mod tests {
                 cost: None,
                 timing: None,
                 shadow: None,
+                recent_log: Vec::new(),
             },
         );
         DashboardSnapshot {
@@ -2080,6 +2158,14 @@ mod tests {
         assert_eq!(alpha.recent_log[0].message, "alpha 이벤트");
         // 전체 뷰는 로그를 그대로 유지
         assert_eq!(filter_snapshot_by_repo(&snap, None).recent_log.len(), 2);
+
+        // DB 이벤트가 0건인 레포(예: paperwork-operations)도 라이브 세션이 있으면 활동 로그를 표시
+        let mut snap2 = snapshot_fixture();
+        snap2.recent_log.clear();
+        let live_only = filter_snapshot_by_repo(&snap2, Some("alpha"));
+        assert_eq!(live_only.recent_log.len(), 1);
+        assert_eq!(live_only.recent_log[0].source, "live");
+        assert!(live_only.recent_log[0].message.contains("w-alpha-1"));
     }
 
     // ---------- 동적 N스템 · 라이브 모션 활동 판정 ----------

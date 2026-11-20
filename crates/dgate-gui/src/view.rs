@@ -907,7 +907,6 @@ impl DashboardView {
     /// 다중 lead도 각자 보인다), 없으면 기존 폴백(조율 중/대기 중) 표기.
     fn render_lead_card(&self, snap: &DashboardSnapshot) -> gpui::Div {
         let parts = partition_sessions_by_role(&snap.workers);
-        let model = role_model_label(snap, "lead");
         let subordinates_running = parts.sub_workers.iter().any(|w| worker_running(w));
         let motion = self.controller.demo_mode
             || parts.leads.iter().any(|w| worker_running(w))
