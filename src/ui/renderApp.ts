@@ -179,14 +179,28 @@ function renderHeader(
   // 우측 카운터 폭을 먼저 계산한다 — 프로필/스코프 문자열이 이 영역을 침범하면
   // 120열에서 `repo=LEAD BUILDS…` 처럼 라벨이 덮여 보인다(헤더 충돌 방지).
   const compactBadges = width < 96;
-  const b1 = compactBadges ? `LEAD[${state.argonBuilds}]` : `LEAD BUILDS [${state.argonBuilds}]`;
-  const b2 = compactBadges
-    ? `WORK[${state.swarmActive}]`
-    : `WORKERS [${state.swarmActive}]`;
-  const b3 = compactBadges
-    ? `VERIF[${state.neonVerified}]`
-    : `VERIFIES [${state.neonVerified}]`;
-  const b4 = compactBadges ? `ADV[${state.carbonCalls}]` : `ADVISOR [${state.carbonCalls}]`;
+  // 라이브/워치 관제 중에는 트랜스크립트 휴리스틱 대신 GPUI와 동일한 활성 세션 배지를 쓴다.
+  const c = state.liveSessionCounts;
+  const b1 = c
+    ? `LEAD [${c.lead}]`
+    : compactBadges
+      ? `LEAD[${state.argonBuilds}]`
+      : `LEAD BUILDS [${state.argonBuilds}]`;
+  const b2 = c
+    ? `WORKERS [${c.workers}]`
+    : compactBadges
+      ? `WORK[${state.swarmActive}]`
+      : `WORKERS [${state.swarmActive}]`;
+  const b3 = c
+    ? `VERIFIES [${c.verifiers}]`
+    : compactBadges
+      ? `VERIF[${state.neonVerified}]`
+      : `VERIFIES [${state.neonVerified}]`;
+  const b4 = c
+    ? `ADVISOR [${c.advisors}]`
+    : compactBadges
+      ? `ADV[${state.carbonCalls}]`
+      : `ADVISOR [${state.carbonCalls}]`;
   const gap = width >= 124 ? '   ' : width >= 96 ? '  ' : ' ';
   const totalRightW =
     stringWidth(b1) +

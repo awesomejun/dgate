@@ -701,6 +701,25 @@ export function resolveTuiScope(
   };
 }
 
+/** 활성(`done` 아닌) hc 워커에서 GPUI `lead_display_count` 계약대로 역할별 카운트를 계산한다. */
+export function computeLiveSessionCounts(
+  workers: readonly LiveWorkerInfo[]
+): { lead: number; workers: number; verifiers: number; advisors: number } {
+  let explicitLeads = 0;
+  let subWorkers = 0;
+  let verifiers = 0;
+  let advisors = 0;
+  for (const w of workers) {
+    if (w.status === 'done') continue;
+    if (w.slot === 'lead') explicitLeads += 1;
+    else if (w.slot === 'verifier') verifiers += 1;
+    else if (w.slot === 'advisor') advisors += 1;
+    else subWorkers += 1; // explore | coder
+  }
+  const lead = explicitLeads > 0 ? explicitLeads : subWorkers > 0 ? 1 : 0;
+  return { lead, workers: subWorkers, verifiers, advisors };
+}
+
 function main(): void {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.showHelp) {
@@ -943,6 +962,7 @@ function main(): void {
       state.liveWorkers,
       state.workers,
       state.logs.length,
+      state.liveSessionCounts,
     ]);
 
   const appendLiveWorkerLog = (w: LiveWorkerInfo, suffix?: string): void => {
@@ -958,6 +978,7 @@ function main(): void {
   const applyLiveRosterUpdate = (merged: MergedLiveRoster): void => {
     const prevSig = liveRosterStateSignature();
     state.rosterLabels = merged.labels;
+    state.liveSessionCounts = computeLiveSessionCounts(merged.workers);
     state.neonModelName = merged.verifierModelName;
     state.neonModelFlag = merged.verifierModelFlag;
     // lead는 라이브 리드 워커가 있을 때만(관측 중 세션 배지 우선) 반영
@@ -1147,6 +1168,10 @@ function main(): void {
 
   // 트랜스크립트 실시간 감시 (watch 모드) 또는 일반 스트림 어댑터 연결
   if (opts.watchMode || opts.mode === 'watch') {
+    // 첫 hc 폴 이전에 트랜스크립트 카운터(217/325/534 등)가 깜빡이지 않도록 0으로 초기화
+    if (!state.liveSessionCounts) {
+      state.liveSessionCounts = { lead: 0, workers: 0, verifiers: 0, advisors: 0 };
+    }
     if (!opts.filePath) {
       opts.filePath = findLatestTranscriptPath(opts.watchDir ?? undefined);
     }

@@ -128,6 +128,8 @@ export interface AppState {
 
   // 상단 배지 & 메트릭
   argonBuilds: number;
+  /** 라이브/워치 관제의 활성 세션 역할별 카운트(GPUI 파티션 계약). 미설정(undefined)이면 기존 트랜스크립트 카운터 사용 */
+  liveSessionCounts?: { lead: number; workers: number; verifiers: number; advisors: number };
   swarmActive: number;
   swarmMax: number;
   neonVerified: number;

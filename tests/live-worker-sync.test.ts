@@ -1531,3 +1531,70 @@ test('watch 모드에서 Space가 state.paused를 true <-> false 로 토글한�
   applyKeyInput(char(' '), state, deps);
   assert.equal(state.paused, false, 'Space 2회: 재개');
 });
+
+test('computeLiveSessionCounts — 활성 세션만 역할별로 카운트한다(GPUI 계약)', async () => {
+  const { computeLiveSessionCounts } = await import('../src/cli.ts');
+  // 0명 → 0/0/0/0
+  assert.deepEqual(computeLiveSessionCounts([]), { lead: 0, workers: 0, verifiers: 0, advisors: 0 });
+  // 서브워커 2명(explore+coder) → 암묵 리드 1 + 워커 2
+  assert.deepEqual(
+    computeLiveSessionCounts([
+      makeWorker({ slot: 'explore', address: 'e1' }),
+      makeWorker({ slot: 'coder', address: 'c1' }),
+    ]),
+    { lead: 1, workers: 2, verifiers: 0, advisors: 0 }
+  );
+  // 명시 리드 2 + 검증 1 + 자문 1 + 코더 1 → 2/1/1/1
+  assert.deepEqual(
+    computeLiveSessionCounts([
+      makeWorker({ slot: 'lead', address: 'l1' }),
+      makeWorker({ slot: 'lead', address: 'l2' }),
+      makeWorker({ slot: 'verifier', address: 'v1' }),
+      makeWorker({ slot: 'advisor', address: 'a1' }),
+      makeWorker({ slot: 'coder', address: 'c2' }),
+    ]),
+    { lead: 2, workers: 1, verifiers: 1, advisors: 1 }
+  );
+  // done 워커는 제외
+  assert.deepEqual(
+    computeLiveSessionCounts([
+      makeWorker({ slot: 'coder', address: 'c3', status: 'done' }),
+      makeWorker({ slot: 'lead', address: 'l3', status: 'done' }),
+    ]),
+    { lead: 0, workers: 0, verifiers: 0, advisors: 0 }
+  );
+});
+
+test('watch 헤더 — liveSessionCounts가 있으면 라이브 배지가 트랜스크립트 카운터를 대체한다', () => {
+  const state: AppState = createInitialState('watch');
+  state.argonBuilds = 217;
+  state.neonVerified = 325;
+  state.carbonCalls = 534;
+  state.liveSessionCounts = { lead: 1, workers: 2, verifiers: 0, advisors: 0 };
+  const header = renderFrame(state, 148, 43)
+    .toPlainString()
+    .split('\n')
+    .slice(0, 2)
+    .join('\n');
+  assert.ok(header.includes('LEAD [1]'), `LEAD [1] 없음: ${header}`);
+  assert.ok(header.includes('WORKERS [2]'), `WORKERS [2] 없음: ${header}`);
+  assert.ok(header.includes('VERIFIES [0]'), `VERIFIES [0] 없음: ${header}`);
+  assert.ok(header.includes('ADVISOR [0]'), `ADVISOR [0] 없음: ${header}`);
+  assert.ok(!header.includes('217'), `헤더에 217이 남음: ${header}`);
+  assert.ok(!header.includes('325'), `헤더에 325가 남음: ${header}`);
+  assert.ok(!header.includes('534'), `헤더에 534가 남음: ${header}`);
+});
+
+test('liveSessionCounts 미설정 시 기존 트랜스크립트 카운터 배지가 유지된다', () => {
+  const state: AppState = createInitialState('watch');
+  state.argonBuilds = 217;
+  state.neonVerified = 325;
+  state.carbonCalls = 534;
+  state.liveSessionCounts = undefined;
+  const header = renderFrame(state, 148, 43)
+    .toPlainString()
+    .split('\n')
+    .slice(0, 2)
+    .join('\n');
+  assert.ok(header.includes('LEAD BUILDS [217]'), `기존 배지 없음: ${header}`);
+});
