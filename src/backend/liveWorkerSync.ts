@@ -131,6 +131,42 @@ const WORKER_NAME_PREFIXES = [
 /** 모니터·관측 전용 세션명 — 워커 집계에서 제외. */
 const MONITOR_NAME_RE = /^dg-monitor(-|$)/;
 
+/** 최상위 활성 AI 에이전트 세션으로 인정하는 에이전트 집합 — 관측 대상 확장용. */
+const TOP_LEVEL_AI_AGENTS = new Set([
+  'antigravity',
+  'pi',
+  'claude',
+  'codex',
+  'devin',
+  'gemini',
+  'agy',
+]);
+
+/** 모니터·GUI 전용 세션명 — 최상위 세션 관측에서도 제외. */
+function isMonitorOrGuiName(name: string): boolean {
+  return MONITOR_NAME_RE.test(name) || name.startsWith('mon-') || name.startsWith('dgate-gui');
+}
+
+/**
+ * 최상위(parent 없음) 활성 AI 에이전트 세션 판정 — 리드 관측 확장:
+ * ① `state === 'live'` ② `status === 'working'` (엄격 — idle/done/undefined 불가)
+ * ③ parent 부재·빈 값 ④ 모니터·GUI(dg-monitor-, mon-, dgate-gui- 접두) 제외
+ * ⑤ agent(소문자)가 AI 코딩 에이전트 7종 안팎.
+ */
+export function isActiveTopLevelSession(t: HcTerminalSummary): boolean {
+  if (!t || t.state !== 'live') return false;
+  if (t.status !== 'working') return false;
+  if (t.parent && t.parent.trim().length > 0) return false;
+  if (isMonitorOrGuiName(t.name ?? '')) return false;
+  const agent = (t.agent ?? '').toLowerCase();
+  return TOP_LEVEL_AI_AGENTS.has(agent);
+}
+
+/** `hc ls` 터미널이 "관측 대상"인지 판정 — 기존 워커 규약 + 최상위 활성 AI 세션. */
+export function isObservableTerminal(t: HcTerminalSummary): boolean {
+  return isWorkerTerminal(t) || isActiveTopLevelSession(t);
+}
+
 /**
  * `hc ls` 터미널이 우리가 표시할 "워커"인지 판정:
  * ① `state === 'live'` 필수 ② 모니터(`dg-monitor*`·`mon-*`) 제외 ③ 셸·antigravity 제외
@@ -196,6 +232,19 @@ export function matchesRepoScope(
   // 이미 구분자로 끝나는 스코프는 그대로 접두사로 쓴다.
   const prefix = scopePath.endsWith(path.sep) ? scopePath : scopePath + path.sep;
   return workerPath === scopePath || workerPath.startsWith(prefix);
+}
+
+/**
+ * 터미널이 세션 스코프 안에 있는지 판정.
+ * sessionId 미지정(undefined)이면 전역(항상 true) — 기존 동작 100% 보존.
+ * 지정 시 터미널 주소 자체 또는 parent(해당 세션이 띄운 자식 워커)가 일치할 때만 true.
+ */
+export function matchesSessionScope(
+  t: HcTerminalSummary,
+  sessionId?: string
+): boolean {
+  if (!sessionId) return true;
+  return t.address === sessionId || t.parent === sessionId;
 }
 
 // ---------- 활동 줄 추출 ----------
@@ -395,6 +444,34 @@ export function inferLiveWorkerSlot(
 
 // ---------- 라벨 병합 ----------
 
+/**
+ * 최상위 활성 AI 세션을 Lead 카드로 정규화:
+ * - 슬롯은 lead 고정(LEAD 카운터·Lead 카드에 반영).
+ * - 표시명은 비어 있지 않은 세션명, 없으면 'lead'(원 주소 노출 방지).
+ * - `--model` 미파싱 시 shortModel을 agent명(예: 'antigravity')으로 폴백.
+ */
+export function normalizeTopLevelWorker(
+  worker: LiveWorkerInfo,
+  summary: HcTerminalSummary
+): LiveWorkerInfo {
+  const name = (summary.name ?? '').trim();
+  const agent = (summary.agent ?? '').trim().toLowerCase();
+  let { shortModel, badge, modelName } = worker;
+  if (agent && shortModel === 'custom') {
+    shortModel = agent;
+    badge = `${agent} (실행 중)`;
+    if (!modelName || modelName === 'custom') modelName = agent;
+  }
+  return {
+    ...worker,
+    slot: 'lead',
+    name: name.length > 0 ? name : 'lead',
+    shortModel,
+    badge,
+    modelName,
+  };
+}
+
 /** 라이브 오버라이드 대상 슬롯(lead는 watchedLead 부재 시에만). */
 const LIVE_OVERRIDE_SLOTS: readonly LiveWorkerSlot[] = ['verifier', 'coder', 'explore', 'advisor'];
 
@@ -477,6 +554,8 @@ export interface LiveRosterSyncerOptions {
   repoDir: string;
   /** `--repo <dir>` 스코프 — null이면 전체 레포 관측. */
   repoFilterDir?: string | null;
+  /** `--session <id>` 스코프 — undefined면 세션 필터 없음(기존 동작 불변). */
+  sessionId?: string;
   /** 관측 중 리드 배지 제공자(있으면 lead 슬롯 라이브 오버라이드 금지). */
   getWatchedLead?: () => string | null;
   /** 병합 결과 수신자 — 매 틱 호출(변경 여부 판정은 수신자 책임). */
@@ -543,6 +622,7 @@ export function createLiveRosterSyncer(opts: LiveRosterSyncerOptions): LiveRoste
   const hcBin = opts.hcBin ?? 'hc';
   const intervalMs = opts.intervalMs ?? DEFAULT_SYNC_INTERVAL_MS;
   const repoFilterDir = opts.repoFilterDir ?? null;
+  const sessionId = opts.sessionId;
 
   let baseLabels: RosterDisplayLabels | null = null;
   let rosterSignature: string | null = null;
@@ -616,7 +696,12 @@ export function createLiveRosterSyncer(opts: LiveRosterSyncerOptions): LiveRoste
               t && typeof t === 'object' ? normalizeTerminal(t as Record<string, unknown>) : null
             )
             .filter((t): t is HcTerminalSummary => t !== null)
-            .filter((t) => isWorkerTerminal(t) && matchesRepoScope(t.cwd, repoFilterDir));
+            .filter(
+              (t) =>
+                isObservableTerminal(t) &&
+                matchesRepoScope(t.cwd, repoFilterDir) &&
+                matchesSessionScope(t, sessionId)
+            );
           }
         }
       } catch {
@@ -689,7 +774,16 @@ export function createLiveRosterSyncer(opts: LiveRosterSyncerOptions): LiveRoste
             }
           }
           const rawScreen = screen ?? screenCache.get(summary.address);
-          const worker = inferLiveWorkerSlot(detail, rawScreen);
+          let worker = inferLiveWorkerSlot(detail, rawScreen);
+          // 최상위 활성 AI 세션(워커 규약 밖 리드 등) — Lead 슬롯·표시명·shortModel
+          // 폴백을 정규화한다. 워커 규약 터미널은 그대로 둔다.
+          if (
+            worker &&
+            isActiveTopLevelSession(summary) &&
+            !isWorkerTerminal(summary)
+          ) {
+            worker = normalizeTopLevelWorker(worker, summary);
+          }
           if (worker) workers.push(worker);
         }
         lastWorkers = workers;

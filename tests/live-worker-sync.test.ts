@@ -12,6 +12,8 @@
  * - 회귀 방지: 라이브 동기화(0·1 워커) 후 applyTranscriptStep 무동작(cards 3슬롯
  *   불변), working→done 전환(hc get 캐시 + 매 틱 ls 상태 병합), malformed hc ls JSON
  *   시 이전 워커 보존, 박스형 [hc] 푸터·겹선 테두리 스킵, 루트('/') 스코프, ksh/dash/pwsh 제외
+ * - 동적 워커 와이어(1..4카드+초과 배지)·카드별 라이브 모션(펄스·부재 활성 바·스피너),
+ *   라이브 역할 패널(verifier/advisor/lead) 활성화·침착 대기 복귀 검증
  * - 유출 스캔: 변경 파일에 홈 절대경로·키 패턴 0건
  */
 import assert from 'node:assert/strict';
@@ -24,9 +26,13 @@ import {
   extractLastActivityLine,
   extractRepoTag,
   inferLiveWorkerSlot,
+  isActiveTopLevelSession,
+  isObservableTerminal,
   isWorkerTerminal,
   matchesRepoScope,
+  matchesSessionScope,
   mergeLiveRosterLabels,
+  normalizeTopLevelWorker,
   type HcTerminalDetail,
   type LiveWorkerInfo,
   type MergedLiveRoster,
@@ -38,6 +44,8 @@ import {
 } from '../src/backend/transcriptMapper.ts';
 import { createInitialState } from '../src/state/store.ts';
 import { renderFrame } from '../src/ui/renderApp.ts';
+import { computeLayout, type FullLayout } from '../src/ui/layout.ts';
+import { applyLiveRolePanels, createLiveRoleTrail, formatElapsedMmss, resolveTuiScope } from '../src/cli.ts';
 import type { RosterDisplayLabels } from '../src/types.ts';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..');
@@ -927,5 +935,489 @@ test('13. 경계 — 박스형 [hc] 푸터·겹선 테두리·루트 스코프·
       false,
       `${sh} 셸 제외`
     );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 동적 워커 와이어(1..N) + 라이브 카드 모션 + 역할 패널 동기화 (TUI Dynamic Wires)
+
+const WIRE_CHARS = new Set(['─', '┌', '┐', '┬', '┴', '┼', '└', '┘', '│']);
+
+/** 라이브 워커 N개가 붙은 watch 상태 — geometry 검증용은 idle(펄스 0)로 만든다. */
+function makeLiveWatchState(n: number, status: 'running' | 'idle' = 'idle') {
+  const state = createInitialState('watch');
+  state.phase = '대기 중';
+  state.swarmActive = status === 'running' ? n : 0;
+  state.liveWorkers = Array.from({ length: n }, (_, i) => ({
+    name: `wx${i + 1}`,
+    model: 'pi:glm-5.3',
+    progress: 0,
+    description: `활동 ${i + 1}`,
+    status,
+  }));
+  return state;
+}
+
+/** 148×43은 항상 전체 레이아웃 — 카드 슬롯 검증용 좁혀진 타입. */
+function fullLayout148(visibleCardCount: number): FullLayout {
+  return computeLayout(148, 43, visibleCardCount) as FullLayout;
+}
+
+test('14. 동적 워커 카드·와이어 — 1/2/3/4 워커 카드 수·스템·빈 슬롯 댕글링 없음', () => {
+  // (a) 1..4 워커 — 카드 수·이름·각 카드로 향하는 스템(접합 문자) 존재
+  for (const n of [1, 2, 3, 4]) {
+    const state = makeLiveWatchState(n);
+    const buf = renderFrame(state, 148, 43);
+    const L = fullLayout148(n);
+    assert.equal(L.cards.length, n, `${n}워커 → 카드 ${n}장`);
+    const text = buf.toPlainString();
+    for (let i = 0; i < n; i++) {
+      assert.ok(text.includes(`wx${i + 1}`), `${n}워커: wx${i + 1} 카드 노출`);
+    }
+    for (let i = 0; i < n; i++) {
+      const xs = L.cards[i]!.x + Math.floor(L.cards[i]!.w / 2);
+      const outCh = buf.getCell(xs, L.fanOutY)?.ch;
+      const inCh = buf.getCell(xs, L.fanInY)?.ch;
+      assert.ok(outCh !== undefined && WIRE_CHARS.has(outCh), `${n}워커 카드${i} 팬아웃 스템: ${outCh}`);
+      assert.ok(inCh !== undefined && WIRE_CHARS.has(inCh), `${n}워커 카드${i} 팬인 스템: ${inCh}`);
+    }
+  }
+
+  // (b) 카드 1장 — 가로 레일 없이 곧장 세로 스템(빈 슬롯로 가로선 금지)
+  const one = makeLiveWatchState(1);
+  const oneBuf = renderFrame(one, 148, 43);
+  const L1 = fullLayout148(1);
+  const cx1 = L1.centerX;
+  assert.equal(oneBuf.getCell(cx1, L1.fanOutY)?.ch, '│', '1워커: 중심 세로 스템');
+  assert.equal(oneBuf.getCell(cx1 + 1, L1.fanOutY)?.ch, ' ', '1워커: 우측 가로 레일 없음');
+  assert.equal(oneBuf.getCell(cx1 - 1, L1.fanOutY)?.ch, ' ', '1워커: 좌측 가로 레일 없음');
+
+  // (c) 2워커 — 비어 있는 3번 슬롯 위치에 와이어가 남지 않는다(댕글링 금지)
+  const two = makeLiveWatchState(2);
+  const twoBuf = renderFrame(two, 148, 43);
+  const L2 = fullLayout148(2);
+  const L3 = fullLayout148(3);
+  const x3 = L3.cards[2]!.x + Math.floor(L3.cards[2]!.w / 2);
+  assert.equal(twoBuf.getCell(x3, L2.fanOutY)?.ch, ' ', '2워커: 빈 3번 슬롯 팬아웃 없음');
+  assert.equal(twoBuf.getCell(x3, L2.fanInY)?.ch, ' ', '2워커: 빈 3번 슬롯 팬인 없음');
+  const twoXs = L2.cards.map((r) => r.x + Math.floor(r.w / 2));
+  for (const probe of [x3 - 1, x3 - 3, Math.floor((twoXs[1]! + x3) / 2)]) {
+    assert.equal(twoBuf.getCell(probe, L2.fanOutY)?.ch, ' ', `2워커: 카드2 우측 여백(${probe})에 레일 없음`);
+  }
+
+  // (d) 5워커 — 최대 4카드 + '+1개 더' 오버플로 배지, 5번째 워커는 캔버스 미노출
+  const five = makeLiveWatchState(5);
+  const fiveText = renderFrame(five, 148, 43).toPlainString();
+  assert.equal(fullLayout148(5).cards.length, 4, '5워커 → 카드 4장 상한');
+  assert.ok(fiveText.includes('+1개 더'), '오버플로 배지 노출');
+  assert.ok(!fiveText.includes('wx5'), '5번째 워커는 메인 캔버스에 그리지 않음');
+});
+
+test('15. 실행 중 워커 카드 라이브 모션 — 펄스·부재 활성 바·스피너가 simTime으로 움직인다', () => {
+  // (a) 2번째 워커만 실행 — 프레임이 simTime에 따라 변한다(정지된 0% 바가 아님)
+  const state = makeLiveWatchState(2);
+  const baseCards = state.liveWorkers!;
+  state.liveWorkers = [
+    { ...baseCards[0]!, status: 'idle' as const },
+    { ...baseCards[1]!, status: 'running' as const },
+  ];
+  const f1 = renderFrame({ ...state, simTime: 1.0 }, 148, 43).toPlainString();
+  const f2 = renderFrame({ ...state, simTime: 2.7 }, 148, 43).toPlainString();
+  assert.notEqual(f1, f2, '실행 중 2번째 워커 → simTime 변화가 프레임에 보인다');
+  assert.ok(f2.includes('RUN'), '부재 진행률 → 활성 바 RUN 라벨');
+  assert.ok(/[⠋⠙⠹⠸⠼⠴⠦⠧] 실행 중/.test(f2), '상태 줄 브라일 스피너');
+  assert.ok(f1.includes('▪ 대기 중'), '대기 카드는 정지 상태');
+
+  // (b) 실행 카드로 향하는 팬아웃 레일에만 ● 펄스 — 대기 카드 방향 레일은 잔잔
+  const L2 = fullLayout148(2);
+  const xs = L2.cards.map((r) => r.x + Math.floor(r.w / 2));
+  const railRow1 = f1.split('\n')[L2.fanOutY]!;
+  const railRow2 = f2.split('\n')[L2.fanOutY]!;
+  assert.ok(railRow1.includes('●') || railRow2.includes('●'), '팬아웃 레일에 ● 펄스 헤드');
+  for (const [row, label] of [[railRow1, 't=1.0'], [railRow2, 't=2.7']] as const) {
+    const leftSeg = row.slice(xs[0]!, L2.centerX); // 대기 카드1 방향 — 펄스 없음
+    assert.ok(!leftSeg.includes('●'), `${label}: 대기 카드 방향 레일에 펄스 0개`);
+  }
+  const fanInRow1 = f1.split('\n')[L2.fanInY]!;
+  const fanInRow2 = f2.split('\n')[L2.fanInY]!;
+  assert.ok(fanInRow1.includes('•') || fanInRow2.includes('•'), '팬인 레일에 • 되돌림 펄스');
+
+  // (c) 가운데(2번째) 워커 펄스 — 3카드 배치에서 xs[1]===cx여도 접합점에 ●가 살아있다
+  const three = makeLiveWatchState(3);
+  const baseThree = three.liveWorkers!;
+  three.liveWorkers = [
+    { ...baseThree[0]!, status: 'idle' as const },
+    { ...baseThree[1]!, status: 'running' as const },
+    { ...baseThree[2]!, status: 'idle' as const },
+  ];
+  const L3 = fullLayout148(3);
+  const midX = L3.cards[1]!.x + Math.floor(L3.cards[1]!.w / 2);
+  assert.equal(midX, L3.centerX, '전제: 148열 3카드 중앙 카드 중심 === 파이프 중심축');
+  for (const t of [0.3, 1.1, 2.5, 4.2]) {
+    const buf = renderFrame({ ...three, simTime: t }, 148, 43);
+    assert.equal(buf.getCell(midX, L3.fanOutY)?.ch, '●', `t=${t}: 가운데 워커 접합점 펄스 상시 노출`);
+  }
+});
+
+test('16. 라이브 역할 패널 동기화 — verifier/advisor/lead 활성화·완료·침착 복귀', () => {
+  const state = createInitialState('watch');
+  const trail = createLiveRoleTrail();
+  const mergedOf = (workers: LiveWorkerInfo[]): MergedLiveRoster => ({
+    labels: makeBaseLabels(),
+    leadModelName: 'pi:glm-5.3',
+    leadModelFlag: '--model glm-zcode/glm-5.3',
+    verifierModelName: 'pi:deepseek-v4.1-flash',
+    verifierModelFlag: 'pi:deepseek-v4.1-flash',
+    workers,
+    activeWorkerCount: workers.filter((w) => w.status !== 'done').length,
+  });
+
+  // (a) verifier + advisor + 일반 워커 실행 → 각 역할 패널 활성
+  applyLiveRolePanels(
+    state,
+    mergedOf([
+      makeWorker({ slot: 'verifier', address: 'tV', status: 'working', activity: '12/12 검증 통과' }),
+      makeWorker({ slot: 'advisor', address: 'tC', status: 'working', activity: '계획 조언 중' }),
+      makeWorker({ slot: 'coder', address: 'tW', status: 'working' }),
+    ]),
+    trail
+  );
+  assert.equal(state.neonState, 'run', 'verifier 실행 → neonState run');
+  assert.equal(state.neonProgress, 0, '라이브 검증 부재 진행률 → 0(활성 바 렌더)');
+  assert.ok(state.neonLabel.includes('w-pi-x'), 'neon 라벨에 verifier 활동');
+  assert.equal(state.advisorState, '자문 중', 'advisor 실행 → 자문 중');
+  assert.equal(state.activeTrigger, 0, 'Advisor→Lead 와이어 트리거 활성');
+  assert.equal(state.phase, '워커 실행 중', '워커 실행 중 Lead 표시');
+  const runFrame = renderFrame({ ...state, simTime: 1.0, liveWorkers: [{ name: 'w', model: 'm', progress: 0, description: 'd', status: 'running' }] }, 148, 43).toPlainString();
+  assert.ok(runFrame.includes('자문 중'), 'Advisor 패널 자문 중 렌더');
+
+  // (b) lead 워커 실행 + verifier 완료(done) → phase 작업 중 + neon 잠깐 pass
+  applyLiveRolePanels(
+    state,
+    mergedOf([
+      makeWorker({ slot: 'lead', address: 'tL', status: 'working' }),
+      makeWorker({ slot: 'verifier', address: 'tV', status: 'done' }),
+    ]),
+    trail
+  );
+  assert.equal(state.phase, '작업 중', 'lead 실행 → 작업 중');
+  assert.equal(state.neonState, 'pass', 'verifier 완료 → pass');
+  assert.equal(state.neonProgress, 100);
+  applyLiveRolePanels(state, mergedOf([]), trail);
+  assert.equal(state.neonState, 'idle', 'verifier 소멸 → idle 복귀');
+
+  // (c) 전부 종료 상태 검증 — 침착 대기 복귀
+  assert.equal(state.advisorState, '대기 중');
+  assert.equal(state.activeTrigger, -1);
+  assert.equal(state.phase, '대기 중');
+  state.liveWorkers = [];
+  state.swarmActive = 0;
+  const calm1 = renderFrame({ ...state, simTime: 1.0 }, 148, 43).toPlainString();
+  const calm2 = renderFrame({ ...state, simTime: 2.7 }, 148, 43).toPlainString();
+  assert.equal(calm1, calm2, '0 실행 워커 → simTime만 바꾼 프레임은 동일(펄스·스피너 0)');
+  assert.ok(!/[⠋⠙⠹⠸⠼⠴⠦⠧]/.test(calm1), '침착 상태에 스피너 없음');
+});
+
+test('18. per-worker 실측 경과 MM:SS — formatElapsedMmss 경계 + 라이브 카드 렌더', () => {
+  // (a) 순수 포매터 — 0/84/3661초 및 음수·NaN 클램프
+  assert.equal(formatElapsedMmss(0), '00:00');
+  assert.equal(formatElapsedMmss(84), '01:24');
+  assert.equal(formatElapsedMmss(3661), '01:01:01');
+  assert.equal(formatElapsedMmss(-5), '00:00');
+  assert.equal(formatElapsedMmss(Number.NaN), '00:00');
+
+  // (b) 실행 중 라이브 카드 — elapsedSec 84초면 프레임에 01:24, 미지정이면 RUN 폴백
+  const state = createInitialState('watch');
+  state.phase = '워커 실행 중';
+  state.swarmActive = 2;
+  state.liveWorkers = [
+    { name: 'wA', model: 'pi:glm-5.3', progress: 0, description: '활동 A', status: 'running', elapsedSec: 84 },
+    { name: 'wB', model: 'pi:glm-5.3', progress: 0, description: '활동 B', status: 'running' },
+  ];
+  const text = renderFrame({ ...state, simTime: 1.2 }, 148, 43).toPlainString();
+  assert.ok(text.includes('01:24'), 'elapsedSec=84 → 01:24 노출');
+  assert.ok(/⠙? 01:24/.test(text), '스피너+MM:SS 조합 노출');
+
+  const noElapsed = renderFrame({ ...state, liveWorkers: state.liveWorkers.map((c) => ({ ...c, elapsedSec: undefined })) }, 148, 43).toPlainString();
+  assert.ok(noElapsed.includes(' RUN'), 'elapsedSec 미지정 → 기존 RUN 폴백 유지');
+  assert.ok(!noElapsed.includes('01:24'), '미지정 카드에는 MM:SS 미노출');
+
+  // (c) 완료 카드 — 동결 경과가 ✓ 완료 · MM:SS 로 표시
+  const doneState = createInitialState('watch');
+  doneState.swarmActive = 0;
+  doneState.liveWorkers = [
+    { name: 'wD', model: 'pi:glm-5.3', progress: 100, description: '완료됨', status: 'done', elapsedSec: 84 },
+  ];
+  const doneText = renderFrame(doneState, 148, 43).toPlainString();
+  assert.ok(doneText.includes('✓ 완료 · 01:24'), '완료 카드 동결 경과 표기');
+
+  // (d) 침착 대기 — 실행 워커 0이면 elapsed 도입 후에도 프레임 동일
+  const calm = createInitialState('watch');
+  calm.phase = '대기 중';
+  calm.liveWorkers = [];
+  const c1 = renderFrame({ ...calm, simTime: 1.0 }, 148, 43).toPlainString();
+  const c2 = renderFrame({ ...calm, simTime: 2.7 }, 148, 43).toPlainString();
+  assert.equal(c1, c2, '0 실행 워커 → 침착 프레임 불변');
+});
+
+test('17. 라이브 동기 카드 모션 게이트 — watch 폴백 cards(자리표)는 정지 유지', () => {
+  // 라이브 목록 없음(liveWorkers=[]) → 폴백 cards가 running 상태여도 모션 없음
+  const state = createInitialState('watch');
+  state.phase = '완료';
+  state.neonState = 'pass';
+  state.liveWorkers = [];
+  state.swarmActive = 0;
+  state.cards = state.cards.map((c, i) =>
+    i === 1 ? { ...c, status: 'running' as const, progress: 0 } : c
+  );
+  const f1 = renderFrame({ ...state, simTime: 1.0 }, 148, 43).toPlainString();
+  const f2 = renderFrame({ ...state, simTime: 2.7 }, 148, 43).toPlainString();
+  assert.equal(f1, f2, '라이브 워커 0명 → 폴백 running 카드여도 프레임 고정');
+  assert.ok(f1.includes('◉ 실행 중'), '폴백 running 카드는 정적 ◉ 실행 중 (스피너 아님)');
+  assert.ok(!f1.includes(' RUN'), '라이브 부재 활성 바(RUN) 미노출');
+});
+
+// ---------------------------------------------------------------------------
+// 최상위 활성 AI 에이전트 세션 관측 확장 (w-top-level-sessions)
+
+test('18. isActiveTopLevelSession / isObservableTerminal — 최상위 working AI 세션 관측', () => {
+  // 긍정 — 워커 규약 밖 최상위 working 세션도 관측된다
+  for (const agent of ['antigravity', 'pi', 'claude', 'codex', 'devin', 'gemini', 'agy']) {
+    const t = { address: 't155', agent, name: `paperwork-${agent}`, state: 'live', status: 'working' };
+    assert.equal(isActiveTopLevelSession(t), true, agent);
+    assert.equal(isObservableTerminal(t), true, agent);
+  }
+  // kakao-manual-bot pi — 워커가 아니어도 관측
+  const pi = { address: 't1', agent: 'pi', name: 'kakao-manual-bot', state: 'live', status: 'working' };
+  assert.equal(isWorkerTerminal(pi), false);
+  assert.equal(isObservableTerminal(pi), true);
+  // 기존 워커 판정 불변 — 관측 확장이 isWorkerTerminal을 바꾸지 않는다
+  assert.equal(isObservableTerminal({ address: 'a', agent: 'pi', name: 'w-x', state: 'live' }), true);
+
+  // status 엄격 — idle/done/undefined 불가
+  for (const status of ['idle', 'done', undefined]) {
+    assert.equal(isActiveTopLevelSession({ address: 't', agent: 'antigravity', name: 's', state: 'live', status }), false);
+    assert.equal(isActiveTopLevelSession({ address: 't', agent: 'pi', name: 's', state: 'live', status }), false);
+  }
+  // state 불일치 · parent 존재
+  assert.equal(isActiveTopLevelSession({ address: 't', agent: 'pi', name: 's', state: 'done', status: 'working' }), false);
+  assert.equal(isActiveTopLevelSession({ address: 't', agent: 'pi', name: 's', state: 'live', status: 'working', parent: 'lead' }), false);
+  // 셸·런타임·모니터·GUI 제외
+  for (const agent of ['zsh', 'bash', 'sh', 'node', 'python3', 'powershell.exe', 'dgate-gui']) {
+    assert.equal(isActiveTopLevelSession({ address: 't', agent, name: 's', state: 'live', status: 'working' }), false, agent);
+  }
+  for (const name of ['dg-monitor', 'dg-monitor-x', 'mon-x', 'dgate-gui-main']) {
+    assert.equal(isActiveTopLevelSession({ address: 't', agent: 'antigravity', name, state: 'live', status: 'working' }), false, name);
+    assert.equal(isObservableTerminal({ address: 't', agent: 'antigravity', name, state: 'live', status: 'working' }), false, name);
+  }
+});
+
+test('18.5 최상위 세션 Lead 정규화 — 이름·shortModel 폴백', () => {
+  // 이름·slot·shortModel — '[paperwork-operations] lead · antigravity' 카드용
+  const w = normalizeTopLevelWorker(
+    makeWorker({ slot: 'coder', shortModel: 'custom', badge: 'custom (실행 중)', modelName: 'custom', name: 't155' }),
+    { address: 't155', agent: 'antigravity', name: 'paperwork-operations', state: 'live', status: 'working' }
+  );
+  assert.equal(w.slot, 'lead');
+  assert.equal(w.name, 'paperwork-operations');
+  assert.equal(w.shortModel, 'antigravity');
+  assert.equal(w.badge, 'antigravity (실행 중)');
+  assert.equal(w.modelName, 'antigravity');
+  // 이름 없으면 'lead'
+  const w2 = normalizeTopLevelWorker(
+    makeWorker({ name: 't156', shortModel: 'pi', modelName: 'pi' }),
+    { address: 't156', agent: 'pi', state: 'live', status: 'working' }
+  );
+  assert.equal(w2.slot, 'lead');
+  assert.equal(w2.name, 'lead');
+  assert.equal(w2.shortModel, 'pi');
+});
+
+test('18.9 syncer — 최상위 working antigravity/pi만 Lead로 관측, idle·셸·모니터·GUI 제외', async () => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'lws-toplevel-')));
+  const env = isolateRosterEnv(tmp);
+  const rosterPath = path.join(tmp, 'roster.json');
+  process.env.HERDR_ROSTER_PATH = rosterPath;
+  writeTempRoster(rosterPath, 't-top', 'claude', 'claude-sonnet-4-6');
+  const repoDir = path.join(tmp, 'my-repo');
+  fs.mkdirSync(repoDir, { recursive: true });
+
+  const ls = JSON.stringify({
+    terminals: [
+      { address: 't155', agent: 'antigravity', name: 'paperwork-operations', state: 'live', status: 'working', cwd: repoDir },
+      { address: 't156', agent: 'pi', name: 'kakao-manual-bot', state: 'live', status: 'working', cwd: repoDir },
+      { address: 't157', agent: 'antigravity', name: 'idle-session', state: 'live', status: 'idle', cwd: repoDir },
+      { address: 't158', agent: 'antigravity', name: 'done-session', state: 'live', status: 'done', cwd: repoDir },
+      { address: 't159', agent: 'antigravity', name: 'no-status-session', state: 'live', cwd: repoDir },
+      { address: 't160', agent: 'zsh', name: 'shell', state: 'live', status: 'working', cwd: repoDir },
+      { address: 't161', agent: 'python3', name: 'py', state: 'live', status: 'working', cwd: repoDir },
+      { address: 't162', agent: 'node', name: 'dg-monitor', state: 'live', status: 'working', cwd: repoDir },
+      { address: 't163', agent: 'node', name: 'dgate-gui-main', state: 'live', status: 'working', cwd: repoDir },
+    ],
+  });
+  const updates: MergedLiveRoster[] = [];
+  const syncer = createLiveRosterSyncer({
+    repoDir: tmp,
+    repoFilterDir: null,
+    getWatchedLead: () => null,
+    onUpdate: (m) => updates.push(m),
+    intervalMs: 25,
+    execRunner: async (_file, args) => {
+      if (args[0] === 'ls') return ls;
+      if (args[0] === 'get') {
+        return JSON.stringify({ address: args[1]!, agent: 'antigravity', argv: ['antigravity'] });
+      }
+      return '[hc] ok';
+    },
+  });
+  try {
+    await waitFor(() => updates.length > 0);
+    const m = updates.at(-1)!;
+    assert.equal(m.workers.length, 2, 'working 최상위 antigravity+pi만 관측');
+    const byAddr = new Map(m.workers.map((w) => [w.address, w]));
+    const ant = byAddr.get('t155')!;
+    assert.equal(ant.slot, 'lead');
+    assert.equal(ant.name, 'paperwork-operations');
+    assert.equal(ant.shortModel, 'antigravity');
+    const pi = byAddr.get('t156')!;
+    assert.equal(pi.slot, 'lead');
+    assert.equal(pi.name, 'kakao-manual-bot');
+    assert.equal(pi.shortModel, 'pi');
+    for (const addr of ['t157', 't158', 't159', 't160', 't161', 't162', 't163']) {
+      assert.equal(byAddr.has(addr), false, `${addr} 미관측`);
+    }
+  } finally {
+    syncer.stop();
+    env.restore();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// ---------- TUI 세션 스코프 기본값 (w-tui-session-scope) ----------
+
+test('19. resolveTuiScope — 5가지 스코프 판정 (기본 세션/레포·--all·--repo·--session)', () => {
+  const cwd = path.join('/tmp', 'Gemini_trick');
+  const envOther: NodeJS.ProcessEnv = {};
+  const envSession: NodeJS.ProcessEnv = { HC_TERMINAL_ID: '  t1bg  ' };
+
+  // ① 기본 + HC_TERMINAL_ID — 현재 세션 스코프, 라벨 '레포명·세션ID'
+  const s1 = resolveTuiScope({}, envSession, cwd);
+  assert.equal(s1.kind, 'session');
+  assert.equal(s1.sessionId, 't1bg'); // trim 적용
+  assert.equal(s1.repoFilterDir, null);
+  assert.equal(s1.scopeLabel, 'Gemini_trick·t1bg');
+
+  // ② 기본 + HC_TERMINAL_ID 부재 — 현재 cwd 레포 스코프
+  const s2 = resolveTuiScope({}, envOther, cwd);
+  assert.equal(s2.kind, 'repo');
+  assert.equal(s2.sessionId, null);
+  assert.equal(s2.repoFilterDir, path.resolve(cwd));
+  assert.equal(s2.scopeLabel, 'Gemini_trick');
+
+  // ③ --all — 전역 (라벨·필터 없음)
+  const s3 = resolveTuiScope({ all: true }, envSession, cwd); // env 무시 우선순위
+  assert.deepEqual(s3, { kind: 'all', repoFilterDir: null, sessionId: null, scopeLabel: null });
+
+  // ④ --repo <dir> — 해당 레포 (HC_TERMINAL_ID 있어도 --repo 우선은 아님 — --all 다음, env 전)
+  const s4 = resolveTuiScope({ repoDir: path.join('rel', 'my-repo') }, envOther, cwd);
+  assert.equal(s4.kind, 'repo');
+  assert.equal(s4.repoFilterDir, path.resolve(path.join('rel', 'my-repo')));
+  assert.equal(s4.scopeLabel, 'my-repo');
+
+  // ⑤ --session <id> — 세션 스코프 (+ --repo 병행 시 레포 필터도 유지)
+  const s5 = resolveTuiScope({ sessionId: 't155' }, envOther, cwd);
+  assert.equal(s5.kind, 'session');
+  assert.equal(s5.sessionId, 't155');
+  assert.equal(s5.repoFilterDir, null);
+  assert.equal(s5.scopeLabel, 'session=t155');
+  const s5b = resolveTuiScope({ sessionId: 't155', repoDir: '/x/my-repo' }, envOther, cwd);
+  assert.equal(s5b.repoFilterDir, path.resolve('/x/my-repo'));
+});
+
+test('20. matchesSessionScope — 같은 레포 안 두 세션(t155/t182) 자식 워커 격리', () => {
+  const t155 = { address: 't155', agent: 'pi', state: 'live', status: 'working' };
+  const w1 = { address: 'w-1', agent: 'pi', name: 'w-coder1', parent: 't155', state: 'live' };
+  const t182 = { address: 't182', agent: 'pi', state: 'live', status: 'working' };
+  const w2 = { address: 'w-2', agent: 'claude', name: 'w-coder2', parent: 't182', state: 'live' };
+
+  // 스코프 미지정 — 전역 (기존 동작 100% 불변)
+  assert.equal(matchesSessionScope(t155, undefined), true);
+  assert.equal(matchesSessionScope(w2, undefined), true);
+
+  // t155 스코프 — t155 본인 + 자식 w-1만, t182/w-2는 제외
+  assert.equal(matchesSessionScope(t155, 't155'), true);
+  assert.equal(matchesSessionScope(w1, 't155'), true);
+  assert.equal(matchesSessionScope(t182, 't155'), false);
+  assert.equal(matchesSessionScope(w2, 't155'), false);
+
+  // t182 스코프 — 반대 격리
+  assert.equal(matchesSessionScope(t182, 't182'), true);
+  assert.equal(matchesSessionScope(w2, 't182'), true);
+  assert.equal(matchesSessionScope(t155, 't182'), false);
+  assert.equal(matchesSessionScope(w1, 't182'), false);
+});
+
+test('21. createLiveRosterSyncer sessionId — 같은 레포 내 타 세션 워커 필터, 미지정 시 전부', async () => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'lws-sess-')));
+  const env = isolateRosterEnv(tmp);
+  const rosterPath = path.join(tmp, 'roster.json');
+  process.env.HERDR_ROSTER_PATH = rosterPath;
+  writeTempRoster(rosterPath, 't-sess-prof', 'claude', 'claude-sonnet-4-6');
+
+  // 같은 레포(cwd 동일) 안에 t155+w-1, t182+w-2 두 세션
+  const repoDir = path.join(tmp, 'my-repo');
+  fs.mkdirSync(repoDir, { recursive: true });
+  const lsJson = JSON.stringify({
+    terminals: [
+      { address: 't155', agent: 'pi', state: 'live', status: 'working', cwd: repoDir },
+      { address: 'w-1', agent: 'pi', name: 'w-coder1', parent: 't155', state: 'live', status: 'working', cwd: repoDir },
+      { address: 't182', agent: 'pi', state: 'live', status: 'working', cwd: repoDir },
+      { address: 'w-2', agent: 'claude', name: 'w-coder2', parent: 't182', state: 'live', status: 'working', cwd: repoDir },
+    ],
+  });
+
+  const makeRunner = (): Parameters<typeof createLiveRosterSyncer>[0]['execRunner'] =>
+    async (_file, args) => {
+      if (args[0] === 'ls') return lsJson;
+      if (args[0] === 'get') return JSON.stringify({});
+      return '';
+    };
+
+  const updates: MergedLiveRoster[] = [];
+  const syncer = createLiveRosterSyncer({
+    repoDir: tmp,
+    repoFilterDir: null,
+    sessionId: 't155',
+    getWatchedLead: () => null,
+    onUpdate: (m) => updates.push(m),
+    intervalMs: 25,
+    execRunner: makeRunner(),
+  });
+  try {
+    await waitFor(() => updates.length >= 1 && updates[updates.length - 1]!.workers.length >= 2);
+    const addrs = updates[updates.length - 1]!.workers.map((w) => w.address).sort();
+    assert.deepEqual(addrs, ['t155', 'w-1'], '같은 레포라도 t155 세션만 관측');
+  } finally {
+    syncer.stop();
+  }
+
+  // sessionId 미지정(전역/--all) — 같은 조건에서 4개 전부 관측
+  const updatesAll: MergedLiveRoster[] = [];
+  const syncerAll = createLiveRosterSyncer({
+    repoDir: tmp,
+    repoFilterDir: null,
+    getWatchedLead: () => null,
+    onUpdate: (m) => updatesAll.push(m),
+    intervalMs: 25,
+    execRunner: makeRunner(),
+  });
+  try {
+    await waitFor(() => updatesAll.length >= 1 && updatesAll[updatesAll.length - 1]!.workers.length >= 4);
+    const addrs = updatesAll[updatesAll.length - 1]!.workers.map((w) => w.address).sort();
+    assert.deepEqual(addrs, ['t155', 't182', 'w-1', 'w-2'], '세션 필터 없으면 전부 관측');
+  } finally {
+    syncerAll.stop();
+    env.restore();
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
 });

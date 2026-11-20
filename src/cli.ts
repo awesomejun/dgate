@@ -2,6 +2,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as tty from 'node:tty';
+import { fileURLToPath } from 'node:url';
 import {
   AgentRunner,
   type BackendPreference,
@@ -38,7 +39,7 @@ import {
   attachStdinStream,
   parseJsonLine,
 } from './state/streamAdapter.ts';
-import type { CompactTab, EffortLevel, ModalKind, QuadRole, RunMode } from './types.ts';
+import type { AppState, CompactTab, EffortLevel, ModalKind, QuadRole, RunMode } from './types.ts';
 import { computeLayout } from './ui/layout.ts';
 import { renderFrame } from './ui/renderApp.ts';
 import { renderQuadRoleFrame } from './ui/renderQuadRole.ts';
@@ -55,6 +56,10 @@ interface CliOptions {
   watchDb: string | null;
   /** `--repo <dir>`(별칭 `--project`) — 관측 스코프를 특정 레포로 한정 */
   repoDir: string | null;
+  /** `--all` / `-a` — 전체 세션·레포 전역 관측 */
+  all: boolean;
+  /** `--session <id>` — 관측 스코프를 특정 hc 세션(주소)으로 한정 */
+  sessionId: string | null;
   follow: boolean;
   replayMs: number;
   initialTime: number;
@@ -84,6 +89,8 @@ function parseArgs(argv: string[]): CliOptions {
     watchDir: null,
     watchDb: null,
     repoDir: null,
+    all: false,
+    sessionId: null,
     follow: false,
     replayMs: 0,
     initialTime: 0,
@@ -137,6 +144,15 @@ function parseArgs(argv: string[]): CliOptions {
         // 관측 스코프를 특정 레포로 한정 — 헤더 repo=<이름> 표기, 해당 레포 워커·통계만 표시
         const p = argv[++i];
         if (p && !p.startsWith('-')) opts.repoDir = p;
+        break;
+      }
+      case '--all':
+      case '-a':
+        opts.all = true;
+        break;
+      case '--session': {
+        const s = argv[++i];
+        if (s && !s.startsWith('-')) opts.sessionId = s;
         break;
       }
       case '--stream':
@@ -255,6 +271,8 @@ DGATE TUI (Lead · Decision Gate · Workers · Verifier · Advisor)
                                   > ~/.local/state/dgate/decision.db
   --repo, --project <dir> 관측 스코프를 특정 프로젝트(레포)로 한정 — 헤더에 repo=<이름> 표기,
                          해당 레포의 활성 hc 워커·결정 통계만 표시 (기본: 전체 레포 관측)
+  --session <id>         관측 스코프를 특정 hc 세션(주소)과 그 자식 워커로 한정
+  --all, -a              관측 스코프를 전체 세션·레포(전역)로 확장 — 기본(현 세션/현 레포)의 반대
   --live, --agy          실제 Antigravity(agy) / Gemini API 백엔드 에이전트 루프 연결 실행
   --demo                 gemini_sub_neon.html의 40초 멀티 에이전트 시나리오 데모 실행 (기본값)
   --stream               표준 입력(stdin)으로부터 JSONL(또는 agy stream-json) 실시간 렌더링
@@ -290,6 +308,165 @@ DGATE TUI (Lead · Decision Gate · Workers · Verifier · Advisor)
   console.log(usage);
 }
 
+/** 라이브 역할 패널 동기화 추적 — 이 동기화가 덮어쓴 패널만 종료 시 깨끗하게 복귀시킨다. */
+/** 실측 경과(초)를 MM:SS(1시간↑ HH:MM:SS)로 — 음수·NaN은 0 클램프 */
+export function formatElapsedMmss(secs: number): string {
+  if (!Number.isFinite(secs) || secs < 0) secs = 0;
+  const total = Math.floor(secs);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const mm = String(m).padStart(2, '0');
+  const ss = String(s).padStart(2, '0');
+  return h > 0 ? `${String(h).padStart(2, '0')}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+export interface LiveRolePanelTrail {
+  phaseSet: boolean;
+  /** false=미설정, 'run'=실행 중, 'pass'=완료 표시 중(소멸 시 idle 복귀 대기) */
+  neonSet: boolean | 'run' | 'pass';
+  advisorSet: boolean;
+}
+
+export function createLiveRoleTrail(): LiveRolePanelTrail {
+  return { phaseSet: false, neonSet: false, advisorSet: false };
+}
+
+/**
+ * Live 로스터 동기화 시 `merged.workers` 슬롯을 Lead/Verifier/Advisor 역할 패널에 반영한다.
+ * - verifier 실행 → neonState='run'(부재 진행률 0 — 렌더에서 활성 바) + 1줄 활동 라벨
+ * - advisor 실행 → advisorState='자문 중' + activeTrigger=0 (Advisor→Lead 와이어 펄스)
+ * - lead 실행 → phase='작업 중', 그 외 워커 실행 → phase='워커 실행 중'(Lead 패널·와이어 펄스)
+ * - 전부 종료 → 이 함수가 설정한 값만 '대기 중'/'idle'로 복귀(침착 대기 불변식 유지).
+ * 트랜스크립트 매퍼가 쓰는 state.cards 3슬롯은 건드리지 않는다.
+ */
+export function applyLiveRolePanels(
+  state: AppState,
+  merged: MergedLiveRoster,
+  trail: LiveRolePanelTrail
+): void {
+  const active = merged.workers.filter((w) => w.status !== 'done');
+
+  // Verifier → 교차 검증(neon) 패널
+  const verifier = active.find((w) => w.slot === 'verifier');
+  if (verifier) {
+    trail.neonSet = 'run';
+    state.neonState = 'run';
+    state.neonProgress = 0;
+    state.neonLabel = `[${verifier.repoTag}] ${verifier.name}: ${verifier.activity}`;
+  } else if (trail.neonSet === 'run') {
+    // 실행 중이던 verifier가 완료로 남아 있으면 잠깐 'pass', 목록에서 사라지면 'idle' 복귀
+    const verifierDone = merged.workers.some((w) => w.slot === 'verifier');
+    if (verifierDone) {
+      trail.neonSet = 'pass';
+      state.neonState = 'pass';
+      state.neonProgress = 100;
+      state.neonVerified += 1;
+    } else {
+      trail.neonSet = false;
+      state.neonState = 'idle';
+      state.neonProgress = 0;
+    }
+    state.neonLabel = '';
+  } else if (trail.neonSet === 'pass' && !merged.workers.some((w) => w.slot === 'verifier')) {
+    // 'pass' 표시 중 verifier가 목록에서 사라지면 'idle' 복귀
+    trail.neonSet = false;
+    state.neonState = 'idle';
+    state.neonProgress = 0;
+    state.neonLabel = '';
+  }
+
+  // Advisor → 자문 패널 (트리거 0번 라인 활성 — Advisor→Lead 와이어 펄스)
+  const advisor = active.find((w) => w.slot === 'advisor');
+  if (advisor) {
+    trail.advisorSet = true;
+    state.advisorState = '자문 중';
+    state.activeTrigger = 0;
+    state.latestAdvice = advisor.activity;
+  } else if (trail.advisorSet) {
+    trail.advisorSet = false;
+    state.advisorState = '대기 중';
+    state.activeTrigger = -1;
+  }
+
+  // Lead → 위상 배지 (Lead 패널·Lead→Decision 와이어 펄스)
+  const lead = active.find((w) => w.slot === 'lead');
+  if (lead) {
+    trail.phaseSet = true;
+    state.phase = '작업 중';
+  } else if (active.length > 0) {
+    trail.phaseSet = true;
+    state.phase = '워커 실행 중';
+  } else if (trail.phaseSet) {
+    trail.phaseSet = false;
+    state.phase = '대기 중';
+  }
+}
+
+/** resolveTuiScope 입력 — parseArgs 결과 중 스코프 판정에 쓰는 필드만. */
+export interface TuiScopeOptions {
+  all?: boolean;
+  sessionId?: string | null;
+  repoDir?: string | null;
+}
+
+/** resolveTuiScope 결과 — 관측 스코프 종류·레포 필터·세션 필터·헤더 라벨. */
+export interface TuiScope {
+  kind: 'all' | 'session' | 'repo';
+  repoFilterDir: string | null;
+  sessionId: string | null;
+  scopeLabel: string | null;
+}
+
+/**
+ * TUI 기본 관측 스코프 판정(순수 함수):
+ * ① `--all`이면 전역 ② `--session <id>`면 해당 세션(+`--repo` 병행 가능)
+ * ③ `--repo <dir>`면 해당 레포 ④ HC_TERMINAL_ID 환경변수가 있으면 현재 hc 세션
+ * (라벨은 `레포명·세션ID`) ⑤ 마지막 폴백은 현재 cwd 레포.
+ */
+export function resolveTuiScope(
+  opts: TuiScopeOptions,
+  env: NodeJS.ProcessEnv,
+  cwd: string
+): TuiScope {
+  if (opts.all) {
+    return { kind: 'all', repoFilterDir: null, sessionId: null, scopeLabel: null };
+  }
+  if (opts.sessionId) {
+    return {
+      kind: 'session',
+      repoFilterDir: opts.repoDir ? path.resolve(opts.repoDir) : null,
+      sessionId: opts.sessionId,
+      scopeLabel: 'session=' + opts.sessionId,
+    };
+  }
+  if (opts.repoDir) {
+    const dir = path.resolve(opts.repoDir);
+    return {
+      kind: 'repo',
+      repoFilterDir: dir,
+      sessionId: null,
+      scopeLabel: path.basename(dir) || dir,
+    };
+  }
+  const envSession = env.HC_TERMINAL_ID?.trim();
+  if (envSession) {
+    return {
+      kind: 'session',
+      repoFilterDir: null,
+      sessionId: envSession,
+      scopeLabel: path.basename(path.resolve(cwd)) + '·' + envSession,
+    };
+  }
+  const dir = path.resolve(cwd);
+  return {
+    kind: 'repo',
+    repoFilterDir: dir,
+    sessionId: null,
+    scopeLabel: path.basename(dir) || dir,
+  };
+}
+
 function main(): void {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.showHelp) {
@@ -301,10 +478,12 @@ function main(): void {
   state.paused = opts.paused;
   state.modal = opts.modalOverride;
 
-  // `--repo <dir>`: 관측 스코프를 특정 레포로 한정 — 헤더 표기·텔레메트리 projectId·live 워커 필터에 사용
-  const repoFilterDir = opts.repoDir ? path.resolve(opts.repoDir) : null;
-  if (repoFilterDir) {
-    state.repoScopeLabel = path.basename(repoFilterDir) || repoFilterDir;
+  // 관측 스코프 결정 — --all > --session > --repo > HC_TERMINAL_ID(현 세션) > cwd(현 레포).
+  // 기본값이 과거의 전역 관측에서 “현재 세션(또는 현 레포)”로 바뀌었다(전역은 --all).
+  const tuiScope = resolveTuiScope(opts, process.env, process.cwd());
+  const repoFilterDir = tuiScope.repoFilterDir;
+  if (tuiScope.scopeLabel) {
+    state.repoScopeLabel = tuiScope.scopeLabel;
   }
 
   // 활성 roster.json 역할·모델 바인딩 반영 — 실패 시 createInitialState의
@@ -342,12 +521,18 @@ function main(): void {
 
   // N8: --watch-db > DGATE_DB_PATH > DECISION_ORCHESTRATOR_DB_PATH > GEMINI_TRICK_DB_PATH(레거시) > 기본 경로
   // 우선순위로 SQLite 결정 DB 읽기전용 구독.
+  // watch 모드에서 스냅샷·데모가 아니면 기본 경로 DB가 존재할 때 자동 연결한다
+  // (DB가 없으면 만들지 않고 건너뛴다 — 스냅샷/데모 테스트 결정성 유지).
   // W1은 최초 1회 로드만 수행한다(주기 구독 훅은 W2-B가 src/state에 추가).
   const decisionDbPath = resolveDbPath(opts.watchDb);
-  if (
-    (opts.watchDb !== null || process.env.DGATE_DB_PATH || process.env.DECISION_ORCHESTRATOR_DB_PATH || process.env.GEMINI_TRICK_DB_PATH) &&
-    fs.existsSync(decisionDbPath)
-  ) {
+  const dbExplicitlyRequested =
+    opts.watchDb !== null ||
+    process.env.DGATE_DB_PATH ||
+    process.env.DECISION_ORCHESTRATOR_DB_PATH ||
+    process.env.GEMINI_TRICK_DB_PATH;
+  const defaultDbAutoConnect =
+    opts.mode === 'watch' && !opts.snapshotPlain && !opts.snapshotAnsi;
+  if ((dbExplicitlyRequested || defaultDbAutoConnect) && fs.existsSync(decisionDbPath)) {
     try {
       // `--repo` 지정 시 해당 레포의 projectId로 스코프(경유 cwd → 내부 projectId 환산)
       const snapshot = readTelemetrySnapshot(
@@ -502,8 +687,16 @@ function main(): void {
       repoTag: string;
       shortModel: string;
       slot: LiveWorkerInfo['slot'];
+      /** 주소 첫 관측 시각(ms) — 워커가 사라질 때까지 유지 */
+      startedAtMs: number;
+      /** done 전환 시 경과를 동결해 완료 카드에 그대로 노출 */
+      frozenElapsedSec: number | null;
     }
   >();
+  // 역할 패널 동기화가 덮어쓴 영역 추적 — 종료 복귀 판정에 사용
+  const liveRoleTrail = createLiveRoleTrail();
+  // liveWorkers 카드와 나란히 놓인 경과 계산 기준 — 폴 사이 틱에서 초 갱신용
+  const liveElapsedBasis: ({ startedAtMs: number; frozenElapsedSec: number | null } | null)[] = [];
 
   const liveRosterStateSignature = (): string =>
     JSON.stringify([
@@ -544,14 +737,33 @@ function main(): void {
     // 가변 길이 라이브 목록은 state.liveWorkers로 — state.cards는 transcriptMapper가 쓰는
     // 고정 3슬롯(tool 카테고리) 계약이므로 절대 덮어쓰지 않는다(레이아웃·렌더는 liveWorkers 우선).
     const scoped = Boolean(repoFilterDir);
-    state.liveWorkers = merged.workers.map((w) => ({
-      name: scoped ? `${w.name} · ${w.shortModel}` : `[${w.repoTag}] ${w.name} · ${w.shortModel}`,
-      model: w.shortModel,
-      progress: w.status === 'done' ? 100 : 0,
-      description: w.activity,
-      status: w.status === 'done' ? ('done' as const) : ('running' as const),
-    }));
+    const nowMs = Date.now();
+    // 주소별 경과 추적 — 첫 관측 startedAtMs 고정, done 시 경과 동결, 소멸 시 제거
+    const elapsedByAddr = new Map<string, { startedAtMs: number; frozenElapsedSec: number | null }>();
+    state.liveWorkers = merged.workers.map((w) => {
+      const prev = prevLiveWorkers.get(w.address);
+      const startedAtMs = prev?.startedAtMs ?? nowMs;
+      const done = w.status === 'done';
+      const liveElapsed = Math.max(0, Math.floor((nowMs - startedAtMs) / 1000));
+      const frozenElapsedSec = done ? (prev?.frozenElapsedSec ?? liveElapsed) : null;
+      elapsedByAddr.set(w.address, { startedAtMs, frozenElapsedSec });
+      return {
+        name: scoped ? `${w.name} · ${w.shortModel}` : `[${w.repoTag}] ${w.name} · ${w.shortModel}`,
+        model: w.shortModel,
+        progress: done ? 100 : 0,
+        description: w.activity,
+        status: done ? ('done' as const) : ('running' as const),
+        elapsedSec: frozenElapsedSec ?? liveElapsed,
+      };
+    });
     state.swarmActive = merged.activeWorkerCount;
+    liveElapsedBasis.length = state.liveWorkers.length;
+    merged.workers.forEach((w, i) => {
+      liveElapsedBasis[i] = elapsedByAddr.get(w.address) ?? null;
+    });
+
+    // 역할 패널(Lead/Verifier/Advisor) 라이브 활성화 — 워커 종료 시 깨끗한 대기 복귀
+    applyLiveRolePanels(state, merged, liveRoleTrail);
 
     // 워커 매트릭스(s 모달) 앞 슬롯에도 live 상태 반영
     for (let i = 0; i < state.workers.length; i++) {
@@ -590,6 +802,8 @@ function main(): void {
         repoTag: w.repoTag,
         shortModel: w.shortModel,
         slot: w.slot,
+        startedAtMs: elapsedByAddr.get(w.address)?.startedAtMs ?? Date.now(),
+        frozenElapsedSec: elapsedByAddr.get(w.address)?.frozenElapsedSec ?? null,
       });
     }
     for (const [addr, prev] of [...prevLiveWorkers]) {
@@ -606,6 +820,24 @@ function main(): void {
 
     // 실제 변경 시에만 재렌더 (매 틱 방송 중복 억제)
     if (liveRosterStateSignature() !== prevSig) renderNow();
+  };
+
+  // 실행 중 라이브 워커의 경과 초 갱신 — 폴을 기다리지 않고 매 틱 MM:SS를 살아 있게
+  const refreshLiveElapsed = (): void => {
+    const cards = state.liveWorkers;
+    if (!cards || cards.length === 0) return;
+    let changed = false;
+    for (let i = 0; i < cards.length; i++) {
+      const basis = liveElapsedBasis[i];
+      const card = cards[i]!;
+      if (!basis || card.status !== 'running') continue;
+      const next = Math.max(0, Math.floor((Date.now() - basis.startedAtMs) / 1000));
+      if (card.elapsedSec !== next) {
+        card.elapsedSec = next;
+        changed = true;
+      }
+    }
+    if (changed) renderNow();
   };
 
   // 선행 버그 #1 수정: liveHooks를 Hub IPC 등록 이전에 선언해 핸들러에서 참조 가능하게 함
@@ -700,6 +932,7 @@ function main(): void {
       liveSyncer = createLiveRosterSyncer({
         repoDir: repoFilterDir ?? opts.watchDir ?? process.cwd(),
         repoFilterDir,
+        sessionId: tuiScope.sessionId ?? undefined,
         getWatchedLead: () => watchedLeadLabel,
         onUpdate: (merged) => applyLiveRosterUpdate(merged),
       });
@@ -984,6 +1217,7 @@ function main(): void {
     } else {
       // 라이브 스트림 모드에서도 와이어 흐름과 커서 점멸이 살아 움직이도록 시간 전진
       state.simTime += 0.08;
+      refreshLiveElapsed();
     }
     renderNow();
   }, 80);
@@ -991,4 +1225,10 @@ function main(): void {
   renderNow();
 }
 
-main();
+// 모듈 테스트 임포트 시 main()이 실행되지 않도록 직접 실행(entry)일 때만 구동한다.
+// entryPath가 없으면(node -e 등) 절대 구동하지 않는다.
+const entryPath = process.argv[1] ? path.resolve(process.argv[1]) : null;
+if (entryPath && entryPath === fileURLToPath(import.meta.url)) {
+  main();
+}
+
