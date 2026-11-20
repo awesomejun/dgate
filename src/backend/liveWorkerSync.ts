@@ -1568,6 +1568,17 @@ export function createLiveRosterSyncer(opts: LiveRosterSyncerOptions): LiveRoste
                 worker.recentIo = info.recentIo;
               }
             }
+            // Claude Code 리드 세션에서 Explore.md 4줄 오버라이드가 없으면 Opus grep 낭비 경고
+            if (worker.cli === 'claude' && !worker.subagentWarning) {
+              const globalExplore = path.join(os.homedir(), '.claude', 'agents', 'Explore.md');
+              const repoExplore = worker.cwd
+                ? path.join(worker.cwd, '.claude', 'agents', 'Explore.md')
+                : null;
+              if (!fs.existsSync(globalExplore) && (!repoExplore || !fs.existsSync(repoExplore))) {
+                worker.subagentWarning =
+                  'Explore.md 없음 — grep이 Opus로 실행됨 (dgate setup으로 4줄 haiku 강등)';
+              }
+            }
           }
           if (worker) {
             if (rawScreen && worker.slot !== 'lead') {

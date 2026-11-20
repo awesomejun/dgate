@@ -2240,6 +2240,30 @@ impl LiveSyncSnapshotter {
                                 worker.recent_io = io;
                             }
                         }
+                        // Claude Code 리드 세션에서 Explore.md 4줄 오버라이드가 없으면 Opus grep 낭비 경고
+                        if worker.cli == "claude" && worker.subagent_warning.is_none() {
+                            let home = std::env::var("HOME")
+                                .or_else(|_| std::env::var("USERPROFILE"))
+                                .unwrap_or_default();
+                            let global_explore = PathBuf::from(&home)
+                                .join(".claude")
+                                .join("agents")
+                                .join("Explore.md");
+                            let repo_explore = worker.cwd.as_deref().map(|c| {
+                                PathBuf::from(c)
+                                    .join(".claude")
+                                    .join("agents")
+                                    .join("Explore.md")
+                            });
+                            let has_override = global_explore.is_file()
+                                || repo_explore.as_ref().is_some_and(|p| p.is_file());
+                            if !has_override {
+                                worker.subagent_warning = Some(
+                                    "Explore.md 없음 — grep이 Opus로 실행됨 (dgate setup으로 4줄 haiku 강등)"
+                                        .to_string(),
+                                );
+                            }
+                        }
                     }
                     if worker.slot != RoleSlot::Lead {
                         if let Some(raw) = raw_screen.as_deref() {

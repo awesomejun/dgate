@@ -1201,7 +1201,7 @@ function classifyLogTag(entry: AppState['logs'][number]): { label: string; color
   const msg = entry.message.toLowerCase();
   if (agent === '사용자' || agent === 'you') return { label: 'input', color: THEME.blue };
   if (msg.includes('오류') || msg.includes('실패') || msg.includes('error') || msg.includes('fail')) {
-    return { label: 'err', color: THEME.red };
+    return { label: 'err', color: THEME.trafficRed };
   }
   if (msg.includes('split') || msg.includes('분할')) return { label: 'split', color: THEME.orange };
   if (msg.includes('sharp') || msg.includes('직행')) return { label: 'sharp', color: THEME.green };

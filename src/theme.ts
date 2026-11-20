@@ -28,44 +28,45 @@ export function sameColor(a: RGB, b: RGB): boolean {
 }
 
 /**
- * gemini_sub_neon.html의 CSS :root 컬러 팔레트 및 파생 배경/보더 컬러 매핑
+ * dgate 고유 "Obsidian Signal" 팔레트 — 정밀 관제 콘솔 톤
+ * 깊은 옵시디언 캔버스 + 고대비 시그널(앰버·시안·틸에메랄드·바이올렛·골드)
  */
 export const THEME = {
-  bg: hex('#1b2026'),
-  bgChrome: hex('#252a32'),
-  bgElevated: hex('#20262e'),
-  bgModal: hex('#171c22'),
-  bgGlowPurple: hex('#242132'),
-  bgGlowNeon: hex('#26261e'),
-  bgTriggerActive: hex('#322f44'),
-  bgInputFocus: hex('#212933'),
-  bgGreenTrack: hex('#2b3d34'),
-  bgOrangeTrack: hex('#3c3029'),
-  bgBlueTrack: hex('#293342'),
-  bgNeonTrack: hex('#3b3928'),
+  bg: hex('#0e1015'),
+  bgChrome: hex('#14171f'),
+  bgElevated: hex('#171b24'),
+  bgModal: hex('#11141c'),
+  bgGlowPurple: hex('#191626'),
+  bgGlowNeon: hex('#1b1a14'),
+  bgTriggerActive: hex('#241f36'),
+  bgInputFocus: hex('#161e29'),
+  bgGreenTrack: hex('#152c26'),
+  bgOrangeTrack: hex('#2c1e16'),
+  bgBlueTrack: hex('#152534'),
+  bgNeonTrack: hex('#282414'),
 
-  fg: hex('#d6dce3'),
-  fgSoft: hex('#aeb6c2'),
-  muted: hex('#89919b'),
-  dim: hex('#69727f'),
-  chromeFg: hex('#717a87'),
+  fg: hex('#edf0f5'),
+  fgSoft: hex('#b8c0ce'),
+  muted: hex('#7d8799'),
+  dim: hex('#545d6e'),
+  chromeFg: hex('#6c768a'),
 
-  borderHeader: hex('#4c535c'),
-  borderWire: hex('#505761'),
-  borderAdvisoryIdle: hex('#5a5668'),
-  borderAsideDash: hex('#53505f'),
-  borderLog: hex('#454c56'),
-  borderFocusBoost: hex('#eef3f8'),
+  borderHeader: hex('#2c3342'),
+  borderWire: hex('#384154'),
+  borderAdvisoryIdle: hex('#3c3650'),
+  borderAsideDash: hex('#332e44'),
+  borderLog: hex('#262c3a'),
+  borderFocusBoost: hex('#f8fafc'),
 
-  orange: hex('#e9a17c'), // Lead · 리드
-  blue: hex('#93b9ef'),   // Workers · 스웜
-  green: hex('#8cd5ae'),  // Decision Gate · 분기
-  purple: hex('#bda6ef'), // Advisor · 자문
-  neon: hex('#e8d97a'),   // Verifier · 교차 검증
+  orange: hex('#f59e0b'), // Lead · 리드 (Amber Signal)
+  blue: hex('#38bdf8'),   // Workers · 스웜 (Cyan-Sky Telemetry)
+  green: hex('#2dd4bf'),  // Decision Gate · 분기 (Emerald-Teal Gate)
+  purple: hex('#c084fc'), // Advisor · 자문 (Electric Violet)
+  neon: hex('#facc15'),   // Verifier · 교차 검증 (Precision Gold)
 
-  trafficRed: hex('#f16e69'),
-  trafficYellow: hex('#edbd54'),
-  trafficGreen: hex('#65c785'),
+  trafficRed: hex('#fb7185'),
+  trafficYellow: hex('#fbbf24'),
+  trafficGreen: hex('#34d399'),
 } as const;
 
 export type AgentColorKey = 'orange' | 'blue' | 'green' | 'purple' | 'neon' | 'muted' | 'fg';

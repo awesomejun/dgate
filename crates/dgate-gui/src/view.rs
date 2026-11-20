@@ -72,35 +72,35 @@ const fn hex_rgba(hex: u32) -> Rgba {
     }
 }
 
-const BG: Rgba = hex_rgba(0x1b2026); // THEME.bg
-const BG_CHROME: Rgba = hex_rgba(0x252a32); // THEME.bgChrome
-const BG_ELEVATED: Rgba = hex_rgba(0x20262e); // THEME.bgElevated
-const BG_GLOW_PURPLE: Rgba = hex_rgba(0x242132); // THEME.bgGlowPurple
-const BG_GLOW_NEON: Rgba = hex_rgba(0x26261e); // THEME.bgGlowNeon
-const BG_GREEN_TRACK: Rgba = hex_rgba(0x2b3d34); // THEME.bgGreenTrack
-const BG_ORANGE_TRACK: Rgba = hex_rgba(0x3c3029); // THEME.bgOrangeTrack
-const BG_BLUE_TRACK: Rgba = hex_rgba(0x293342); // THEME.bgBlueTrack
-const BG_NEON_TRACK: Rgba = hex_rgba(0x3b3928); // THEME.bgNeonTrack
+const BG: Rgba = hex_rgba(0x0e1015); // THEME.bg — Obsidian Signal
+const BG_CHROME: Rgba = hex_rgba(0x14171f); // THEME.bgChrome
+const BG_ELEVATED: Rgba = hex_rgba(0x171b24); // THEME.bgElevated
+const BG_GLOW_PURPLE: Rgba = hex_rgba(0x191626); // THEME.bgGlowPurple
+const BG_GLOW_NEON: Rgba = hex_rgba(0x1b1a14); // THEME.bgGlowNeon
+const BG_GREEN_TRACK: Rgba = hex_rgba(0x152c26); // THEME.bgGreenTrack
+const BG_ORANGE_TRACK: Rgba = hex_rgba(0x2c1e16); // THEME.bgOrangeTrack
+const BG_BLUE_TRACK: Rgba = hex_rgba(0x152534); // THEME.bgBlueTrack
+const BG_NEON_TRACK: Rgba = hex_rgba(0x282414); // THEME.bgNeonTrack
 
-const TEXT: Rgba = hex_rgba(0xd6dce3); // THEME.fg
-const TEXT_SOFT: Rgba = hex_rgba(0xaeb6c2); // THEME.fgSoft
-const MUTED: Rgba = hex_rgba(0x89919b); // THEME.muted
-const DIM: Rgba = hex_rgba(0x69727f); // THEME.dim
+const TEXT: Rgba = hex_rgba(0xedf0f5); // THEME.fg — Titanium White
+const TEXT_SOFT: Rgba = hex_rgba(0xb8c0ce); // THEME.fgSoft
+const MUTED: Rgba = hex_rgba(0x7d8799); // THEME.muted
+const DIM: Rgba = hex_rgba(0x545d6e); // THEME.dim
 
-const BORDER_HEADER: Rgba = hex_rgba(0x4c535c); // THEME.borderHeader
-const BORDER_WIRE: Rgba = hex_rgba(0x505761); // THEME.borderWire
-const BORDER_ADVISORY_IDLE: Rgba = hex_rgba(0x5a5668); // THEME.borderAdvisoryIdle
-const BORDER_LOG: Rgba = hex_rgba(0x454c56); // THEME.borderLog
+const BORDER_HEADER: Rgba = hex_rgba(0x2c3342); // THEME.borderHeader
+const BORDER_WIRE: Rgba = hex_rgba(0x384154); // THEME.borderWire
+const BORDER_ADVISORY_IDLE: Rgba = hex_rgba(0x3c3650); // THEME.borderAdvisoryIdle
+const BORDER_LOG: Rgba = hex_rgba(0x262c3a); // THEME.borderLog
 
-const LEAD_ORANGE: Rgba = hex_rgba(0xe9a17c); // Lead · 리드
-const WORKER_BLUE: Rgba = hex_rgba(0x93b9ef); // Workers · 스웜
-const GATE_GREEN: Rgba = hex_rgba(0x8cd5ae); // Decision Gate · 분기
-const ADVISOR_PURPLE: Rgba = hex_rgba(0xbda6ef); // Advisor · 자문
-const VERIFIER_NEON: Rgba = hex_rgba(0xe8d97a); // Verifier · 교차 검증
-const ROSE_DANGER: Rgba = hex_rgba(0xf16e69); // trafficRed — 강제분기/중단
+const LEAD_ORANGE: Rgba = hex_rgba(0xf59e0b); // Lead · 리드 (Amber Signal)
+const WORKER_BLUE: Rgba = hex_rgba(0x38bdf8); // Workers · 스웜 (Cyan-Sky Telemetry)
+const GATE_GREEN: Rgba = hex_rgba(0x2dd4bf); // Decision Gate · 분기 (Emerald-Teal Gate)
+const ADVISOR_PURPLE: Rgba = hex_rgba(0xc084fc); // Advisor · 자문 (Electric Violet)
+const VERIFIER_NEON: Rgba = hex_rgba(0xfacc15); // Verifier · 교차 검증 (Precision Gold)
+const ROSE_DANGER: Rgba = hex_rgba(0xfb7185); // trafficRed — 강제분기/중단
 
-const ROSE_BG_HOVER: Rgba = hex_rgba(0x3a2230); // 중단 버튼 호버 배경
-const FOCUS_BORDER: Rgba = hex_rgba(0xfbbf24); // Tab 포커스 하이라이트 테두리
+const ROSE_BG_HOVER: Rgba = hex_rgba(0x341926); // 중단 버튼 호버 배경
+const FOCUS_BORDER: Rgba = hex_rgba(0x2dd4bf); // 시그니처 틸-에메랄드 포커스 하이라이트
 const MODAL_BACKDROP: Rgba = Rgba {
     r: 0.0,
     g: 0.0,
@@ -1297,6 +1297,57 @@ impl DashboardView {
         routes.sort_by_key(route_rank);
         for r in &routes {
             panel = panel.child(route_row(r));
+        }
+        // 라우팅 효율 비율 바 — 실측 routes에서 sharp 직행 vs split 격리 비중을 한눈에 표시
+        if !routes.is_empty() {
+            let total_routes = routes.len();
+            let sharp_count = routes
+                .iter()
+                .filter(|r| !r.forced_split && r.decision != DecisionLabel::Split)
+                .count();
+            let split_count = total_routes.saturating_sub(sharp_count);
+            let total_samples: i64 = routes.iter().map(|r| r.samples).sum();
+            let sharp_pct = ((sharp_count as f32 / total_routes as f32) * 100.0).round() as u32;
+            panel = panel.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .pt_1()
+                    .mt_0p5()
+                    .border_t_1()
+                    .border_color(BORDER_LOG)
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(GATE_GREEN)
+                            .child(format!("sharp {}/{} ({}%)", sharp_count, total_routes, sharp_pct)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .h(px(5.))
+                            .rounded_full()
+                            .bg(BG_ORANGE_TRACK)
+                            .overflow_hidden()
+                            .flex()
+                            .flex_row()
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w(relative(sharp_count as f32 / total_routes as f32))
+                                    .bg(GATE_GREEN),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(if split_count > 0 { LEAD_ORANGE } else { MUTED })
+                            .child(format!("split {} · 표본 {}", split_count, total_samples)),
+                    ),
+            );
         }
         panel
     }
