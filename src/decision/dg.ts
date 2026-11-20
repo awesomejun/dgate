@@ -21,6 +21,7 @@
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import {
@@ -814,6 +815,19 @@ const SIGNAL_EXIT_OFFSET: Record<string, number> = {
   SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGABRT: 6, SIGKILL: 9, SIGTERM: 15,
 };
 
+/** `dg wrap` 실시간 출력 꼬리 저장 디렉터리 — TUI/GUI가 백그라운드 워커 출력을 읽는 경로. */
+function wrapLiveLogPath(pid: number): string {
+  const stateHome = process.env['XDG_STATE_HOME']?.trim() || path.join(os.homedir(), '.local', 'state');
+  return path.join(stateHome, 'dgate', 'wrap-logs', `${pid}.log`);
+}
+
+function stripAnsiForLog(s: string): string {
+  return s
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    .replace(/\r/g, '');
+}
+
 /**
  * 단일 자식 실행 + 진행 감시 루프(§2.5): stdout/stderr를 패스스루 캡처하고
  * `hasNewProgress` 게이트의 하트비트(onHeartbeat)와 stall/timeout 워치독을 돌린다.
@@ -846,10 +860,55 @@ function runWrappedChild(opts: {
     let stdoutScanBuf = '';
     let pendingLine = '';
     const tailLines: string[] = [];
+    const liveLogPath = wrapLiveLogPath(process.pid);
+    let liveLogDirty = false;
+    let liveLogDirReady = false;
+    let liveLogTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const flushLiveLog = (): void => {
+      if (settled || !liveLogDirty) return;
+      liveLogDirty = false;
+      try {
+        if (!liveLogDirReady) {
+          fs.mkdirSync(path.dirname(liveLogPath), { recursive: true, mode: 0o700 });
+          liveLogDirReady = true;
+        }
+        const cleaned = tailLines
+          .map((l) => stripAnsiForLog(l).trimEnd())
+          .filter((l) => l.trim().length > 0);
+        fs.writeFileSync(liveLogPath, cleaned.join('\n') + (cleaned.length > 0 ? '\n' : ''), {
+          mode: 0o600,
+        });
+      } catch {
+        /* 라이브 로그 쓰기 실패는 워커 실행에 영향 없음 */
+      }
+    };
+    const scheduleLiveLog = (): void => {
+      liveLogDirty = true;
+      if (liveLogTimer) return;
+      liveLogTimer = setTimeout(() => {
+        liveLogTimer = null;
+        flushLiveLog();
+      }, 250);
+      liveLogTimer.unref();
+    };
+    const cleanupLiveLog = (): void => {
+      if (liveLogTimer) {
+        clearTimeout(liveLogTimer);
+        liveLogTimer = null;
+      }
+      try {
+        fs.unlinkSync(liveLogPath);
+      } catch {
+        /* 이미 삭제되었거나 생성 전 종료 */
+      }
+    };
+    process.once('exit', cleanupLiveLog);
 
     const pushLine = (line: string): void => {
       tailLines.push(redactSecrets(line));
-      if (tailLines.length > 20) tailLines.shift();
+      if (tailLines.length > 30) tailLines.shift();
+      scheduleLiveLog();
     };
     const ingest = (text: string): void => {
       const parts = (pendingLine + text).split('\n');
@@ -901,6 +960,8 @@ function runWrappedChild(opts: {
       settled = true;
       clearInterval(timer);
       if (pendingLine.length > 0) pushLine(pendingLine);
+      process.removeListener('exit', cleanupLiveLog);
+      cleanupLiveLog();
       resolve({
         exitCode: code,
         signal,

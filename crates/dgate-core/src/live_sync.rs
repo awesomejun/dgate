@@ -188,6 +188,8 @@ pub struct LiveWorkerInfo {
     pub subagent_warning: Option<String>,
     /// 리드 세션의 `--conversation` transcript에서 추출한 최근 사용자 입력·리드 응답.
     pub recent_io: Vec<TranscriptIoEntry>,
+    /// 워커의 최근 출력 줄(`dg wrap` 실시간 로그 또는 `hc read` 꼬리, 시크릿 리덕션 완료).
+    pub recent_output: Vec<String>,
 }
 
 /// transcript.jsonl에서 추출한 사용자 입력 / 리드 응답 1건.
@@ -1440,6 +1442,7 @@ pub fn infer_live_worker_slot(
         effort: live_effort,
         subagent_warning: None,
         recent_io: Vec::new(),
+        recent_output: Vec::new(),
     })
 }
 
@@ -1625,9 +1628,91 @@ pub fn find_wrap_processes(rows: &[PsRow]) -> Vec<WrapProc> {
     out
 }
 
+/// `dg wrap` 실시간 출력 로그 디렉터리 (`$XDG_STATE_HOME/dgate/wrap-logs` 또는 `~/.local/state/dgate/wrap-logs`).
+pub fn default_wrap_log_dir() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
+        let trimmed = xdg.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed).join("dgate").join("wrap-logs");
+        }
+    }
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    PathBuf::from(home)
+        .join(".local")
+        .join("state")
+        .join("dgate")
+        .join("wrap-logs")
+}
+
+/// raw 터미널/로그 문자열에서 의미 있는 최근 출력 줄(최대 max_lines)을 추출한다.
+pub fn extract_recent_output_lines(raw: &str, max_lines: usize) -> Vec<String> {
+    let cleaned = strip_ansi(raw).replace('\r', "");
+    let mut out: Vec<String> = Vec::new();
+    for line in cleaned.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("[hc]") {
+            continue;
+        }
+        if trimmed.chars().all(|c| {
+            c.is_whitespace()
+                || "─━═│┃┌┐└┘├┤┬┴┼╭╮╰╯·•⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(c)
+        }) {
+            continue;
+        }
+        let redacted = redact_secrets(trimmed);
+        let clipped: String = redacted.chars().take(140).collect();
+        out.push(clipped);
+    }
+    if out.len() > max_lines {
+        out.split_off(out.len() - max_lines)
+    } else {
+        out
+    }
+}
+
+/// `dg wrap` 백그라운드 워커의 실시간 출력 꼬리 파일을 읽어 최근 줄 목록을 반환한다.
+pub fn read_wrap_output_tail(
+    wrap_pid: u64,
+    dir_override: Option<&Path>,
+    max_lines: usize,
+) -> Vec<String> {
+    let dir = dir_override
+        .map(PathBuf::from)
+        .unwrap_or_else(default_wrap_log_dir);
+    let path = dir.join(format!("{}.log", wrap_pid));
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    extract_recent_output_lines(&raw, max_lines)
+}
+
 /// wrap 프로세스를 상위 hc 세션(parent) 카드 정보로 변환 — slot=coder, 실행 중.
 pub fn wrap_proc_to_worker(p: &WrapProc, parent: &HcTerminalSummary) -> LiveWorkerInfo {
+    wrap_proc_to_worker_with_log_dir(p, parent, None)
+}
+
+/// 테스트·커스텀 경로용 wrap 프로세스 → LiveWorkerInfo 변환.
+pub fn wrap_proc_to_worker_with_log_dir(
+    p: &WrapProc,
+    parent: &HcTerminalSummary,
+    log_dir: Option<&Path>,
+) -> LiveWorkerInfo {
     let short_model = format_role_badge(&p.cli, p.model.as_deref());
+    let recent_output = read_wrap_output_tail(p.wrap_pid, log_dir, 12);
+    let activity = if let Some(last) = recent_output.last() {
+        last.chars().take(96).collect()
+    } else {
+        format!(
+            "dg wrap 실행 중{} (상위 {})",
+            p.route
+                .as_deref()
+                .map(|r| format!(" · {}", r))
+                .unwrap_or_default(),
+            parent.address
+        )
+    };
     LiveWorkerInfo {
         slot: RoleSlot::Coder,
         badge: format!("{} (실행 중)", short_model),
@@ -1640,14 +1725,7 @@ pub fn wrap_proc_to_worker(p: &WrapProc, parent: &HcTerminalSummary) -> LiveWork
             .unwrap_or_else(|| format!("wrap-{}", p.wrap_pid)),
         cwd: parent.cwd.clone(),
         repo_tag: extract_repo_tag(parent.cwd.as_deref()),
-        activity: format!(
-            "dg wrap 실행 중{} (상위 {})",
-            p.route
-                .as_deref()
-                .map(|r| format!(" · {}", r))
-                .unwrap_or_default(),
-            parent.address
-        ),
+        activity,
         status: Some("working".to_string()),
         turn: None,
         cli: p.cli.clone(),
@@ -1655,6 +1733,7 @@ pub fn wrap_proc_to_worker(p: &WrapProc, parent: &HcTerminalSummary) -> LiveWork
         effort: p.effort.clone(),
         subagent_warning: None,
         recent_io: Vec::new(),
+        recent_output,
     }
 }
 
@@ -2160,6 +2239,11 @@ impl LiveSyncSnapshotter {
                                 );
                                 worker.recent_io = io;
                             }
+                        }
+                    }
+                    if worker.slot != RoleSlot::Lead {
+                        if let Some(raw) = raw_screen.as_deref() {
+                            worker.recent_output = extract_recent_output_lines(raw, 12);
                         }
                     }
                     workers.push(worker);
@@ -3122,6 +3206,7 @@ mod tests {
             effort: None,
             subagent_warning: None,
             recent_io: Vec::new(),
+            recent_output: Vec::new(),
         }
     }
 

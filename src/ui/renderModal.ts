@@ -207,8 +207,9 @@ function renderSwarmModal(buf: CellBuffer, rect: Rect, state: AppState): void {
       iw
     );
     if (liveCards) {
-      const maxRows = Math.max(1, rect.y + rect.h - 2 - cy);
-      for (const c of liveCards.slice(0, Math.floor(maxRows / 2))) {
+      const maxEndY = rect.y + rect.h - 2;
+      for (const c of liveCards) {
+        if (cy >= maxEndY) break;
         buf.writeText(ix, cy, `◉ ${truncateWidth(c.name, 34, '…')}`, THEME.fgSoft, THEME.bgModal, false, iw);
         const barW = 14;
         const bx = ix + 36;
@@ -230,8 +231,23 @@ function renderSwarmModal(buf: CellBuffer, rect: Rect, state: AppState): void {
           );
         }
         cy++;
-        if (cy < rect.y + rect.h - 2) {
+        if (cy < maxEndY) {
           buf.writeText(ix + 2, cy++, truncateWidth(c.description, iw - 2, '…'), THEME.muted, THEME.bgModal, false, iw - 2);
+        }
+        if (c.recentOutput && c.recentOutput.length > 0) {
+          const perCardLines = liveCards.length <= 2 ? 6 : 3;
+          for (const line of c.recentOutput.slice(-perCardLines)) {
+            if (cy >= maxEndY) break;
+            buf.writeText(
+              ix + 3,
+              cy++,
+              `│ ${truncateWidth(line, iw - 5, '…')}`,
+              THEME.fgSoft,
+              THEME.bgModal,
+              false,
+              iw - 3
+            );
+          }
         }
       }
     } else {

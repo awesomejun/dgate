@@ -22,6 +22,7 @@
  */
 import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { redactSecrets } from '../decision/redact.ts';
@@ -102,6 +103,8 @@ export interface LiveWorkerInfo {
   subagentWarning?: string | null;
   /** 리드 세션의 `--conversation` transcript에서 추출한 최근 사용자 입력·리드 응답. */
   recentIo?: TranscriptIoEntry[];
+  /** 워커의 최근 출력 줄(`dg wrap` 실시간 로그 또는 `hc read` 꼬리, 시크릿 리덕션 완료). */
+  recentOutput?: string[];
 }
 
 /** transcript.jsonl에서 추출한 사용자 입력 / 리드 응답 1건. */
@@ -1073,9 +1076,49 @@ export function findWrapProcesses(rows: readonly PsRow[]): WrapProc[] {
   return out;
 }
 
+/** `dg wrap` 실시간 출력 로그 디렉터리 (`$XDG_STATE_HOME/dgate/wrap-logs` 또는 `~/.local/state/dgate/wrap-logs`). */
+export function defaultWrapLogDir(): string {
+  const stateHome = process.env['XDG_STATE_HOME']?.trim() || path.join(os.homedir(), '.local', 'state');
+  return path.join(stateHome, 'dgate', 'wrap-logs');
+}
+
+/** raw 터미널/로그 문자열에서 의미 있는 최근 출력 줄(최대 maxLines)을 추출한다. */
+export function extractRecentOutputLines(raw: string | undefined, maxLines = 12): string[] {
+  if (!raw) return [];
+  const cleaned = stripAnsi(raw).replace(/\r/g, '');
+  const out: string[] = [];
+  for (const line of cleaned.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith('[hc]')) continue;
+    if (/^[\s─━═│┃┌┐└┘├┤┬┴┼╭╮╰╯·•⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]+$/.test(trimmed)) continue;
+    out.push(redactSecrets(trimmed).slice(0, 140));
+  }
+  return out.length > maxLines ? out.slice(out.length - maxLines) : out;
+}
+
+/** `dg wrap` 백그라운드 워커의 실시간 출력 꼬리 파일을 읽어 최근 줄 목록을 반환한다. */
+export function readWrapOutputTail(wrapPid: number, logDir = defaultWrapLogDir(), maxLines = 12): string[] {
+  try {
+    const p = path.join(logDir, `${wrapPid}.log`);
+    const st = fs.statSync(p);
+    if (!st.isFile() || st.size === 0) return [];
+    const buf = fs.readFileSync(p, 'utf8');
+    return extractRecentOutputLines(buf, maxLines);
+  } catch {
+    return [];
+  }
+}
+
 /** wrap 프로세스를 상위 hc 세션(parent) 카드 정보로 변환 — slot=coder, 실행 중. */
-export function wrapProcToWorker(p: WrapProc, parent: HcTerminalSummary): LiveWorkerInfo {
+export function wrapProcToWorker(
+  p: WrapProc,
+  parent: HcTerminalSummary,
+  logDir = defaultWrapLogDir()
+): LiveWorkerInfo {
   const shortModel = formatRoleBadge(p.model ? { cli: p.cli, model: p.model } : { cli: p.cli });
+  const recentOutput = readWrapOutputTail(p.wrapPid, logDir, 12);
+  const latestLine = recentOutput.length > 0 ? recentOutput[recentOutput.length - 1]! : null;
   return {
     slot: 'coder',
     badge: `${shortModel} (실행 중)`,
@@ -1085,12 +1128,15 @@ export function wrapProcToWorker(p: WrapProc, parent: HcTerminalSummary): LiveWo
     name: p.project ?? `wrap-${p.wrapPid}`,
     cwd: parent.cwd ?? null,
     repoTag: extractRepoTag(parent.cwd),
-    activity: `dg wrap 실행 중${p.route ? ` · ${p.route}` : ''} (상위 ${parent.address})`,
+    activity: latestLine
+      ? latestLine.slice(0, 96)
+      : `dg wrap 실행 중${p.route ? ` · ${p.route}` : ''} (상위 ${parent.address})`,
     status: 'working',
     cli: p.cli,
     model: p.model,
     effort: p.effort,
     telemetryLine: formatLiveTelemetry(p.cli, p.model, p.effort),
+    recentOutput,
   };
 }
 
@@ -1523,7 +1569,12 @@ export function createLiveRosterSyncer(opts: LiveRosterSyncerOptions): LiveRoste
               }
             }
           }
-          if (worker) workers.push(worker);
+          if (worker) {
+            if (rawScreen && worker.slot !== 'lead') {
+              worker.recentOutput = extractRecentOutputLines(rawScreen, 12);
+            }
+            workers.push(worker);
+          }
         }
 
         // 3.5) `dg wrap`으로 에이전트가 백그라운드로 띄운 워커 — hc 터미널이 아니라 ps 프로세스
@@ -1532,6 +1583,17 @@ export function createLiveRosterSyncer(opts: LiveRosterSyncerOptions): LiveRoste
           const runPsThisTick = psTickCounter % 2 === 0;
           psTickCounter += 1;
           if (!runPsThisTick) {
+            // ps를 건너뛰는 홀수 틱에도 로컬 wrap-logs 파일 꼬리는 가볍게 최신화한다.
+            for (const w of lastWrapWorkers) {
+              const m = /^pid:(\d+)$/.exec(w.address);
+              if (m) {
+                const tail = readWrapOutputTail(Number(m[1]), defaultWrapLogDir(), 12);
+                if (tail.length > 0) {
+                  w.recentOutput = tail;
+                  w.activity = tail[tail.length - 1]!.slice(0, 96);
+                }
+              }
+            }
             workers.push(...lastWrapWorkers);
           } else {
             try {

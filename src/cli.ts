@@ -1132,6 +1132,7 @@ function main(): void {
         elapsedSec: frozenElapsedSec ?? liveElapsed,
         turn: w.turn,
         address: w.address,
+        recentOutput: w.recentOutput,
       };
     });
     state.swarmActive = subWorkers.filter(isActivelyRunningWorker).length;

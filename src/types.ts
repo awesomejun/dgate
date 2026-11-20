@@ -64,6 +64,8 @@ export interface SwarmCard {
   turn?: number;
   /** 라이브 워커 hc 터미널 주소 — 경과 추적·디버그 식별용(선택). */
   address?: string;
+  /** 워커의 최근 출력 줄(`dg wrap` 실시간 로그 또는 `hc read` 꼬리, 시크릿 리덕션 완료). */
+  recentOutput?: string[];
 }
 
 export interface SwarmWorker {

@@ -2017,6 +2017,35 @@ impl DashboardView {
                                 .child(warn.to_string()),
                         );
                     }
+                    if !w.recent_output.is_empty() {
+                        let mut out_box = div()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .mt_1()
+                            .p_2()
+                            .rounded_sm()
+                            .bg(BG_ELEVATED)
+                            .border_1()
+                            .border_color(BORDER_LOG)
+                            .child(
+                                div()
+                                    .text_size(px(9.))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(MUTED)
+                                    .child("최근 출력"),
+                            );
+                        let start = w.recent_output.len().saturating_sub(10);
+                        for line in &w.recent_output[start..] {
+                            out_box = out_box.child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(TEXT_SOFT)
+                                    .child(redact_secrets(line)),
+                            );
+                        }
+                        row = row.child(out_box);
+                    }
                     box_ = box_.child(row);
                 }
             }

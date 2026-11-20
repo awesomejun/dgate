@@ -1646,6 +1646,7 @@ fn demo_worker(slot: RoleSlot, name: &str, activity: &str, short_model: &str) ->
         effort: None,
         subagent_warning: None,
         recent_io: Vec::new(),
+        recent_output: Vec::new(),
     }
 }
 
@@ -2077,6 +2078,7 @@ mod tests {
             effort: None,
             subagent_warning: None,
             recent_io: Vec::new(),
+            recent_output: Vec::new(),
         }
     }
 
