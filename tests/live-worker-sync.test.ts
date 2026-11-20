@@ -1222,10 +1222,13 @@ test('18. isActiveTopLevelSession / isObservableTerminal — 최상위 working A
   // 기존 워커 판정 불변 — 관측 확장이 isWorkerTerminal을 바꾸지 않는다
   assert.equal(isObservableTerminal({ address: 'a', agent: 'pi', name: 'w-x', state: 'live' }), true);
 
-  // status 엄격 — idle/done/undefined 불가
-  for (const status of ['idle', 'done', undefined]) {
-    assert.equal(isActiveTopLevelSession({ address: 't', agent: 'antigravity', name: 's', state: 'live', status }), false);
-    assert.equal(isActiveTopLevelSession({ address: 't', agent: 'pi', name: 's', state: 'live', status }), false);
+  // status — working/idle/done 모두 관측(리드 배지 유지), 비어 있으면 불가
+  for (const status of ['working', 'idle', 'done']) {
+    assert.equal(isActiveTopLevelSession({ address: 't', agent: 'antigravity', name: 's', state: 'live', status }), true, status);
+    assert.equal(isActiveTopLevelSession({ address: 't', agent: 'pi', name: 's', state: 'live', status }), true, status);
+  }
+  for (const status of [undefined, '', 'paused']) {
+    assert.equal(isActiveTopLevelSession({ address: 't', agent: 'antigravity', name: 's', state: 'live', status }), false, String(status));
   }
   // state 불일치 · parent 존재
   assert.equal(isActiveTopLevelSession({ address: 't', agent: 'pi', name: 's', state: 'done', status: 'working' }), false);
@@ -1261,7 +1264,7 @@ test('18.5 최상위 세션 Lead 정규화 — 이름·shortModel 폴백', () =>
   assert.equal(w2.shortModel, 'pi');
 });
 
-test('18.9 syncer — 최상위 working antigravity/pi만 Lead로 관측, idle·셸·모니터·GUI 제외', async () => {
+test('18.9 syncer — 최상위 working/idle/done AI 세션 Lead 관측·배지 안정, 무상태·셸·모니터·GUI 제외', async () => {
   const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'lws-toplevel-')));
   const env = isolateRosterEnv(tmp);
   const rosterPath = path.join(tmp, 'roster.json');
@@ -1270,19 +1273,21 @@ test('18.9 syncer — 최상위 working antigravity/pi만 Lead로 관측, idle·
   const repoDir = path.join(tmp, 'my-repo');
   fs.mkdirSync(repoDir, { recursive: true });
 
-  const ls = JSON.stringify({
-    terminals: [
-      { address: 't155', agent: 'antigravity', name: 'paperwork-operations', state: 'live', status: 'working', cwd: repoDir },
-      { address: 't156', agent: 'pi', name: 'kakao-manual-bot', state: 'live', status: 'working', cwd: repoDir },
-      { address: 't157', agent: 'antigravity', name: 'idle-session', state: 'live', status: 'idle', cwd: repoDir },
-      { address: 't158', agent: 'antigravity', name: 'done-session', state: 'live', status: 'done', cwd: repoDir },
-      { address: 't159', agent: 'antigravity', name: 'no-status-session', state: 'live', cwd: repoDir },
-      { address: 't160', agent: 'zsh', name: 'shell', state: 'live', status: 'working', cwd: repoDir },
-      { address: 't161', agent: 'python3', name: 'py', state: 'live', status: 'working', cwd: repoDir },
-      { address: 't162', agent: 'node', name: 'dg-monitor', state: 'live', status: 'working', cwd: repoDir },
-      { address: 't163', agent: 'node', name: 'dgate-gui-main', state: 'live', status: 'working', cwd: repoDir },
-    ],
-  });
+  const makeLs = (t155Status: string) =>
+    JSON.stringify({
+      terminals: [
+        { address: 't155', agent: 'antigravity', name: 'paperwork-operations', state: 'live', status: t155Status, cwd: repoDir },
+        { address: 't156', agent: 'pi', name: 'kakao-manual-bot', state: 'live', status: 'working', cwd: repoDir },
+        { address: 't157', agent: 'antigravity', name: 'idle-session', state: 'live', status: 'idle', cwd: repoDir },
+        { address: 't158', agent: 'antigravity', name: 'done-session', state: 'live', status: 'done', cwd: repoDir },
+        { address: 't159', agent: 'antigravity', name: 'no-status-session', state: 'live', cwd: repoDir },
+        { address: 't160', agent: 'zsh', name: 'shell', state: 'live', status: 'working', cwd: repoDir },
+        { address: 't161', agent: 'python3', name: 'py', state: 'live', status: 'working', cwd: repoDir },
+        { address: 't162', agent: 'node', name: 'dg-monitor', state: 'live', status: 'working', cwd: repoDir },
+        { address: 't163', agent: 'node', name: 'dgate-gui-main', state: 'live', status: 'working', cwd: repoDir },
+      ],
+    });
+  let ls = makeLs('working');
   const updates: MergedLiveRoster[] = [];
   const syncer = createLiveRosterSyncer({
     repoDir: tmp,
@@ -1301,7 +1306,7 @@ test('18.9 syncer — 최상위 working antigravity/pi만 Lead로 관측, idle·
   try {
     await waitFor(() => updates.length > 0);
     const m = updates.at(-1)!;
-    assert.equal(m.workers.length, 2, 'working 최상위 antigravity+pi만 관측');
+    assert.equal(m.workers.length, 4, 'working·idle·done 최상위 AI 세션 관측');
     const byAddr = new Map(m.workers.map((w) => [w.address, w]));
     const ant = byAddr.get('t155')!;
     assert.equal(ant.slot, 'lead');
@@ -1311,9 +1316,27 @@ test('18.9 syncer — 최상위 working antigravity/pi만 Lead로 관측, idle·
     assert.equal(pi.slot, 'lead');
     assert.equal(pi.name, 'kakao-manual-bot');
     assert.equal(pi.shortModel, 'pi');
-    for (const addr of ['t157', 't158', 't159', 't160', 't161', 't162', 't163']) {
+    // idle·done 최상위 AI 세션도 slot=lead로 관측(세션이 살아 있는 동안 배지 유지)
+    for (const addr of ['t157', 't158']) {
+      const w = byAddr.get(addr)!;
+      assert.equal(w.slot, 'lead', `${addr} slot=lead`);
+    }
+    for (const addr of ['t159', 't160', 't161', 't162', 't163']) {
       assert.equal(byAddr.has(addr), false, `${addr} 미관측`);
     }
+    // 라이브 Lead 배지 안정 — working → idle 전환에도 roster.json(pi:glm-5.3)으로 깜빡이지 않는다
+    assert.equal(m.labels.lead, 'antigravity');
+    assert.ok(m.leadModelFlag.includes('antigravity'), `leadModelFlag=${m.leadModelFlag}`);
+    ls = makeLs('idle');
+    await waitFor(() => updates.length > 1 && updates.at(-1)!.workers.some((w) => w.address === 't155' && w.status === 'idle'));
+    const m2 = updates.at(-1)!;
+    assert.equal(m2.labels.lead, 'antigravity', 'idle 전환 후에도 Lead 라벨 유지');
+    assert.ok(m2.leadModelFlag.includes('antigravity'), `idle leadModelFlag=${m2.leadModelFlag}`);
+    // 라이브 Lead 세션이 0개가 되면 roster.json 대기 배지로 원복
+    ls = JSON.stringify({ terminals: [] });
+    await waitFor(() => updates.length > 2 && updates.at(-1)!.workers.length === 0);
+    const m3 = updates.at(-1)!;
+    assert.notEqual(m3.labels.lead, 'antigravity', '리드 소멸 시 roster.json 원복');
   } finally {
     syncer.stop();
     env.restore();

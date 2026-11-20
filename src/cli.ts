@@ -623,11 +623,18 @@ export function createLiveRoleTrail(): LiveRolePanelTrail {
   return { phaseSet: false, neonSet: false, advisorSet: false };
 }
 
+/** 세션이 "지금 실제로 돌고 있는" 상태인지 — done·idle은 살아 있어도 실행 아님(침착 대기). */
+export function isActivelyRunningWorker(w: LiveWorkerInfo): boolean {
+  return w.status !== 'done' && w.status !== 'idle';
+}
+
 /**
  * Live 로스터 동기화 시 `merged.workers` 슬롯을 Lead/Verifier/Advisor 역할 패널에 반영한다.
  * - verifier 실행 → neonState='run'(부재 진행률 0 — 렌더에서 활성 바) + 1줄 활동 라벨
  * - advisor 실행 → advisorState='자문 중' + activeTrigger=0 (Advisor→Lead 와이어 펄스)
  * - lead 실행 → phase='작업 중', 그 외 워커 실행 → phase='워커 실행 중'(Lead 패널·와이어 펄스)
+ * - idle/done 리드는 살아 있는 동안 제목(Lead 배지)은 유지되지만 패널 위상은 침착한
+ *   '대기 중'로 둔다 — 거짓 스피너가 돌지 않게 실행 판정은 done·idle 모두 제외한다.
  * - 전부 종료 → 이 함수가 설정한 값만 '대기 중'/'idle'로 복귀(침착 대기 불변식 유지).
  * 트랜스크립트 매퍼가 쓰는 state.cards 3슬롯은 건드리지 않는다.
  */
@@ -636,7 +643,7 @@ export function applyLiveRolePanels(
   merged: MergedLiveRoster,
   trail: LiveRolePanelTrail
 ): void {
-  const active = merged.workers.filter((w) => w.status !== 'done');
+  const active = merged.workers.filter(isActivelyRunningWorker);
 
   // Verifier → 교차 검증(neon) 패널
   const verifier = active.find((w) => w.slot === 'verifier');
@@ -750,7 +757,7 @@ export function resolveTuiScope(
   };
 }
 
-/** 활성(`done` 아닌) hc 워커에서 GPUI `lead_display_count` 계약대로 역할별 카운트를 계산한다. */
+/** 활성(실행 중 — done·idle 제외) hc 워커에서 GPUI `lead_display_count` 계약대로 역할별 카운트를 계산한다. */
 export function computeLiveSessionCounts(
   workers: readonly LiveWorkerInfo[]
 ): { lead: number; workers: number; verifiers: number; advisors: number } {
@@ -759,7 +766,7 @@ export function computeLiveSessionCounts(
   let verifiers = 0;
   let advisors = 0;
   for (const w of workers) {
-    if (w.status === 'done') continue;
+    if (!isActivelyRunningWorker(w)) continue;
     if (w.slot === 'lead') explicitLeads += 1;
     else if (w.slot === 'verifier') verifiers += 1;
     else if (w.slot === 'advisor') advisors += 1;
@@ -1080,15 +1087,15 @@ function main(): void {
       return {
         name: scoped ? `${w.name} · ${w.shortModel}` : `[${w.repoTag}] ${w.name} · ${w.shortModel}`,
         model: w.shortModel,
-        progress: done ? 100 : 0,
+        progress: w.status === 'done' ? 100 : 0,
         description: w.activity,
-        status: done ? ('done' as const) : ('running' as const),
+        status: w.status === 'done' ? ('done' as const) : isActivelyRunningWorker(w) ? ('running' as const) : ('idle' as const),
         elapsedSec: frozenElapsedSec ?? liveElapsed,
         turn: w.turn,
         address: w.address,
       };
     });
-    state.swarmActive = subWorkers.filter((w) => w.status !== 'done').length;
+    state.swarmActive = subWorkers.filter(isActivelyRunningWorker).length;
     liveElapsedBasis.length = state.liveWorkers.length;
     subWorkers.forEach((w, i) => {
       liveElapsedBasis[i] = elapsedByAddr.get(w.address) ?? null;
@@ -1107,7 +1114,7 @@ function main(): void {
           role: MATRIX_ROLE_BY_SLOT[w.slot],
           target: scoped ? w.name : `[${w.repoTag}] ${w.name}`,
           progress: w.status === 'done' ? 100 : 0,
-          status: w.status === 'done' ? 'done' : 'running',
+          status: w.status === 'done' ? 'done' : isActivelyRunningWorker(w) ? 'running' : 'idle',
         };
       } else if (cur.status !== 'idle') {
         state.workers[i] = { ...cur, progress: 0, status: 'idle' };

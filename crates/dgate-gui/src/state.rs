@@ -520,17 +520,21 @@ pub fn visible_worker_columns(worker_count: usize) -> usize {
     }
 }
 
-/// 지금 실제로 활동 중인가 — DEMO 모드이거나 done 아닌 live 워커가 하나라도
-/// 있을 때만 true. 라이브 & 실행 0(빈 로스터·전부 완료)은 반드시 false여서
-/// GUI 연속 모션(anim_secs 갱신·cx.notify)이 완전히 멈추는 침착 유휴를
-/// 보장한다. 역할 카드(Lead/Verifier/Advisor)의 running은 어차피 live 워커
-/// 존재에서 유도되므로 워커 상태 기준 이 판정 하나로 충분하다.
+/// 세션의 실제 실행 여부 — status가 'done'·'idle'이면 침착 대기로 간주해
+/// 실행 중이 아니다(그 외 None·'working' 등은 실행 중). 모션·카운터·카드
+/// 표기의 공통 기준으로, idle 리드가 '에이전트명 (대기 중)'으로 보이는
+/// 동시 60fps 모션은 완전히 멈춘다.
+pub fn worker_actively_running(w: &LiveWorkerInfo) -> bool {
+    !matches!(w.status.as_deref(), Some("done") | Some("idle"))
+}
+
+/// 지금 실제로 활동 중인가 — DEMO 모드이거나 실행 중(idle/done 아님) 워커가
+/// 하나라도 있을 때만 true. 라이브 & 실행 0(빈 로스터·전부 완료·유휴)은
+/// 반드시 false여서 GUI 연속 모션(anim_secs 갱신·cx.notify)이 완전히 멈추는
+/// 침착 유휴를 보장한다. 역할 카드(Lead/Verifier/Advisor)의 running도 같은
+/// 기준(worker_actively_running)에서 유도된다.
 pub fn has_active_work(snap: &DashboardSnapshot, demo_mode: bool) -> bool {
-    demo_mode
-        || snap
-            .workers
-            .iter()
-            .any(|w| w.status.as_deref() != Some("done"))
+    demo_mode || snap.workers.iter().any(worker_actively_running)
 }
 
 /// 초 단위 경과 → "MM:SS" 0채움(3600초 이상은 "HH:MM:SS") — 워커 경과 타이머 표기.
@@ -603,8 +607,8 @@ pub fn partition_sessions_by_role(workers: &[LiveWorkerInfo]) -> RolePartitions 
 }
 
 /// 헤더 LEAD [n] 카운터 표시값 — Lead 카드 상태 표기와 항상 일치시키는 판정.
-/// - lead 슬롯 실행(done 아님) 세션이 있으면 그 수(명시적 Lead 워커 — 동일 레포
-///   여러 lead도 주소별로 전부 센다).
+/// - lead 슬롯 실행(idle/done 아님) 세션이 있으면 그 수(명시적 Lead 워커 —
+///   동일 레포 여러 lead도 주소별로 전부 센다).
 /// - 없지만 하위 워커(sub_workers)가 실행 중이면 1 — Lead가 부모 오케스트레이터로서
 ///   '워커 조율 중' 상태이므로 카운터도 능동 1로 맞춘다.
 /// - 실행 세션이 전혀 없으면 0 — Lead 카드 '대기 중'과 동일.
@@ -613,14 +617,14 @@ pub fn lead_display_count(snap: &DashboardSnapshot) -> usize {
     let explicit = parts
         .leads
         .iter()
-        .filter(|w| w.status.as_deref() != Some("done"))
+        .filter(|w| worker_actively_running(w))
         .count();
     if explicit > 0 {
         explicit
     } else if parts
         .sub_workers
         .iter()
-        .any(|w| w.status.as_deref() != Some("done"))
+        .any(|w| worker_actively_running(w))
     {
         1
     } else {
@@ -2101,6 +2105,10 @@ mod tests {
         snap.workers[0].status = Some("done".to_string());
         assert!(!has_active_work(&snap, false));
 
+        // idle 리드(t165 시나리오) — 관측은 유지되되 모션은 멈춘 침착 대기
+        snap.workers[0].status = Some("idle".to_string());
+        assert!(!has_active_work(&snap, false));
+
         // status 미상(None) 세션은 실행 중으로 본다(카드 '실행 중' 표기와 동일 기준)
         snap.workers[0].status = None;
         assert!(has_active_work(&snap, false));
@@ -2726,6 +2734,12 @@ mod tests {
         assert_eq!(lead_display_count(&snap), 2);
         // done lead 세션은 세지 않는다
         snap.workers[3].status = Some("done".to_string());
+        assert_eq!(lead_display_count(&snap), 1);
+        // idle lead 세션도 실행으로 세지 않는다 — '에이전트명 (대기 중)' 카운터 0
+        snap.workers[2].status = Some("idle".to_string());
+        assert_eq!(lead_display_count(&snap), 0);
+        // idle→working 복귀하면 다시 센다
+        snap.workers[2].status = Some("working".to_string());
         assert_eq!(lead_display_count(&snap), 1);
     }
 

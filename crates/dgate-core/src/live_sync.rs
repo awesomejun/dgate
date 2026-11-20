@@ -276,14 +276,18 @@ pub fn is_observable_terminal(t: &HcTerminalSummary) -> bool {
 }
 
 /// 최상위(parent 없음) 활성 AI 에이전트 세션 판정 — 리드 관측 확장:
-/// ① `state === 'live'` ② `status === 'working'` (엄격 — idle/done/None 불가)
+/// ① `state === 'live'` ② `status ∈ {working, idle, done}` (None 불가 — 종료·불명 제외)
 /// ③ parent 부재·빈 값 ④ 모니터·GUI(dg-monitor*/mon-*/dgate-gui*) 제외
 /// ⑤ agent(소문자)가 AI 코딩 에이전트 7종 안팎.
+/// idle/done도 관측해 'antigravity (대기 중)'처럼 리드 자리가 사라지지 않게 한다.
 pub fn is_active_top_level_session(t: &HcTerminalSummary) -> bool {
     if t.state.as_deref() != Some("live") {
         return false;
     }
-    if t.status.as_deref() != Some("working") {
+    if !matches!(
+        t.status.as_deref(),
+        Some("working") | Some("idle") | Some("done")
+    ) {
         return false;
     }
     if t.parent
@@ -1368,7 +1372,7 @@ mod tests {
 
     #[test]
     fn top_level_active_sessions_are_observable_as_lead() {
-        // 긍정 — 최상위 working AI 에이전트는 관측된다(워커 규약 밖 포함)
+        // 긍정 — 최상위 working/idle/done AI 에이전트는 관측된다(워커 규약 밖 포함)
         for agent in [
             "antigravity",
             "pi",
@@ -1378,9 +1382,15 @@ mod tests {
             "gemini",
             "agy",
         ] {
-            let t = top_summary(&format!("paperwork-{}", agent), agent, Some("working"));
-            assert!(is_active_top_level_session(&t), "{}", agent);
-            assert!(is_observable_terminal(&t), "{}", agent);
+            for status in [Some("working"), Some("idle"), Some("done")] {
+                let t = top_summary(
+                    &format!("paperwork-{}", agent),
+                    agent,
+                    status,
+                );
+                assert!(is_active_top_level_session(&t), "{}", agent);
+                assert!(is_observable_terminal(&t), "{}", agent);
+            }
         }
         // kakao-manual-bot pi 예시 — 워커가 아니여도 관측된다
         let pi = top_summary("kakao-manual-bot", "pi", Some("working"));
@@ -1393,17 +1403,13 @@ mod tests {
 
     #[test]
     fn top_level_session_strict_exclusions() {
-        // status 엄격 — idle/done/None 불가
-        for status in [Some("idle"), Some("done"), None] {
-            assert!(!is_active_top_level_session(&top_summary(
-                "s",
-                "antigravity",
-                status
-            )));
-            assert!(!is_active_top_level_session(&top_summary(
-                "s", "pi", status
-            )));
-        }
+        // status 엄격 — None 불가(idle/done은 관측 허용)
+        assert!(!is_active_top_level_session(&top_summary(
+            "s",
+            "antigravity",
+            None
+        )));
+        assert!(!is_active_top_level_session(&top_summary("s", "pi", None)));
         // state 불일치
         let mut dead = top_summary("s", "pi", Some("working"));
         dead.state = Some("done".into());
@@ -2141,7 +2147,8 @@ mod tests {
         let tmp = temp_dir("live-toplevel");
         std::fs::create_dir_all(&tmp).unwrap();
         isolate_env(&tmp);
-        // 워커 규약 밖 최상위 working antigravity — Lead 카드로 관측된다
+        // 워커 규약 밖 최상위 AI 세션 — working·idle 모두 Lead 카드로 관측된다
+        // (idle 리드가 사라지지 않고 'antigravity (대기 중)'로 유지되는 근거)
         let ls = serde_json::json!({
             "terminals": [
                 {"address": "t155", "agent": "antigravity", "name": "paperwork-operations",
@@ -2160,11 +2167,17 @@ mod tests {
         let mock = Arc::new(MockHc::new(vec![ls], details, HashMap::new()));
         let mut snap = snapshot_with_mock(mock, &tmp);
         let merged = snap.tick_now();
-        assert_eq!(merged.active_worker_count, 1);
+        // working(t155) + idle(t156) 최상위 AI 세션 2개 관측, zsh(t157)는 제외
+        assert_eq!(merged.active_worker_count, 2);
         let w = &merged.workers[0];
         assert_eq!(w.slot, RoleSlot::Lead);
         assert_eq!(w.name, "paperwork-operations");
         assert_eq!(w.short_model, "antigravity");
+        let w2 = &merged.workers[1];
+        assert_eq!(w2.slot, RoleSlot::Lead);
+        assert_eq!(w2.name, "idle-session");
+        assert_eq!(w2.short_model, "antigravity");
+        assert!(merged.workers.iter().all(|w| w.name != "shell"));
     }
 
     #[test]

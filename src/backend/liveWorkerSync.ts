@@ -153,13 +153,17 @@ function isMonitorOrGuiName(name: string): boolean {
 
 /**
  * 최상위(parent 없음) 활성 AI 에이전트 세션 판정 — 리드 관측 확장:
- * ① `state === 'live'` ② `status === 'working'` (엄격 — idle/done/undefined 불가)
- * ③ parent 부재·빈 값 ④ 모니터·GUI(dg-monitor-, mon-, dgate-gui- 접두) 제외
+ * ① `state === 'live'` ② `status`가 'working'·'idle'·'done' 중 하나(비어 있으면 불가 —
+ *    idle/done 리드도 세션이 살아 있는 동안에는 Lead 배지를 유지해 사용자 턴 사이에
+ *    roster.json 대기 배지로 깜빡이지 않게 한다) ③ parent 부재·빈 값
+ * ④ 모니터·GUI(dg-monitor-, mon-, dgate-gui- 접두) 제외
  * ⑤ agent(소문자)가 AI 코딩 에이전트 7종 안팎.
  */
+const TOP_LEVEL_ACTIVE_STATUSES = new Set(['working', 'idle', 'done']);
+
 export function isActiveTopLevelSession(t: HcTerminalSummary): boolean {
   if (!t || t.state !== 'live') return false;
-  if (t.status !== 'working') return false;
+  if (!t.status || !TOP_LEVEL_ACTIVE_STATUSES.has(t.status)) return false;
   if (t.parent && t.parent.trim().length > 0) return false;
   if (isMonitorOrGuiName(t.name ?? '')) return false;
   const agent = (t.agent ?? '').toLowerCase();
@@ -510,8 +514,10 @@ export function mergeLiveRosterLabels(
     }
   }
 
-  // 라이브 리드 세션이 있으면 제목(labels.lead)도 그 세션 기준으로 맞춘다 —
-  // 제목만 roster.json 배지를 남기면 하단 modelFlag와 출처가 어긋난다.
+  // 라이브 리드 세션이 하나라도 있으면(working·idle·done 무관) 제목·modelFlag를 그 세션
+  // 기준으로 유지한다 — 리드가 idle/done으로 쉬는 동안 roster.json 배지로 되돌아갔다가
+  // 다시 덮어쓰면 사용자 턴 사이에 Lead 표기가 깜빡인다. roster.json 원복은 라이브 리드
+  // 세션이 0개가 된 순간(목록에서 사라짐)에만 일어난다.
   // watchedLead 우선이므로 이 덮어쓰기는 관측 중 세션 배지를 침범하지 않는다.
   if (leadWorker) labels.lead = leadWorker.shortModel;
 

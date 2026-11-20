@@ -163,7 +163,7 @@ impl DashboardView {
                                 view.controller.apply_snapshot(snap);
                             }
                         }
-                        // 활동 게이트 — DEMO 또는 실행 중(done 아님) 워커가 있을 때만
+                        // 활동 게이트 — DEMO 또는 실행 중(idle/done 아님) 워커가 있을 때만
                         // 연속 모션으로 다시 그린다. 원 스냅숏에 활동이 없으면
                         // filtered() 복제 비용도 들이지 않는다(완전 유휴 크론 0).
                         let demo = view.controller.demo_mode;
@@ -2036,12 +2036,13 @@ fn role_session_row(
     row
 }
 
-/// 워커 실행 여부 — status가 'done'이 아니면 실행 중(카드 표기·모션 공통 기준).
+/// 워커 실행 여부 — status가 'done'·'idle'이면 침착 대기(카드 표기·모션 공통 기준).
+/// 판단 본체는 state::worker_actively_running과 동일 기준을 유지한다.
 fn worker_running(w: &LiveWorkerInfo) -> bool {
-    w.status.as_deref() != Some("done")
+    !matches!(w.status.as_deref(), Some("done") | Some("idle"))
 }
 
-/// Lead 실행 여부 — lead 슬롯에 실행 중(done 아님) 세션 존재 (DEMO 스냅숏은 항상 true).
+/// Lead 실행 여부 — lead 슬롯에 실행 중(idle/done 아님) 세션 존재 (DEMO 스냅숏은 항상 true).
 fn lead_active(snap: &DashboardSnapshot) -> bool {
     snap.workers
         .iter()
