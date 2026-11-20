@@ -9,7 +9,7 @@ import {
   formatTokensCount,
 } from '../state/store.ts';
 import { resolveDbPath, resolveProjectIdentity } from '../decision/db.ts';
-import { classifyTool } from '../decision/engine.ts';
+import { classifyTool, priorP0 } from '../decision/engine.ts';
 import { hasHookCoverageById, recordToolOutcomeSafe } from '../decision/telemetry.ts';
 import {
   commandLineOfArgs,
@@ -20,6 +20,45 @@ import {
 } from './agyStreamMapper.ts';
 import { redactSecrets } from '../decision/redact.ts';
 import type { AppState } from '../types.ts';
+
+/**
+ * 초기 재생(리플레이) 시 읽는 최대 꼬리 바이트 — 첫 TUI 프레임 전 전체 파일 동기
+ * 읽기로 인한 10초+ 시작 멈춤 방지. 이보다 큰 파일은 마지막 256 KiB만 복원한다.
+ */
+const INITIAL_TAIL_BYTES = 256 * 1024;
+
+/**
+ * 대량 재생(초기 리플레이·tail 청크) 중 라인별 SSOT 동기화(SQLite open·git
+ * rev-parse 포함)를 억제하는 내부 플래그 — 청크 단위로 1회만 flush한다.
+ */
+let suppressRouteSync = false;
+
+/**
+ * 초기 대량 리플레이 중임을 나타내는 내부 플래그 — 이 구간에서는 도구별
+ * SSOT 실측 판정(호출당 SQLite open·git rev-parse)을 사전확률 폴백으로
+ * 대체해 첫 프레임 전 지연을 상한으로 묶는다.
+ */
+let bulkReplay = false;
+
+/**
+ * cwd별 프로젝트 identity 캐시 — 리플레이 중 배치 flush마다 git rev-parse가
+ * 반복 실행되는 것을 막는다(같은 cwd의 identity는 세션 내에서 불변).
+ */
+const projectIdentityCache = new Map<string, { projectId: string; projectLabel: string }>();
+
+function resolveProjectIdentityCached(cwd: string): { projectId: string; projectLabel: string } {
+  let identity = projectIdentityCache.get(cwd);
+  if (!identity) {
+    identity = resolveProjectIdentity(cwd);
+    projectIdentityCache.set(cwd, identity);
+  }
+  return identity;
+}
+
+function syncRoutesGuarded(state: AppState): void {
+  if (suppressRouteSync) return;
+  syncRoutesFromSsot(state);
+}
 
 export interface TranscriptToolCall {
   name: string;
@@ -228,7 +267,7 @@ function flushTranscriptBatch(state: AppState, batch: PendingBatch): void {
   const dbPath = resolveDbPath();
   if (convId && hasHookCoverageById(dbPath, convId)) return;
   try {
-    const { projectId, projectLabel } = resolveProjectIdentity(process.cwd());
+    const { projectId, projectLabel } = resolveProjectIdentityCached(process.cwd());
     for (let k = 0; k < batch.calls.length; k++) {
       const call = batch.calls[k]!;
       const gstep = batch.results[k]!;
@@ -357,12 +396,26 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
         const cardIdx = classifyToolCard(toolName);
         const card = state.cards[cardIdx]!;
 
-        // SQLite SSOT 실측 판정 — 고정 휴리스틱/'sharp' 하드코딩 제거(§5.1-3)
-        const decision = evaluateToolDecision(
-          toolName,
-          parseToolArgs(call.args) ?? undefined,
-          state.conversationId
-        );
+        // SQLite SSOT 실측 판정 — 고정 휴리스틱/'sharp' 하드코딩 제거(§5.1-3).
+        // 초기 대량 리플레이 중엔 호출당 git+DB 왕복을 피해 사전확률 폴백 사용.
+        const decision = bulkReplay
+          ? (() => {
+              const { route, toolClass } = classifyTool(
+                toolName,
+                parseToolArgs(call.args) ?? undefined
+              );
+              const p = priorP0(route, toolClass);
+              return {
+                tag: (p >= 0.7 ? 'sharp' : 'split') as 'sharp' | 'split',
+                p,
+                basis: 'prior' as const,
+              };
+            })()
+          : evaluateToolDecision(
+              toolName,
+              parseToolArgs(call.args) ?? undefined,
+              state.conversationId
+            );
 
         // Workers 카드 갱신
         card.status = 'running';
@@ -413,7 +466,7 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
           );
         }
       }
-      syncRoutesFromSsot(state); // 배치 전체 반영 후 라우트 4종 SSOT 최신화
+      syncRoutesGuarded(state); // 배치 전체 반영 후 라우트 4종 SSOT 최신화(대량 재생 중엔 청크 말미 1회)
     } else if (step.status === 'DONE') {
       // 도구 호출 없이 완료된 턴
       state.phase = '완료';
@@ -509,7 +562,8 @@ export function applyTranscriptStep(state: AppState, step: TranscriptStep): void
     }
 
     // GENERIC 결과 반영 후 라우트·sharp·split을 SSOT 실측으로 최신화(선행 버그 #3)
-    syncRoutesFromSsot(state);
+    // 대량 재생 중엔 생략하고 청크 단위 1회 flush로 충분하다(멱등 읽기 동기화).
+    syncRoutesGuarded(state);
   }
 }
 
@@ -613,22 +667,48 @@ export function attachTranscriptWatcher(
     state.sessionId = Number.parseInt(matchId[1].replace(/\D/g, '').slice(0, 4), 10) || 101;
   }
 
-  // 1. 기존 파일 내용 전체를 순차적으로 읽어 현재 세션 상태 복원
+  // 1. 기존 파일 내용으로 현재 세션 상태 복원 — 대형 transcript는 마지막
+  //    INITIAL_TAIL_BYTES만 읽어 시작 지연을 상한으로 묶는다(부분 첫 줄은 폐기).
   let byteOffset = 0;
   if (fs.existsSync(filePath)) {
-    const initialContent = fs.readFileSync(filePath, 'utf8');
-    byteOffset = Buffer.byteLength(initialContent, 'utf8');
-    const lines = initialContent.split(/\r?\n/).filter((l) => l.trim().length > 0);
-    for (const line of lines) {
+    const stat = fs.statSync(filePath);
+    let initialContent: string;
+    if (stat.size > INITIAL_TAIL_BYTES) {
+      const fd = fs.openSync(filePath, 'r');
       try {
-        const parsed = JSON.parse(line.trim()) as unknown;
-        if (isTranscriptStep(parsed)) {
-          applyTranscriptStep(state, parsed);
-        }
-      } catch {
-        // 무시
+        const buf = Buffer.alloc(INITIAL_TAIL_BYTES);
+        fs.readSync(fd, buf, 0, INITIAL_TAIL_BYTES, stat.size - INITIAL_TAIL_BYTES);
+        const tail = buf.toString('utf8');
+        const firstNewline = tail.indexOf('\n');
+        initialContent = firstNewline >= 0 ? tail.slice(firstNewline + 1) : tail;
+      } finally {
+        fs.closeSync(fd);
       }
+      byteOffset = stat.size;
+    } else {
+      initialContent = fs.readFileSync(filePath, 'utf8');
+      byteOffset = Buffer.byteLength(initialContent, 'utf8');
     }
+    const lines = initialContent.split(/\r?\n/).filter((l) => l.trim().length > 0);
+    // 라인별 syncRoutesFromSsot(SQLite+git) 억제 — 재생 전체를 마친 뒤 1회만 동기화
+    suppressRouteSync = true;
+    bulkReplay = true;
+    try {
+      for (const line of lines) {
+        try {
+          const parsed = JSON.parse(line.trim()) as unknown;
+          if (isTranscriptStep(parsed)) {
+            applyTranscriptStep(state, parsed);
+          }
+        } catch {
+          // 무시
+        }
+      }
+    } finally {
+      bulkReplay = false;
+      suppressRouteSync = false;
+    }
+    syncRoutesFromSsot(state);
     onUpdate();
   }
 
@@ -655,20 +735,27 @@ export function attachTranscriptWatcher(
         const parts = chunk.split(/\r?\n/);
         leftover = parts.pop() ?? '';
         let hasChanges = false;
-        for (const part of parts) {
-          const trimmed = part.trim();
-          if (!trimmed) continue;
-          try {
-            const parsed = JSON.parse(trimmed) as unknown;
-            if (isTranscriptStep(parsed)) {
-              applyTranscriptStep(state, parsed);
-              hasChanges = true;
+        suppressRouteSync = true;
+        try {
+          for (const part of parts) {
+            const trimmed = part.trim();
+            if (!trimmed) continue;
+            try {
+              const parsed = JSON.parse(trimmed) as unknown;
+              if (isTranscriptStep(parsed)) {
+                applyTranscriptStep(state, parsed);
+                hasChanges = true;
+              }
+            } catch {
+              // 무시
             }
-          } catch {
-            // 무시
           }
+        } finally {
+          suppressRouteSync = false;
         }
         if (hasChanges) {
+          // 청크 전체 반영 후 SSOT 동기화 1회 — 라인별 DB/git 왕복 방지
+          syncRoutesFromSsot(state);
           onUpdate();
         }
       }
