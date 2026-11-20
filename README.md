@@ -1,14 +1,50 @@
-# dgate — 실측 통계 기반 멀티 에이전트 오케스트레이터
+<div align="center">
 
-5개 역할 슬롯(lead·explore·coder·verifier·advisor)에 임의의 로컬 CLI 에이전트(claude·codex·devin·pi·gemini·agy 및 cli: "custom"으로 임의 로컬 CLI 전부 지원)를 바인딩해, **실측 통계 기반 Decision Gate**가 저비용 경로와 리드 승격 경로를 자동 분기하는 오케스트레이션 시스템이다. 핵심 목적:
+# dgate
 
-- **비용·리드 턴 절감** — 통계적으로 안정된 조사 태스크는 Pre-Lead 라우터가 읽기전용 워커로 직행시켜 리드 LLM 턴을 0으로 만든다.
-- **모델 가변성** — 어떤 모델을 어느 역할에 쓸지는 `roster.json` 설정 파일 하나로 교체한다. 코드 수정 불필요.
-- **로컬 전체 프로젝트 공용** — `--repo <path>`로 이 머신의 어느 로컬 저장소에서든 같은 오케스트레이터를 실행한다.
+**실측 통계 기반 멀티 에이전트 오케스트레이터 — Decision Gate가 저비용 경로와 리드 승격 경로를 자동 분기한다**
 
-결정 엔진은 SQLite(WAL) 위에 EWMA Beta 사후확률을 유지하고, **동일 조건 연속 오류 2회 시 강제 `split`**(리드 승격)으로 안전하게 폴백한다. 외부 npm 의존성은 0개 — Node.js 내장 모듈만으로 동작한다.
+![dependencies](https://img.shields.io/badge/dependencies-0_npm-2ea043)
+[![Rust](https://img.shields.io/badge/Rust_v2_+_GPUI-~3.7ms_startup-dea584)](#7-rust-v2-네이티브-cli--선택적-gpui-데스크톱-관제앱)
+![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-0078d4)
+[![tests](https://img.shields.io/badge/tests-216_Node_%7C_317_Rust-2ea043)](#7-rust-v2-네이티브-cli--선택적-gpui-데스크톱-관제앱)
+![node](https://img.shields.io/badge/node-%3E%3D22.6-339933)
+[![license](https://img.shields.io/badge/license-MIT-black)](LICENSE)
 
-> **Rust v2 네이티브 CLI & GPUI 데스크톱 앱** — 같은 SQLite DB·roster.json을 공유하는 네이티브 구현이 Cargo 워크스페이스(`crates/dgate-core`·`crates/dgate-cli`)로 준비돼 있다. `cargo build --release` 한 번으로 `target/release/dg`·`dgate` 네이티브 바이너리(~3.7ms 기동, Node 대비 약 24배 빠름)를 얻고, 선택적으로 `cargo build -p dgate-gui`로 GPUI 데스크톱 관제앱도 띄울 수 있다. 자세한 것은 [§7](#7-rust-v2-네이티브-cli--선택적-gpui-데스크톱-관제앱).
+로컬 CLI 에이전트(`claude` · `codex` · `devin` · `pi` · `gemini` · `agy` · `custom`)를 5개 역할 슬롯(lead·explore·coder·verifier·advisor)에 자유 바인딩하고, SQLite 위에 쌓인 실측 통계가 안정된 태스크는 읽기전용 워커로 직행시켜 **리드 LLM 턴을 0으로** 만든다. 구독·쿼터 상황이 바뀌면 `roster.json` 하나만 교체한다.
+
+<!-- gitreels:start -->
+<p align="center">
+  <a href="https://gitreels.com/insightflo/dgate"><img src="https://gitreels.com/insightflo/dgate.webp" alt="insightflo/dgate in 15 seconds" width="100%"></a>
+  <br>
+  <a href="https://gitreels.com"><img src="https://gitreels.com/badge.svg" alt="Made with GitReels" height="24"></a>
+</p>
+<!-- gitreels:end -->
+
+</div>
+
+---
+
+## 핵심 장점
+
+- **실측 통계 기반 Decision Gate** — SQLite(WAL) 위에 EWMA Beta 사후확률을 유지해 태스크를 `sharp`(읽기전용 워커 직행, 리드 턴 0) / `split`(리드 승격)으로 자동 분기한다. 동일 조건 연속 오류 2회 시 강제 `split` 안전 폴백. 외부 npm 의존성 0개 — Node.js 내장 모듈만으로 동작.
+- **5계층 멀티 CLI 오케스트레이션** — 7종 CLI를 `roster.json`에 자유 바인딩하고, 격리 `git worktree`에서 병렬 코딩(동시 최대 2), 리드와 **이종 모델**의 독립 검증, 온디맨드 자문 3관문으로 마감한다.
+- **실시간 관제 TUI & 네이티브 GPUI 데스크톱 앱** — `dgate-tui`(터미널)와 `dgate-gui`(Rust GPUI 0.2.2 네이티브 GPU 앱, 패널 드래그 리사이즈). 역할 카드 하단에는 `roster.json`이 아니라 **실행 중인 세션에서 직접 읽은 `cli · model · effort` 실측 텔레메트리**를 표시하고, 리드가 내장 서브에이전트(`invoke_subagent`)를 호출하면 Lead 카드에 경고 배지를 띄운다.
+- **크로스 플랫폼 & 전역 설치** — macOS + Windows 네이티브 지원. `npm run install:global` 한 번으로 어느 저장소에서든 `dgate-tui`·`dgate-gui`·`dg`·`dgate` 실행. Rust v2 네이티브 CLI는 ~3.7ms 기동, Node와 SQLite DDL v2 100% 양방향 호환.
+
+## 30초 Quick Start
+
+요구 사항은 **Node.js 22.6+** 하나(`node:sqlite` 내장 모듈). `npm install`도 필요 없다.
+
+```bash
+git clone https://github.com/insightflo/dgate.git && cd dgate
+npm run install:global   # ~/.local/bin에 dgate-tui · dgate-gui · dg · dgate 전역 설치
+dgate-tui                # 실시간 관제 TUI 시작 — 또는 dgate-gui(GPUI 앱) / dg(통계 CLI)
+```
+
+- `dgate-gui`는 네이티브 바이너리가 없으면 `cargo run --release`로 자동 폴백한다(Rust 빌드 필요 — [§7](#7-rust-v2-네이티브-cli--선택적-gpui-데스크톱-관제앱)).
+- 첫 환경 설정은 `npm run setup` — 모델 호출 0회(0토큰) 대화형 위저드.
+- 해제는 `npm run uninstall:global`.
 
 ---
 
@@ -50,6 +86,7 @@
 - **Node.js 22.6+** (`node:sqlite` 내장 모듈 필요 — 외부 npm 의존성 0개, `npm install` 불필요)
 - 워커로 사용할 로컬 CLI 에이전트 중 최소 1종 (claude / codex / devin / pi / gemini / agy 또는 cli: "custom"으로 임의 터미널 CLI — 없으면 `--dry-run` 및 로컬 dg 통계·체크포인트 단독 사용)
 - (선택) `hc`·`herdr-app` — 세션 기동·4분할 관제 화면용
+- (선택) Rust — 네이티브 CLI·GPUI 데스크톱 앱용 ([§7](#7-rust-v2-네이티브-cli--선택적-gpui-데스크톱-관제앱))
 
 ### 단독 실행 (외부 도구·API 키 없이 3줄 시작)
 
@@ -74,14 +111,14 @@ git clone https://github.com/insightflo/dgate.git && cd dgate
 npm run setup            # 대화형 위저드 (환경 진단·로스터 맞춤 설정·선택 도구 안내)
 npm run setup:check      # 읽기전용 진단 리포트만 (파일 쓰기 0 — 안전 점검용)
 
-# 0-1) 전역 명령 설치 (일회성) — 이후 어떤 저장소에서든 dgate-tui·dg 실행 가능
-npm run install:global   # ~/.local/bin에 dgate-tui, dgate-gui, dg, dgate 래퍼 설치
+# 0-1) 전역 명령 설치 (일회성) — 이후 어떤 저장소에서든 dgate-tui·dgate-gui·dg·dgate 실행 가능
+npm run install:global   # macOS은 sh 래퍼, Windows는 .cmd 래퍼 자동 생성 (네이티브 바이너리 우선 실행)
 # 해제: npm run uninstall:global
 
 # 1) 오케스트레이션 계획 리허설 (모델 호출 0회, 실기동 0회 — 무조건 안전)
 npm run orchestrate:dry
 
-# 2) 전체 테스트 171건 (외부 의존성 0개)
+# 2) 전체 테스트 216건 (외부 의존성 0개)
 npm test
 
 # 3) 데모 TUI 스냅샷 (터미널에 관제 화면 정적 출력)
@@ -146,11 +183,20 @@ cp .herdr/roster.example.json ~/.config/herdr-quad/roster.json
 ```jsonc
 "coder": { "cli": "custom", "bin": "aider", "extraArgs": ["--no-auto-commits"] }
 ```
+
 - `bin`은 포터블한 명령 이름(`"pi"` 등)을 권장한다. 절대경로가 필요할 때만 명시.
 - 실행 파일 해석 순서: `bin` 필드 → 환경변수 → `PATH` 탐색 → 관례적 설치 위치(`~/.bun/bin/pi`, `~/.local/bin/agy`).
 - `pricing.relativeCost`(선택) — 역할별 상대비용 가중치. `dg route`/`dg gate`에 `--roster`/`--profile`을 주면 상수 0.70 대신 비용 인식 동적 `θ_sharp`를 산출한다(§5). 미지정 시 슬롯 기본값.
 
-### 환경변수
+### 내장 프로필
+
+| 프로필 | 구성 | 비고 |
+| :--- | :--- | :--- |
+| `quota-saver` (기본) | lead/verifier/advisor 모두 `pi` (advisor는 온디맨드 1회성) | agy 상시·온디맨드 모두 0 |
+| `agy-quad` (opt-in) | lead·verifier·advisor 모두 `agy` 상시 | 일일 예산 초과 시 `quota-saver`로 자동 강등 |
+
+<details>
+<summary><b>환경변수 전체 참조</b></summary>
 
 | 변수 | 용도 |
 | :--- | :--- |
@@ -165,16 +211,11 @@ cp .herdr/roster.example.json ~/.config/herdr-quad/roster.json
 | `DECISION_API_MODEL` | 모델 오버라이드 (기본 `gemini-decision-1`) |
 | `DECISION_API_TIMEOUT_MS` | 요청 타임아웃 ms (기본 3000, 50–30000 클램프) |
 
-`dg route`/`dg gate`/`scripts/dispatch.ts`는 `--decision-api off|shadow|on`(env 덮어쓰기), `--context <text>`(리댁션 후 프롬프트 포함), `--api-eval`(measured 기반에서도 평가 강제) 플래그를 지원한다. 모든 실패는 로컬 EWMA로 fail-safe 폴백하고, 감사 결과는 `forks.metadata_json.decision_api`에 기록돼 `dg report`의 `decisionApiShadow` 요약으로 집계된다. `decision_events`에는 아무것도 기록되지 않는다(로컬 EWMA 오염 0).
+`dg route`/`dg gate`/`scripts/dispatch.ts`는 `--decision-api off|shadow|on`(env 덮어쓰기), `--context <text>`(리덕션 후 프롬프트 포함), `--api-eval`(measured 기반에서도 평가 강제) 플래그를 지원한다. 모든 실패는 로컬 EWMA로 fail-safe 폴백하고, 감사 결과는 `forks.metadata_json.decision_api`에 기록돼 `dg report`의 `decisionApiShadow` 요약으로 집계된다. `decision_events`에는 아무것도 기록되지 않는다(로컬 EWMA 오염 0).
 
 > **API 키는 절대 이 저장소에 커밋하지 않는다.** 키 주입은 환경변수로만 하고, `.env*` 파일은 `.gitignore`로 차단돼 있다.
 
-### 내장 프로필
-
-| 프로필 | 구성 | 비고 |
-| :--- | :--- | :--- |
-| `quota-saver` (기본) | lead/verifier/advisor 모두 `pi` (advisor는 온디맨드 1회성) | agy 상시·온디맨드 모두 0 |
-| `agy-quad` (opt-in) | lead·verifier·advisor 모두 `agy` 상시 | 일일 예산 초과 시 `quota-saver`로 자동 강등 |
+</details>
 
 ---
 
@@ -190,7 +231,8 @@ cp .herdr/roster.example.json ~/.config/herdr-quad/roster.json
 node ./scripts/herdr-quad-launch.ts --repo /path/to/your-project --mode orchestrate --dry-run
 ```
 
-### `dg` 서브커맨드 (15종)
+<details>
+<summary><b><code>dg</code> 서브커맨드 15종 전체 참조</b></summary>
 
 ```bash
 node ./src/decision/dg.ts <command> [flags]
@@ -214,6 +256,8 @@ node ./src/decision/dg.ts <command> [flags]
 | `report` | 읽기전용 규칙 후보 리포트 (`--days`·`--out`) — `--out`은 `<repo>/.herdr/report/` 또는 저장소 외부만 허용 |
 | `compact` | 결정 DB 압축·통계 정리 |
 
+</details>
+
 ---
 
 ## 5. 보안·격리 설계
@@ -224,45 +268,59 @@ node ./src/decision/dg.ts <command> [flags]
 - **세션명 충돌 방지** — 모든 `hc run --name`은 `^[a-z0-9_-]{1,32}$` 계약 + 런타임 6-hex 접미로 유일성을 보장하고, 기동 전 `hc ls` 충돌 점검을 수행한다.
 - **dry-run 무오염** — `--dry-run`은 임시 `:memory:` DB에서 리허설해 사용자 결정 DB·파일 시스템을 건드리지 않는다.
 
-### 실행 수명주기 & `dg wrap` 워치독
+<details>
+<summary><b>실행 수명주기 & <code>dg wrap</code> 워치독</b></summary>
 
 `dg wrap`이 워커 자식을 `detached` 프로세스 그룹으로 띄워 종료 코드·신호·출력 tail을 함께 수집하고, 결과를 `commitWrapOutcome` 단일 트랜잭션으로 SSOT에 기록한다(이중 표본·TOCTOU 차단). `--expected-gen`/`--expected-attempt` 펜스로 세대·시도 불일치의 stale 커밋을 거부하고, 디스패처는 `repo_scope` cooperative lease로 동일 저장소를 점유 중인 세션과의 중복 디스패치를 미룬다(점유자 생존·만료 시 탈취, 조회 실패는 fail-open). 주요 계약:
 
 - **산출물·출력 계약** — `--require-artifact <path>`(파일 존재), `--require-nonempty`(크기 >0), `--require-stdout-nonempty`(비공백 stdout)를 clean exit(0) 시 AND 게이트로 검사한다. stdout 첫 비공백 줄이 `rerouted`면 워커의 리드 승격 신호 — 표본·실패 없이 `rerouted`로만 닫힌다.
-- **워치독** — `--stall-ms`(기본 120s) 무출력 스톨 시 프로세스 그룹 전체 SIGTERM→SIGKILL kill + 리댁션된 20줄 tail 보존, `--max-ms`(기본 20분) 총 시간 상한. 출력 진전이 있을 때만 `dg touch` 하트비트(`--heartbeat-ms`, 기본 60s)로 fork TTL을 갱신한다.
+- **워치독** — `--stall-ms`(기본 120s) 무출력 스톨 시 프로세스 그룹 전체 SIGTERM→SIGKILL kill + 리덕션된 20줄 tail 보존, `--max-ms`(기본 20분) 총 시간 상한. 출력 진전이 있을 때만 `dg touch` 하트비트(`--heartbeat-ms`, 기본 60s)로 fork TTL을 갱신한다.
 - **`FailureCause` 11종** — `ok_pass`·`transient_network`·`tool_error`·`max_turns`·`no_result`·`artifact_missing`·`gate_fail`·`stall`·`timeout`·`config_error`·`interrupted`. 신호·종료코드 우선 분류라 문자열 휴리스틱 오탐을 막는다. `config_error`·`interrupted`는 EWMA·연속오류 카운터에서 격리돼 감사 로그만 남고, `ttl_orphan` 고아 정산은 w=1.0 실패 표본을 강제해 생존편향을 차단한다.
 
-### Fail-Closed 구조화 Verdict & `dg retro`
+</details>
+
+<details>
+<summary><b>Fail-Closed 구조화 Verdict & <code>dg retro</code></b></summary>
 
 - **`.herdr/verify/<fork_id>-verdict.json`** — 검증자가 남기는 SSOT 판정 문서(`schema_version: 1`). `decision`은 `pass|rework|fail|human` 4종, `findings[].severity`는 `P0|P1|P2|info`. `dg backprop --verdict-file <path> [--expected-head <sha>] [--max-reworks 2]`가 3중 불변식(스키마·fork_id/HEAD 결속·모순 판정)으로 검증해 fork에 반영한다 — `pass`는 fork→`ok`, `fail`은 역전파, `rework`는 재작업 카운트+w1.0 페널티, `human`/무효·누락·Stale·Replay는 전부 `exit 3` + `waiting_human` 파킹이다. pass에 P0/P1 finding이 있거나 fail/rework에 비공백 evidence가 없으면 모순으로 거부된다.
-- **`dg retro --fork <id> [--out <path>]`** — fork의 상태·원인·시도·재작업 횟수·실패 도구 상위 5건·다음 시도 권고를 리댁션된 마크다운으로 생성해 다음 워커 브리프에 주입한다(opt-in — 자동 생성하지 않는다).
+- **`dg retro --fork <id> [--out <path>]`** — fork의 상태·원인·시도·재작업 횟수·실패 도구 상위 5건·다음 시도 권고를 리덕션된 마크다운으로 생성해 다음 워커 브리프에 주입한다(opt-in — 자동 생성하지 않는다).
 
-### DDL v2 무중단 마이그레이션·비용 인식 라우팅·시간 통계
+</details>
+
+<details>
+<summary><b>DDL v2 무중단 마이그레이션·비용 인식 라우팅·시간 통계</b></summary>
 
 - **`PRAGMA user_version = 2` 자동 승격** — v1 결정 DB를 열 때 `VACUUM INTO` 백업 후 단일 `BEGIN IMMEDIATE` 트랜잭션 안에서 `forks` 리빌드·백필·버전 승격을 수행한다(이후 핫패스는 비용 0). v2는 `generation`/`attempt` 펜스와 실행·대기 구간 테이블 `fork_intervals`를 추가하며, `dg attempt --fork <id> [--bump-gen]`이 세대·시도를 관리한다.
 - **비용 인식 동적 `θ_sharp`** — roster의 `pricing.relativeCost`(미지정 시 슬롯 기본값)와 쿼터 희소도 승수 `κ_quota`(일일 예산 50% 초과분부터 제곱 증가, 100% 시 2.0)로 `θ_sharp = clamp((C_eff(explore)+C_switch)/(C_eff(lead)+C_switch), 0.70, 0.90)`을 산출한다 — 비싼 탐색 워커 프로필은 자동 보수 분기. `cost_status` 집계는 `unknown` 표본을 $0으로 위장하지 않는다.
 - **`dg stats` 실행/대기 시간 분리** — `fork_intervals`의 exec/wait/human 구간을 합집합으로 합산해 병렬 워커 중복을 제거한다(`--cost` 비용 집계, `--timing` 구간 통계, `--db` 임의 DB 지정). 읽기전용 연결로 어떤 쓰기 경로도 호출하지 않는다.
 
-### Git-Native 워크트리 체크포인트 & 삭제 게이트
+</details>
+
+<details>
+<summary><b>Git-Native 워크트리 체크포인트 & 삭제 게이트 · 규칙 후보 리포트</b></summary>
 
 - **`dg checkpoint create|verify|restore`** — worktree의 staged/unstaged `git diff --binary` 패치와 untracked 원본(파일당·총합 12MiB 상한)을 `.herdr/checkpoints/<run_id>/<wt_name>/`에 스냅숏하고 sha256 manifest로 무결성을 검증한다. 경로 순회·제외 대상(`.git`·`node_modules`·`.herdr`·`.verify`·`*.db*`)은 저장·검증·복원에서 동일하게 차단하고, 심볼릭 링크는 대상 경로 문자열만 기록한다.
 - **`dg worktree remove` 삭제 게이트** — "체크포인트 저장 성공 + verify 유효"를 통과하기 전에는 `git worktree remove` 호출에 물리적으로 도달할 수 없다(우회 플래그 없음, 거부 시 `exit 4`).
-
-### 읽기전용 규칙 후보 리포트
-
 - **`dg report [--days 14] [--out <path>]`** — `decision_events`/`forks` 통계에서 사람이 검토할 규칙 후보 4종(도구 반복·핑퐁·FailureCause·고아/스톨)을 구조화 JSON+마크다운으로만 출력한다. 읽기전용 연결 + `PRAGMA query_only` 이중 보장이며, 프롬프트·역할 파일·코드·DB 자동 수정 기능은 존재하지 않는다(자동 변조 영구 금지). `--out`은 `<repo>/.herdr/report/` 내부 또는 저장소 외부 절대경로만 허용한다(allowlist, 심볼릭 링크 우회 차단).
 
-### 시크릿 3중 방어
+</details>
+
+<details>
+<summary><b>시크릿 3중 방어</b></summary>
 
 - **헤더 전용 키 전달** — Gemini REST 폴백은 `x-goog-api-key` 헤더로만 키를 보낸다(`?key=` URL 쿼리 폐기 — URL·로그·프록시 기록에 키가 남지 않는다).
 - **자식 env 최소 격리** — `buildSanitizedChildEnv`가 자식 워커 env에서 `*_API_KEY|_TOKEN|_SECRET|_PASSWORD|_PRIVATE_KEY` 계열을 제거하고 안전 키(`PATH`·`HOME`·`HERDR_*` 등)+명시 allow 목록만 통과시킨다. `dg wrap --sanitize-env --allow-env K1,K2`로 동일 격리를 래핑 자식에 적용한다.
-- **전역 리댁션** — `redactSecrets`(무예외 순수 함수)가 런타임 env 실측값·URL 인코딩 형태와 패턴 세트(`Authorization`/`x-goog-api-key` 헤더, `?key=` 쿼리, Bearer, `AIza…`·`sk-…`·`ghp_…`·`AKIA…` 등)를 `<redacted>`로 치환한다. 로그·`error_snippet`·`command_line`·verdict/retro 출력 등 기록 경로 전체에 적용된다. `tests/redact-security.test.ts`의 키 모양 문자열은 리댁션 검증용 의도된 합성 더미다.
+- **전역 리덕션** — `redactSecrets`(무예외 순수 함수)가 런타임 env 실측값·URL 인코딩 형태와 패턴 세트(`Authorization`/`x-goog-api-key` 헤더, `?key=` 쿼리, Bearer, `AIza…`·`sk-…`·`ghp_…`·`AKIA…` 등)를 `<redacted>`로 치환한다. 로그·`error_snippet`·`command_line`·verdict/retro 출력 등 기록 경로 전체에 적용된다. `tests/redact-security.test.ts`의 키 모양 문자열은 리덕션 검증용 의도된 합성 더미다.
+
+</details>
 
 ---
 
-## 6. DGATE TUI 관제 화면
+## 6. dgate TUI 관제 화면
 
-읽기전용 라이브 관제 TUI다. `roster.json` 변경을 핫리로드로 반영하고, 글로벌 watch 모드에서는 활성 `hc` 워커의 모델과 `[repo]` 태그가 붙은 1줄 리덕션 활동을 실시간으로 보여준다. 저장소 단위 스코프는 `--repo <dir>`로 — cwd 기준 워커 필터·project_id 기준 DB 필터가 적용된다. 감시 중인 호스트 Lead 라벨은 Antigravity / Claude Code / Codex 실제 값을 정직하게 표시하고, 좌측 상단 Watch/Control 모드 배지·`?` 평이한 한국어 도움말 모달, 대기 조용한(idle-quiet) 와이어로 구성된다.
+읽기전용 라이브 관제 TUI다. `roster.json` 변경을 핫리로드로 반영하고, 글로벌 watch 모드에서는 활성 `hc` 워커의 모델과 `[repo]` 태그가 붙은 1줄 리덕션 활동을 실시간으로 보여준다.
+
+**라이브 실측 텔레메트리** — 역할 카드는 상단에 역할명만 표시하고, 하단에는 `roster.json` 설정이 아니라 **지금 실제로 돌고 있는 세션에서 직접 읽은 `cli · model · effort`**를 표시한다. 출처는 `hc` 터미널 화면 하단 상태줄과 `dg wrap` 백그라운드 프로세스(ps 스캔) — 설정과 실제가 어긋나면 그대로 보인다. 감시 중인 호스트 Lead 라벨은 Antigravity / Claude Code / Codex 실제 값을 정직하게 표시하고, 리드가 내장 서브에이전트(`invoke_subagent`)를 호출하면 관측 불가 경고 배지가 Lead 카드에 뜬다. 저장소 단위 스코프는 `--repo <dir>`로 — cwd 기준 워커 필터·project_id 기준 DB 필터가 적용된다. 좌측 상단 Watch/Control 모드 배지·`?` 평이한 한국어 도움말 모달, 대기 조용한(idle-quiet) 와이어로 구성된다.
 
 ```bash
 npm run demo          # 40초 데모 시나리오 (모델 호출 없음)
@@ -290,14 +348,14 @@ default-members = ["crates/dgate-core", "crates/dgate-cli"]
 ```
 
 - **CLI/헤드리스 빌드는 GUI 의존성을 전혀 컴파일하지 않는다.** `dgate-gui`는 별도 opt-in 멤버다.
-- `cargo build --release` → 네이티브 `target/release/dg` · `target/release/dgate` 바이너리 생성.
+- `cargo build --release` → 네이티브 `target/release/dg` · `target/release/dgate` 바이너리 생성(macOS·Windows 모두).
 - **~3.7ms 기동 / Node 대비 약 24배 빠름** — 콜드스타트가 중요한 래핑·통계·루팅 호출에 유리하다.
 - **SQLite DDL v2 100% 호환** — Node v1이 만든 `decision.db`를 그대로 읽고 쓴다. 마이그레이션·변환 없이 v1↔v2 혼용 가능.
 - 편의 스크립트: `npm run rust:build` / `npm run rust:test` (npm 의존성은 여전히 0개).
 
 ### 선택적 GPUI 네이티브 데스크톱 관제앱 (`crates/dgate-gui`)
 
-[gpui 0.2.2](https://github.com/longbridge/gpui) 기반 · Metal GPU 가속 네이티브 데스크톱 앱. 완전 선택 사항이다:
+[gpui 0.2.2](https://github.com/longbridge/gpui) 기반 · GPU 가속 네이티브 데스크톱 앱(macOS·Windows). 완전 선택 사항이다:
 
 ```bash
 npm run gui:build    # = cargo build -p dgate-gui
@@ -309,8 +367,9 @@ cargo run -p dgate-gui -- [--repo <dir>] [--db <path>] [--roster <path>] [--watc
 하이라이트:
 
 - **저장소별 탭** — 여러 `[--repo]`를 한 창에서 전환하며 관제
-- **5-역할 로스터 카드** — lead·explore·coder·verifier·advisor 바인딩·모델 한눈에
-- **hc 워커 실시간 활동** — 활성 워커당 1줄 리덕션(민감정보 마스킹) 스트림
+- **5-역할 로스터 카드 + 라이브 실측 텔레메트리** — 하단에 실행 중 세션에서 직접 읽은 `cli · model · effort`, 리드 `invoke_subagent` 호출 시 경고 배지(TUI와 동일 계약)
+- **패널 드래그 리사이즈** — advisor·verifier 폭과 로그 높이를 마우스 드래그로 조절
+- **hc 워커 실시간 활동** — 활성 워커당 1줄 리덕션(민감정보 마스킹) 스트림, `dg wrap` 백그라운드 프로세스도 표시
 - **Decision Gate 확률 바 + 비용/타이밍/shadow 요약** — `dg stats`/`report` 데이터를 시각화
 - **2단계 명시 확인 워커 정지** — 안전한 worker stop(실수 방지 이중 확인)
 - **조용한 대기 상태** — 유휴 시 과잉 애니메이션 없는 차분한 화면
@@ -319,8 +378,8 @@ cargo run -p dgate-gui -- [--repo <dir>] [--db <path>] [--roster <path>] [--watc
 
 | 구현 | 테스트 | 비고 |
 | :--- | :--- | :--- |
-| Node v1 | 171건 | `npm test` — 외부 의존성 0개 |
-| Rust v2 | 274건 (core 248 + cli/교차호환 9 + gui 17) | `cargo test` — 동일 SQLite DB·`roster.json` SSOT 공유 |
+| Node v1 | 216건 | `npm test` — 외부 의존성 0개 |
+| Rust v2 | 317건 (core 266 + cli/교차호환 9 + gui 42) | `cargo test` (gui는 `cargo test -p dgate-gui`) — 동일 SQLite DB·`roster.json` SSOT 공유 |
 
 두 구현은 **정확히 같은 SQLite DB와 `roster.json`**을 쓰므로 어떤 CLI로 기록해도 다른 쪽에서 그대로 읽힌다.
 
