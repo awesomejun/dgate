@@ -538,8 +538,34 @@ pub fn filter_snapshot_by_repo(
                 .collect();
         }
     }
-    // 3) 선택 레포에 DB 이벤트가 0건이어도(예: 타 워크트리에서 dg wrap 실행) 현재 살아 있는
-    //    세션이 있으면 라이브 활동 로그를 합성해 빈 화면 대신 TUI와 동일하게 보여준다.
+    // 3) 선택 레포의 리드 세션이 가진 `--conversation` transcript 입출력(사용자 입력·리드 응답)을
+    //    세션 기록 최상단에 병합한다(최신순 — 엉뚱한 타 레포 대화 혼입 0%).
+    let mut io_logs: Vec<RecentLogEntry> = Vec::new();
+    for w in &out.workers {
+        for io in w.recent_io.iter().rev() {
+            io_logs.push(RecentLogEntry {
+                time_hhmmss: if io.time_hhmmss.is_empty() {
+                    snapshot.updated_at_label.clone()
+                } else {
+                    io.time_hhmmss.clone()
+                },
+                source: "transcript".to_string(),
+                source_role: if io.role == "user" {
+                    "사용자".to_string()
+                } else {
+                    "Lead".to_string()
+                },
+                message: io.text.clone(),
+                project_id: bundle_pid.clone(),
+            });
+        }
+    }
+    if !io_logs.is_empty() {
+        io_logs.extend(out.recent_log);
+        io_logs.truncate(RECENT_LOG_LIMIT);
+        out.recent_log = io_logs;
+    }
+    // 4) DB 이벤트·트랜스크립트 모두 0건이어도 살아 있는 세션이 있으면 라이브 활동 로그 표시.
     if out.recent_log.is_empty() && !out.workers.is_empty() {
         out.recent_log = out
             .workers
@@ -1543,16 +1569,37 @@ pub fn poll_once(cfg: &PollerConfig, snapshotter: &mut LiveSyncSnapshotter) -> D
         }
         None => (None, None, None),
     };
-    // 세션 기록 — 동일 읽기전용 커넥션에서 최신 이벤트 조회(리댁션 내장).
-    let recent_log = conn
-        .as_ref()
-        .map(|c| fetch_recent_log(c, RECENT_LOG_LIMIT))
-        .unwrap_or_default();
+    // 세션 기록 — 라이브 리드 세션의 `--conversation` 입출력 + DB 최신 이벤트 병합.
+    let mut recent_log: Vec<RecentLogEntry> = Vec::new();
+    let updated_label = format_local_time_label(now_ms());
+    for w in &workers {
+        for io in w.recent_io.iter().rev().take(4) {
+            recent_log.push(RecentLogEntry {
+                time_hhmmss: if io.time_hhmmss.is_empty() {
+                    updated_label.clone()
+                } else {
+                    io.time_hhmmss.clone()
+                },
+                source: "transcript".to_string(),
+                source_role: if io.role == "user" {
+                    "사용자".to_string()
+                } else {
+                    "Lead".to_string()
+                },
+                message: format!("[{}] {}", w.repo_tag, io.text),
+                project_id: None,
+            });
+        }
+    }
+    if let Some(c) = conn.as_ref() {
+        recent_log.extend(fetch_recent_log(c, RECENT_LOG_LIMIT));
+    }
+    recent_log.truncate(RECENT_LOG_LIMIT);
     drop(conn);
     let global_routes = aggregate_global_routes(&repo_stats.values().cloned().collect::<Vec<_>>());
 
     DashboardSnapshot {
-        updated_at_label: format_local_time_label(now_ms()),
+        updated_at_label: updated_label,
         profile_name,
         roster_source: loaded.source.as_str().to_string(),
         roles,
@@ -1598,6 +1645,7 @@ fn demo_worker(slot: RoleSlot, name: &str, activity: &str, short_model: &str) ->
         model: short_model.split_once(':').map(|(_, m)| m.to_string()),
         effort: None,
         subagent_warning: None,
+        recent_io: Vec::new(),
     }
 }
 
@@ -2028,6 +2076,7 @@ mod tests {
             model: Some("glm-zcode/glm-5.3".to_string()),
             effort: None,
             subagent_warning: None,
+            recent_io: Vec::new(),
         }
     }
 

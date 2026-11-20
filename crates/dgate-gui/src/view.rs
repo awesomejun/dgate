@@ -2043,6 +2043,54 @@ impl DashboardView {
                             )),
                     );
                 }
+                let mut io_section = div().flex().flex_col().gap_1();
+                let mut has_io = false;
+                for w in &parts.leads {
+                    for io in w.recent_io.iter().rev().take(8) {
+                        has_io = true;
+                        let is_user = io.role == "user";
+                        io_section = io_section.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .p_2()
+                                .rounded_md()
+                                .bg(BG)
+                                .border_1()
+                                .border_color(BORDER_LOG)
+                                .child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(if is_user { WORKER_BLUE } else { LEAD_ORANGE })
+                                        .child(format!(
+                                            "{} · {} ({})",
+                                            if is_user { "사용자 입력" } else { "Lead 응답" },
+                                            io.time_hhmmss,
+                                            w.address
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(TEXT)
+                                        .child(io.text.clone()),
+                                ),
+                        );
+                    }
+                }
+                if has_io {
+                    body = body
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(MUTED)
+                                .child("최근 사용자 입력 · Lead 응답"),
+                        )
+                        .child(io_section);
+                }
             }
             FocusPanel::Verifier => {
                 let verifiers: Vec<&LiveWorkerInfo> = parts.verifiers.iter().collect();

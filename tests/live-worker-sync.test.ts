@@ -25,6 +25,7 @@ import {
   createLiveRosterSyncer,
   detectSubagentWarningFromTranscript,
   extractLastActivityLine,
+  extractRecentIoFromTranscript,
   extractRepoTag,
   findWrapProcesses,
   inferLiveWorkerSlot,
@@ -2055,4 +2056,19 @@ test('dg wrap -- 뒤 --model/--thinking 및 --label 추출 (자식 프로세스�
   assert.equal(procs[0]?.model, 'command-code/deepseek-deepseek-v4.1-flash');
   assert.equal(procs[0]?.effort, 'medium');
   assert.equal(procs[0]?.project, 'engine-rust-phase1-explore');
+});
+
+test('리드 transcript 최근 입출력 추출 — USER_INPUT / PLANNER_RESPONSE 파싱 및 리덕션', () => {
+  const tail = [
+    '{"type":"USER_INPUT","created_at":"2026-11-20T09:00:00Z","content":"<USER_REQUEST>상태 확인해줘 sk-secret1234567890abcd</USER_REQUEST>"}',
+    '{"type":"GENERIC","created_at":"2026-11-20T09:00:01Z","content":"tool stdout"}',
+    '{"type":"PLANNER_RESPONSE","created_at":"2026-11-20T09:00:05Z","content":"정상 동작 확인했습니다."}',
+  ].join('\n');
+  const io = extractRecentIoFromTranscript(tail, 10);
+  assert.equal(io.length, 2);
+  assert.equal(io[0]?.role, 'user');
+  assert.ok(io[0]?.text.includes('상태 확인해줘'));
+  assert.ok(!io[0]?.text.includes('sk-secret1234567890abcd'), '시크릿 리덕션');
+  assert.equal(io[1]?.role, 'assistant');
+  assert.equal(io[1]?.text, '정상 동작 확인했습니다.');
 });

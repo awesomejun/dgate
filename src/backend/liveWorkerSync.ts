@@ -100,6 +100,15 @@ export interface LiveWorkerInfo {
   telemetryLine?: string;
   /** 리드 세션이 내장 서브에이전트(invoke_subagent)를 실행 중일 때 경고 문구(없으면 null). */
   subagentWarning?: string | null;
+  /** 리드 세션의 `--conversation` transcript에서 추출한 최근 사용자 입력·리드 응답. */
+  recentIo?: TranscriptIoEntry[];
+}
+
+/** transcript.jsonl에서 추출한 사용자 입력 / 리드 응답 1건. */
+export interface TranscriptIoEntry {
+  time: string;
+  role: 'user' | 'assistant';
+  text: string;
 }
 
 /** `mergeLiveRosterLabels` 결과 — cli.ts가 AppState에 반영할 값의 묶음. */
@@ -115,6 +124,8 @@ export interface MergedLiveRoster {
   advisorTelemetry?: string | null;
   /** 라이브 리드 세션의 내장 서브에이전트 실행 경고 배지(없으면 null). */
   leadSubagentWarning?: string | null;
+  /** 라이브 리드 세션의 최근 사용자 입력·리드 응답(최대 12건, 오래된→최신 순). */
+  leadRecentIo?: TranscriptIoEntry[];
   workers: LiveWorkerInfo[];
   activeWorkerCount: number;
 }
@@ -443,14 +454,68 @@ export function detectSubagentWarningFromTranscript(rawTail: string | null | und
 }
 
 const TRANSCRIPT_TAIL_BYTES = 128 * 1024;
+const MAX_RECENT_IO_ENTRIES = 12;
 
-/** conversationId의 transcript.jsonl 꼬리 128KB를 읽어 서브에이전트 경고를 판정한다(mtime 캐시). */
-function readConversationSubagentWarning(
+function formatIsoToLocalHhmmss(iso: unknown): string {
+  if (typeof iso !== 'string' || iso.length === 0) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/**
+ * Antigravity transcript.jsonl 꼬리에서 최근 사용자 입력(`USER_INPUT`)·리드 응답(`PLANNER_RESPONSE`)을
+ * 최대 `limit`건 추출한다(오래된→최신 순, 시크릿 리덕션 적용).
+ */
+export function extractRecentIoFromTranscript(
+  rawTail: string | null | undefined,
+  limit = MAX_RECENT_IO_ENTRIES
+): TranscriptIoEntry[] {
+  if (typeof rawTail !== 'string' || rawTail.length === 0) return [];
+  const entries: TranscriptIoEntry[] = [];
+  for (const line of rawTail.split(/\r?\n/)) {
+    if (!line || (!line.includes('"USER_INPUT"') && !line.includes('"PLANNER_RESPONSE"'))) continue;
+    let obj: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(line);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+      obj = parsed as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const type = obj['type'];
+    const rawContent = typeof obj['content'] === 'string' ? obj['content'] : '';
+    if (!rawContent.trim()) continue;
+    if (type !== 'USER_INPUT' && type !== 'PLANNER_RESPONSE') continue;
+    const cleaned = redactSecrets(rawContent)
+      .replace(/<CONTEXT_SUMMARY>[\s\S]*?<\/CONTEXT_SUMMARY>/gi, '')
+      .replace(/<\/?USER_REQUEST>/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!cleaned || cleaned === '.') continue;
+    entries.push({
+      time: formatIsoToLocalHhmmss(obj['created_at']),
+      role: type === 'USER_INPUT' ? 'user' : 'assistant',
+      text: truncateChars(cleaned, 160),
+    });
+  }
+  return entries.length > limit ? entries.slice(entries.length - limit) : entries;
+}
+
+interface ConversationTranscriptCacheEntry {
+  sig: string;
+  warning: string | null;
+  recentIo: TranscriptIoEntry[];
+}
+
+/** conversationId의 transcript.jsonl 꼬리 128KB를 1회 읽어 서브에이전트 경고 + 최근 입출력을 함께 반환(mtime 캐시). */
+function readConversationTranscriptInfo(
   convId: string,
-  cache: Map<string, { sig: string; warning: string | null }>
-): string | null {
+  cache: Map<string, ConversationTranscriptCacheEntry>
+): { warning: string | null; recentIo: TranscriptIoEntry[] } {
   const home = process.env.HOME || process.env.USERPROFILE;
-  if (!home) return null;
+  if (!home) return { warning: null, recentIo: [] };
   const txPath = path.join(
     home,
     '.gemini',
@@ -465,7 +530,7 @@ function readConversationSubagentWarning(
     const st = fs.statSync(txPath);
     const sig = `${st.mtimeMs}:${st.size}`;
     const hit = cache.get(convId);
-    if (hit && hit.sig === sig) return hit.warning;
+    if (hit && hit.sig === sig) return { warning: hit.warning, recentIo: hit.recentIo };
     const fd = fs.openSync(txPath, 'r');
     try {
       const start = Math.max(0, st.size - TRANSCRIPT_TAIL_BYTES);
@@ -474,13 +539,14 @@ function readConversationSubagentWarning(
       const bytesRead = fs.readSync(fd, buf, 0, len, start);
       const raw = buf.subarray(0, bytesRead).toString('utf8');
       const warning = detectSubagentWarningFromTranscript(raw);
-      cache.set(convId, { sig, warning });
-      return warning;
+      const recentIo = extractRecentIoFromTranscript(raw, MAX_RECENT_IO_ENTRIES);
+      cache.set(convId, { sig, warning, recentIo });
+      return { warning, recentIo };
     } finally {
       fs.closeSync(fd);
     }
   } catch {
-    return null;
+    return { warning: null, recentIo: [] };
   }
 }
 
@@ -919,6 +985,7 @@ export function mergeLiveRosterLabels(
         formatLiveTelemetry(advisorWorker.cli, advisorWorker.model, advisorWorker.effort))
       : null,
     leadSubagentWarning: leadWorker?.subagentWarning ?? null,
+    leadRecentIo: leadWorker?.recentIo ?? [],
     workers: [...workers],
     activeWorkerCount: workers.length,
   };
@@ -1032,7 +1099,7 @@ export function createLiveRosterSyncer(opts: LiveRosterSyncerOptions): LiveRoste
   let lastWorkers: LiveWorkerInfo[] = [];
   const detailCache = new Map<string, HcTerminalDetail>();
   const screenCache = new Map<string, string>();
-  const subagentCache = new Map<string, { sig: string; warning: string | null }>();
+  const subagentCache = new Map<string, ConversationTranscriptCacheEntry>();
   let inFlight = false;
   let stopped = false;
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -1208,7 +1275,9 @@ export function createLiveRosterSyncer(opts: LiveRosterSyncerOptions): LiveRoste
               extractConversationIdFromArgv(detail.foregroundArgv ?? []) ??
               extractConversationIdFromArgv(detail.argv ?? []);
             if (convId) {
-              worker.subagentWarning = readConversationSubagentWarning(convId, subagentCache);
+              const info = readConversationTranscriptInfo(convId, subagentCache);
+              worker.subagentWarning = info.warning;
+              worker.recentIo = info.recentIo;
             }
           }
           if (worker) workers.push(worker);

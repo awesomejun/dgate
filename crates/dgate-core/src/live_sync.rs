@@ -186,6 +186,17 @@ pub struct LiveWorkerInfo {
     pub effort: Option<String>,
     /// 리드 세션이 내장 서브에이전트(invoke_subagent)를 실행 중일 때 경고 문구(없으면 None).
     pub subagent_warning: Option<String>,
+    /// 리드 세션의 `--conversation` transcript에서 추출한 최근 사용자 입력·리드 응답.
+    pub recent_io: Vec<TranscriptIoEntry>,
+}
+
+/// transcript.jsonl에서 추출한 사용자 입력 / 리드 응답 1건.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TranscriptIoEntry {
+    pub time_hhmmss: String,
+    /// `"user"` | `"assistant"`
+    pub role: String,
+    pub text: String,
 }
 
 impl LiveWorkerInfo {
@@ -705,14 +716,88 @@ pub fn detect_subagent_warning_from_transcript(raw_tail: Option<&str>) -> Option
 }
 
 const TRANSCRIPT_TAIL_BYTES: u64 = 128 * 1024;
+const MAX_RECENT_IO_ENTRIES: usize = 12;
 
-fn read_conversation_subagent_warning(
+fn format_iso_hhmmss(iso: Option<&str>) -> String {
+    let Some(s) = iso.filter(|s| s.len() >= 19) else {
+        return String::new();
+    };
+    // ISO8601 `YYYY-MM-DDTHH:MM:SSZ` — UTC 시각이 들어오면 로컬 오프셋 보정 대신
+    // chrono 없이도 안전하게 HH:MM:SS를 추출(또는 기존 localtime 포맷 사용).
+    if let Some(t_idx) = s.find('T') {
+        let rest = &s[t_idx + 1..];
+        if rest.len() >= 8 {
+            return rest[..8].to_string();
+        }
+    }
+    String::new()
+}
+
+/// Antigravity transcript.jsonl 꼬리에서 최근 `USER_INPUT` / `PLANNER_RESPONSE`를
+/// 최대 `limit`건 추출한다(오래된→최신 순, 시크릿 리덕션 적용).
+pub fn extract_recent_io_from_transcript(
+    raw_tail: Option<&str>,
+    limit: usize,
+) -> Vec<TranscriptIoEntry> {
+    let Some(raw) = raw_tail.filter(|s| !s.is_empty()) else {
+        return Vec::new();
+    };
+    let mut entries = Vec::new();
+    for line in raw.lines() {
+        if !line.contains("\"USER_INPUT\"") && !line.contains("\"PLANNER_RESPONSE\"") {
+            continue;
+        }
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(obj) = val.as_object() else {
+            continue;
+        };
+        let ty = obj.get("type").and_then(Value::as_str).unwrap_or("");
+        if ty != "USER_INPUT" && ty != "PLANNER_RESPONSE" {
+            continue;
+        }
+        let content = obj.get("content").and_then(Value::as_str).unwrap_or("");
+        if content.trim().is_empty() {
+            continue;
+        }
+        let redacted = redact_secrets(content)
+            .replace("<USER_REQUEST>", "")
+            .replace("</USER_REQUEST>", "");
+        let cleaned = re_whitespace_run()
+            .replace_all(&redacted, " ")
+            .trim()
+            .to_string();
+        if cleaned.is_empty() || cleaned == "." {
+            continue;
+        }
+        let time_hhmmss = format_iso_hhmmss(obj.get("created_at").and_then(Value::as_str));
+        entries.push(TranscriptIoEntry {
+            time_hhmmss,
+            role: if ty == "USER_INPUT" {
+                "user".to_string()
+            } else {
+                "assistant".to_string()
+            },
+            text: truncate_chars(&cleaned, 160),
+        });
+    }
+    if entries.len() > limit {
+        entries.split_off(entries.len() - limit)
+    } else {
+        entries
+    }
+}
+
+type TranscriptCacheEntry = (String, Option<String>, Vec<TranscriptIoEntry>);
+
+fn read_conversation_transcript_info(
     conv_id: &str,
-    cache: &mut HashMap<String, (String, Option<String>)>,
-) -> Option<String> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .ok()?;
+    cache: &mut HashMap<String, TranscriptCacheEntry>,
+) -> (Option<String>, Vec<TranscriptIoEntry>) {
+    let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) else {
+        return (None, Vec::new());
+    };
     let tx_path = PathBuf::from(home)
         .join(".gemini")
         .join("antigravity-cli")
@@ -721,7 +806,9 @@ fn read_conversation_subagent_warning(
         .join(".system_generated")
         .join("logs")
         .join("transcript.jsonl");
-    let meta = std::fs::metadata(&tx_path).ok()?;
+    let Ok(meta) = std::fs::metadata(&tx_path) else {
+        return (None, Vec::new());
+    };
     let mtime_ms = meta
         .modified()
         .ok()
@@ -729,21 +816,29 @@ fn read_conversation_subagent_warning(
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let sig = format!("{}:{}", mtime_ms, meta.len());
-    if let Some((cached_sig, cached_warn)) = cache.get(conv_id) {
+    if let Some((cached_sig, cached_warn, cached_io)) = cache.get(conv_id) {
         if cached_sig == &sig {
-            return cached_warn.clone();
+            return (cached_warn.clone(), cached_io.clone());
         }
     }
     use std::io::Seek;
-    let mut f = std::fs::File::open(&tx_path).ok()?;
+    let Ok(mut f) = std::fs::File::open(&tx_path) else {
+        return (None, Vec::new());
+    };
     let start = meta.len().saturating_sub(TRANSCRIPT_TAIL_BYTES);
     let _ = f.seek(std::io::SeekFrom::Start(start));
     let mut buf = Vec::new();
-    f.read_to_end(&mut buf).ok()?;
+    if f.read_to_end(&mut buf).is_err() {
+        return (None, Vec::new());
+    }
     let raw = String::from_utf8_lossy(&buf);
     let warn = detect_subagent_warning_from_transcript(Some(&raw));
-    cache.insert(conv_id.to_string(), (sig, warn.clone()));
-    warn
+    let recent_io = extract_recent_io_from_transcript(Some(&raw), MAX_RECENT_IO_ENTRIES);
+    cache.insert(
+        conv_id.to_string(),
+        (sig, warn.clone(), recent_io.clone()),
+    );
+    (warn, recent_io)
 }
 
 /// 터미널 화면 원문에서 "의미 있는 마지막 1줄"을 뽑는다.
@@ -1066,6 +1161,7 @@ pub fn infer_live_worker_slot(
         model: live_model,
         effort: live_effort,
         subagent_warning: None,
+        recent_io: Vec::new(),
     })
 }
 
@@ -1280,6 +1376,7 @@ pub fn wrap_proc_to_worker(p: &WrapProc, parent: &HcTerminalSummary) -> LiveWork
         model: p.model.clone(),
         effort: p.effort.clone(),
         subagent_warning: None,
+        recent_io: Vec::new(),
     }
 }
 
@@ -1597,7 +1694,7 @@ pub struct LiveSyncSnapshotter {
     last_workers: Vec<LiveWorkerInfo>,
     detail_cache: HashMap<String, HcTerminalDetail>,
     screen_cache: HashMap<String, String>,
-    subagent_cache: HashMap<String, (String, Option<String>)>,
+    subagent_cache: HashMap<String, TranscriptCacheEntry>,
     in_flight: bool,
     stopped: bool,
 }
@@ -1762,10 +1859,12 @@ impl LiveSyncSnapshotter {
                                     .and_then(extract_conversation_id_from_argv)
                             });
                         if let Some(cid) = conv_id {
-                            worker.subagent_warning = read_conversation_subagent_warning(
+                            let (warn, io) = read_conversation_transcript_info(
                                 &cid,
                                 &mut self.subagent_cache,
                             );
+                            worker.subagent_warning = warn;
+                            worker.recent_io = io;
                         }
                     }
                     workers.push(worker);
@@ -2438,6 +2537,18 @@ mod tests {
             detect_subagent_warning_from_transcript(Some(&finished)),
             None
         );
+
+        let io_tail = concat!(
+            r#"{"type":"USER_INPUT","created_at":"2026-11-20T09:00:00Z","content":"<USER_REQUEST>상태 확인해줘</USER_REQUEST>"}"#,
+            "\n",
+            r#"{"type":"PLANNER_RESPONSE","created_at":"2026-11-20T09:00:05Z","content":"정상 동작 확인했습니다."}"#
+        );
+        let io = extract_recent_io_from_transcript(Some(io_tail), 10);
+        assert_eq!(io.len(), 2);
+        assert_eq!(io[0].role, "user");
+        assert_eq!(io[0].text, "상태 확인해줘");
+        assert_eq!(io[1].role, "assistant");
+        assert_eq!(io[1].text, "정상 동작 확인했습니다.");
     }
 
     #[test]
@@ -2715,6 +2826,7 @@ mod tests {
             model: model.map(str::to_string),
             effort: None,
             subagent_warning: None,
+            recent_io: Vec::new(),
         }
     }
 

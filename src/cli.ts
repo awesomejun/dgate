@@ -1025,6 +1025,7 @@ function main(): void {
   >();
   // 역할 패널 동기화가 덮어쓴 영역 추적 — 종료 복귀 판정에 사용
   const liveRoleTrail = createLiveRoleTrail();
+  const seenLeadIoKeys = new Set<string>();
   // liveWorkers 카드와 나란히 놓인 경과 계산 기준 — 폴 사이 틱에서 초 갱신용
   const liveElapsedBasis: ({ startedAtMs: number; frozenElapsedSec: number | null } | null)[] = [];
 
@@ -1069,6 +1070,19 @@ function main(): void {
     state.advisorTelemetry = merged.advisorTelemetry ?? null;
     if (merged.leadSubagentWarning !== undefined) {
       state.subagentWarning = merged.leadSubagentWarning;
+    }
+    if (merged.leadRecentIo && merged.leadRecentIo.length > 0) {
+      for (const io of merged.leadRecentIo) {
+        const key = `${io.time}|${io.role}|${io.text}`;
+        if (seenLeadIoKeys.has(key)) continue;
+        seenLeadIoKeys.add(key);
+        if (io.role === 'user') {
+          appendLog(state, '사용자', 'blue', io.text, io.time || undefined);
+        } else {
+          appendLog(state, 'Lead', 'orange', io.text, io.time || undefined);
+          state.lastResponse = io.text;
+        }
+      }
     }
     // lead — 관측 중(watchedLead)이 아니면 매 틱 merged 값으로 갱신한다:
     // 라이브 리드 세션이 있으면 제목·modelName/modelFlag 모두 그 세션 기준이고,
