@@ -56,6 +56,8 @@ export interface HcTerminalSummary {
   state?: string;
   status?: string;
   cwd?: string;
+  /** `hc ls --json` 선택 필드 — 실측 턴 카운터(정수일 때만 채택). */
+  turn?: number;
 }
 
 /** `hc get <addr> --json` 터미널 항목(상세) — argv 포함. */
@@ -84,6 +86,8 @@ export interface LiveWorkerInfo {
   activity: string;
   /** `hc` 터미널 상태('working'·'done' 등) — 카드 완료 표시·완료 로그 판정용(선택). */
   status?: string | null;
+  /** `hc ls --json` 실측 턴 카운터 — 카드 텔레메트리 라인에 그대로 노출. */
+  turn?: number;
 }
 
 /** `mergeLiveRosterLabels` 결과 — cli.ts가 AppState에 반영할 값의 묶음. */
@@ -439,6 +443,7 @@ export function inferLiveWorkerSlot(
     repoTag: extractRepoTag(detail.cwd),
     activity,
     status: detail.status ?? null,
+    turn: detail.turn,
   };
 }
 
@@ -595,6 +600,7 @@ function normalizeTerminal(raw: Record<string, unknown>): HcTerminalSummary | nu
     state: typeof raw['state'] === 'string' ? raw['state'] : undefined,
     status,
     cwd: typeof raw['cwd'] === 'string' ? raw['cwd'] : undefined,
+    turn: typeof raw['turn'] === 'number' ? raw['turn'] : undefined,
   };
 }
 

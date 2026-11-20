@@ -17,8 +17,8 @@
 //! - 워커 중단은 단일 클릭으로 절대 실행되지 않는다: ① 제어 허용 토글 ② 중단 버튼
 //!   ③ 확인 버튼의 3단계 관문 + 주소가 현재 live 워커 목록에 있는 재검증.
 
-use std::collections::HashMap;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -33,14 +33,13 @@ use dgate_core::live_sync::{
 };
 use dgate_core::redact::redact_secrets;
 use dgate_core::report::{generate_rule_candidate_report, DecisionApiShadowSummary, ReportOptions};
-use dgate_core::roster::{
-    load_roster_config, resolve_roster_profile, RoleSlot, ROLE_SLOTS,
-};
+use dgate_core::roster::{load_roster_config, resolve_roster_profile, RoleSlot, ROLE_SLOTS};
 use dgate_core::stats::{
     compute_cost_stats, compute_timing_stats, CostByStatus, CostStatsOptions, CostStatsResult,
-    CostTokensSummary, SHARP_FLOOR, TimingStatsOptions, TimingStatsResult,
+    CostTokensSummary, TimingStatsOptions, TimingStatsResult, SHARP_FLOOR,
 };
 use dgate_core::telemetry::{heuristic_prior_routes, read_telemetry_snapshot, TelemetryRoute};
+use dgate_core::task_progress::{read_repo_task_progress, TaskProgress};
 
 /// 기본 폴링 주기(ms) — brief 계약 2000ms.
 pub const DEFAULT_POLL_MS: u64 = 2000;
@@ -192,7 +191,10 @@ DB는 항상 읽기전용으로만 엽니다. 워커 중단은 '제어 허용' �
 
 /// 인자 벡터 → GuiCliOptions. 값 누락·비숫자 poll-ms·알 수 없는 플래그는 Err.
 pub fn parse_gui_cli_options(args: &[String]) -> Result<GuiCliOptions, String> {
-    let mut opts = GuiCliOptions { poll_ms: DEFAULT_POLL_MS, ..Default::default() };
+    let mut opts = GuiCliOptions {
+        poll_ms: DEFAULT_POLL_MS,
+        ..Default::default()
+    };
     let mut i = 0usize;
     while i < args.len() {
         let arg = args[i].as_str();
@@ -318,6 +320,9 @@ pub struct DashboardSnapshot {
     pub parent_map: HashMap<String, String>,
     /// "연결됨" | "DB 없음 (대기)" — 파일 부재에도 절대 죽지 않는다.
     pub db_status: String,
+    /// 레포 마크다운에서 읽은 실제 태스크 진행률 — 체크박스가 없으면 None
+    /// (가짜 진행률 바는 절대 그리지 않는다).
+    pub task_progress: Option<TaskProgress>,
     pub hc_available: bool,
 }
 
@@ -441,10 +446,7 @@ pub fn repo_root_from_cwd(cwd: Option<&str>) -> Option<PathBuf> {
 }
 
 /// 워커 repo_tag들 + `--repo` basename → 중복 제거·정렬된 탭 목록.
-pub fn build_detected_repos(
-    workers: &[LiveWorkerInfo],
-    repo_dir: Option<&Path>,
-) -> Vec<String> {
+pub fn build_detected_repos(workers: &[LiveWorkerInfo], repo_dir: Option<&Path>) -> Vec<String> {
     let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for w in workers {
         if !w.repo_tag.is_empty() {
@@ -468,7 +470,10 @@ pub fn build_detected_repos(
 /// - `repo == Some(name)` → 워커는 해당 repo_tag만, 라우트·비용·시간·shadow는
 ///   `repo_stats[name]` 번들로 교체(번들 미 존재 시 전역 값 유지 — 위장 조회 금지).
 /// - `detected_repos`는 탭 바 표시용이므로 항상 전체 목록을 보존한다.
-pub fn filter_snapshot_by_repo(snapshot: &DashboardSnapshot, repo: Option<&str>) -> DashboardSnapshot {
+pub fn filter_snapshot_by_repo(
+    snapshot: &DashboardSnapshot,
+    repo: Option<&str>,
+) -> DashboardSnapshot {
     let Some(name) = repo.map(str::trim).filter(|s| !s.is_empty()) else {
         return snapshot.clone();
     };
@@ -521,7 +526,11 @@ pub fn visible_worker_columns(worker_count: usize) -> usize {
 /// 보장한다. 역할 카드(Lead/Verifier/Advisor)의 running은 어차피 live 워커
 /// 존재에서 유도되므로 워커 상태 기준 이 판정 하나로 충분하다.
 pub fn has_active_work(snap: &DashboardSnapshot, demo_mode: bool) -> bool {
-    demo_mode || snap.workers.iter().any(|w| w.status.as_deref() != Some("done"))
+    demo_mode
+        || snap
+            .workers
+            .iter()
+            .any(|w| w.status.as_deref() != Some("done"))
 }
 
 /// 초 단위 경과 → "MM:SS" 0채움(3600초 이상은 "HH:MM:SS") — 워커 경과 타이머 표기.
@@ -554,7 +563,11 @@ pub fn smooth_pulse_opacity(
     let phase = continuous_phase(elapsed_secs, speed_hz, offset);
     let breath = (phase * std::f32::consts::TAU).sin() * 0.5 + 0.5;
     let value = min_op + (max_op - min_op) * breath;
-    let (lo, hi) = if min_op <= max_op { (min_op, max_op) } else { (max_op, min_op) };
+    let (lo, hi) = if min_op <= max_op {
+        (min_op, max_op)
+    } else {
+        (max_op, min_op)
+    };
     value.clamp(lo, hi)
 }
 
@@ -639,10 +652,18 @@ impl KillExecutor for DefaultKillExecutor {
             return Err(format!(
                 "hc kill 실패 (exit {:?}){}",
                 out.status.code(),
-                if stderr.is_empty() { String::new() } else { format!(": {}", stderr) }
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", stderr)
+                }
             ));
         }
-        Ok(if stdout.is_empty() { "ok".to_string() } else { stdout })
+        Ok(if stdout.is_empty() {
+            "ok".to_string()
+        } else {
+            stdout
+        })
     }
 }
 
@@ -768,7 +789,9 @@ impl DashboardController {
             }
         }
         for w in &snap.workers {
-            self.worker_started_at.entry(w.address.clone()).or_insert_with(Instant::now);
+            self.worker_started_at
+                .entry(w.address.clone())
+                .or_insert_with(Instant::now);
             if w.status.as_deref() == Some("done")
                 && !self.worker_done_elapsed.contains_key(&w.address)
             {
@@ -780,8 +803,10 @@ impl DashboardController {
         }
         let live: std::collections::HashSet<&str> =
             snap.workers.iter().map(|w| w.address.as_str()).collect();
-        self.worker_started_at.retain(|addr, _| live.contains(addr.as_str()));
-        self.worker_done_elapsed.retain(|addr, _| live.contains(addr.as_str()));
+        self.worker_started_at
+            .retain(|addr, _| live.contains(addr.as_str()));
+        self.worker_done_elapsed
+            .retain(|addr, _| live.contains(addr.as_str()));
         self.snapshot = Some(snap);
     }
 
@@ -810,8 +835,14 @@ impl DashboardController {
 
     pub fn toggle_pause(&mut self) {
         self.paused = !self.paused;
-        self.last_action_message =
-            Some(if self.paused { "폴링 일시정지" } else { "폴링 재개" }.to_string());
+        self.last_action_message = Some(
+            if self.paused {
+                "폴링 일시정지"
+            } else {
+                "폴링 재개"
+            }
+            .to_string(),
+        );
     }
 
     /// LIVE ↔ DEMO 전환 — DEMO 진입 시 확인 상태를 해제한다(가상 주소 차단).
@@ -841,8 +872,14 @@ impl DashboardController {
         if !self.control_enabled {
             self.confirm_kill_address = None;
         }
-        self.last_action_message =
-            Some(if self.control_enabled { "제어 허용 — 2단계 확인 후 중단 가능" } else { "관측 전용" }.to_string());
+        self.last_action_message = Some(
+            if self.control_enabled {
+                "제어 허용 — 2단계 확인 후 중단 가능"
+            } else {
+                "관측 전용"
+            }
+            .to_string(),
+        );
     }
 
     /// 중단 1단계 — 제어 허용 + live 목록 주소일 때만 확인 상태 진입.
@@ -857,13 +894,16 @@ impl DashboardController {
             return false;
         }
         if self.demo_mode {
-            self.last_action_message =
-                Some("DEMO 모드에서는 워커 중단을 실행할 수 없습니다 — LIVE로 전환하세요".to_string());
+            self.last_action_message = Some(
+                "DEMO 모드에서는 워커 중단을 실행할 수 없습니다 — LIVE로 전환하세요".to_string(),
+            );
             return false;
         }
         if !snap.workers.iter().any(|w| w.address == address) {
-            self.last_action_message =
-                Some(format!("live 워커 목록에 없는 주소 — 중단 요청 거부: {}", address));
+            self.last_action_message = Some(format!(
+                "live 워커 목록에 없는 주소 — 중단 요청 거부: {}",
+                address
+            ));
             return false;
         }
         self.confirm_kill_address = Some(address.to_string());
@@ -881,8 +921,7 @@ impl DashboardController {
         if still_live {
             Some(addr)
         } else {
-            self.last_action_message =
-                Some("확인 대상 워커가 이미 종료되었습니다".to_string());
+            self.last_action_message = Some("확인 대상 워커가 이미 종료되었습니다".to_string());
             None
         }
     }
@@ -1061,7 +1100,11 @@ fn aggregate_global_routes(bundles: &[RepoStatsBundle]) -> Vec<RouteMetric> {
                     });
                 return route_metric_from(prior);
             }
-            let p = matches.iter().map(|r| r.p * r.samples.max(0) as f64).sum::<f64>() / total as f64;
+            let p = matches
+                .iter()
+                .map(|r| r.p * r.samples.max(0) as f64)
+                .sum::<f64>()
+                / total as f64;
             let measured = matches.iter().any(|r| r.basis == "measured");
             let forced = matches.iter().any(|r| r.forced_split);
             RouteMetric {
@@ -1144,21 +1187,41 @@ fn repo_roots_from_workers(workers: &[LiveWorkerInfo]) -> BTreeMap<String, Optio
 
 /// 폴러 1틱 — live 로스터 + 읽기전용 DB 조립. 어떤 오류(SPA 경합·DB 부재)에도
 /// 죽지 않고 대기 상태 스냅숏을 반환한다. 순수 데이터 조립이라 창 없이 테스트 가능.
+/// 첫 live 워커의 cwd(공백 제거 후 비어 있지 않을 때만) — 태스크 진행률
+/// 대상 레포를 유도하는 폴백 경로.
+fn workers_first_cwd(workers: &[LiveWorkerInfo]) -> Option<PathBuf> {
+    workers
+        .iter()
+        .filter_map(|w| w.cwd.as_deref())
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .map(PathBuf::from)
+}
+
+/// 폴러 1틱이 만드는 불변 대시보드 스냅숏.
 pub fn poll_once(cfg: &PollerConfig, snapshotter: &mut LiveSyncSnapshotter) -> DashboardSnapshot {
     let repo_dir = cfg
         .repo_dir
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
-
     // 1) live hc 워커 + roster 라벨 병합(모든 hc 오류는 내부에서 조용히 폴백)
     let merged = snapshotter.tick_now();
+    // 태스크 진행률 대상 레포 — --repo 지정이면 그것, 아니면 첫 live 워커의
+    // cwd(비어 있지 않을 때), 그것도 없으면 현재 작업 디렉터리.
+    // `read_repo_task_progress`는 엄격 읽기전용(64KiB 상한)이라 폴링 비용이 미미하다.
+    let task_repo_dir = cfg
+        .repo_dir
+        .clone()
+        .or_else(|| workers_first_cwd(&merged.workers))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
     let workers = merged.workers.clone();
     // 1b) 부모 매핑 — 워커 카드 '← 부모' 표시용 읽기전용 조회(오류 시 빈 맵).
     let parent_map = fetch_parent_map(&cfg.hc_bin);
 
     // 2) roster 대기 스펙(프로필 해석은 live_sync와 동일 규칙: defaultProfile)
     let loaded = load_roster_config(cfg.roster_path.as_deref(), Some(&repo_dir));
-    let (profile_name, profile, _) = resolve_roster_profile(&loaded.config, &loaded.config.default_profile);
+    let (profile_name, profile, _) =
+        resolve_roster_profile(&loaded.config, &loaded.config.default_profile);
 
     let roles: Vec<RoleCardData> = ROLE_SLOTS
         .iter()
@@ -1193,7 +1256,10 @@ pub fn poll_once(cfg: &PollerConfig, snapshotter: &mut LiveSyncSnapshotter) -> D
     let db_str = db_resolved.to_string_lossy().into_owned();
     let conn = open_db(
         Some(db_str.as_str()),
-        OpenDbOptions { read_only: true, busy_timeout_ms: Some(1000) },
+        OpenDbOptions {
+            read_only: true,
+            busy_timeout_ms: Some(1000),
+        },
     )
     .ok();
 
@@ -1216,15 +1282,24 @@ pub fn poll_once(cfg: &PollerConfig, snapshotter: &mut LiveSyncSnapshotter) -> D
                 let pid_ref = project_id.as_deref().map(|s| s.to_string());
                 let cost = compute_cost_stats(
                     db,
-                    &CostStatsOptions { project_id: pid_ref.clone(), ..Default::default() },
+                    &CostStatsOptions {
+                        project_id: pid_ref.clone(),
+                        ..Default::default()
+                    },
                 );
                 let timing = compute_timing_stats(
                     db,
-                    &TimingStatsOptions { project_id: pid_ref.clone(), ..Default::default() },
+                    &TimingStatsOptions {
+                        project_id: pid_ref.clone(),
+                        ..Default::default()
+                    },
                 );
                 let shadow = generate_rule_candidate_report(
                     db,
-                    &ReportOptions { project_id: pid_ref, ..Default::default() },
+                    &ReportOptions {
+                        project_id: pid_ref,
+                        ..Default::default()
+                    },
                 )
                 .decision_api_shadow;
                 (Some(cost), Some(timing), Some(shadow))
@@ -1233,7 +1308,13 @@ pub fn poll_once(cfg: &PollerConfig, snapshotter: &mut LiveSyncSnapshotter) -> D
         };
         repo_stats.insert(
             tag.clone(),
-            RepoStatsBundle { project_id, routes, cost, timing, shadow },
+            RepoStatsBundle {
+                project_id,
+                routes,
+                cost,
+                timing,
+                shadow,
+            },
         );
     }
 
@@ -1242,8 +1323,8 @@ pub fn poll_once(cfg: &PollerConfig, snapshotter: &mut LiveSyncSnapshotter) -> D
         Some(db) => {
             let cost = compute_cost_stats(db, &CostStatsOptions::default());
             let timing = compute_timing_stats(db, &TimingStatsOptions::default());
-            let shadow = generate_rule_candidate_report(db, &ReportOptions::default())
-                .decision_api_shadow;
+            let shadow =
+                generate_rule_candidate_report(db, &ReportOptions::default()).decision_api_shadow;
             (Some(cost), Some(timing), Some(shadow))
         }
         None => (None, None, None),
@@ -1263,10 +1344,7 @@ pub fn poll_once(cfg: &PollerConfig, snapshotter: &mut LiveSyncSnapshotter) -> D
         roles,
         workers,
         agy_live_count,
-        detected_repos: build_detected_repos(
-            merged.workers.as_slice(),
-            cfg.repo_dir.as_deref(),
-        ),
+        detected_repos: build_detected_repos(merged.workers.as_slice(), cfg.repo_dir.as_deref()),
         routes: global_routes,
         cost_summary: global_cost,
         timing_summary: global_timing,
@@ -1276,6 +1354,7 @@ pub fn poll_once(cfg: &PollerConfig, snapshotter: &mut LiveSyncSnapshotter) -> D
         parent_map,
         db_status,
         hc_available: probe_hc_available(&cfg.hc_bin),
+        task_progress: read_repo_task_progress(&task_repo_dir),
     }
 }
 
@@ -1300,6 +1379,7 @@ fn demo_worker(slot: RoleSlot, name: &str, activity: &str, short_model: &str) ->
         repo_tag: "demo-app".to_string(),
         activity: activity.to_string(),
         status: Some("working".to_string()),
+        turn: Some(14),
     }
 }
 
@@ -1315,13 +1395,7 @@ fn demo_role(slot: &str, title: &str, model: &str, running: bool) -> RoleCardDat
     }
 }
 
-fn demo_route(
-    id: &str,
-    name: &str,
-    p: f64,
-    samples: i64,
-    decision: DecisionLabel,
-) -> RouteMetric {
+fn demo_route(id: &str, name: &str, p: f64, samples: i64, decision: DecisionLabel) -> RouteMetric {
     RouteMetric {
         id: id.to_string(),
         name: name.to_string(),
@@ -1339,13 +1413,29 @@ pub fn demo_snapshot() -> DashboardSnapshot {
     let routes = vec![
         demo_route("file_select", "어느 파일", 0.86, 128, DecisionLabel::Sharp),
         demo_route("tool_select", "어느 도구", 0.74, 96, DecisionLabel::Sharp),
-        demo_route("delegate_swarm", "스웜 위임", 0.62, 47, DecisionLabel::Split),
-        demo_route("retry_or_abort", "재시도 또는 중단", 0.31, 22, DecisionLabel::Split),
+        demo_route(
+            "delegate_swarm",
+            "스웜 위임",
+            0.62,
+            47,
+            DecisionLabel::Split,
+        ),
+        demo_route(
+            "retry_or_abort",
+            "재시도 또는 중단",
+            0.31,
+            22,
+            DecisionLabel::Split,
+        ),
     ];
     let cost = CostStatsResult {
         schema_v1: false,
         total_events: 48,
-        by_status: CostByStatus { reported: 40, estimated: 5, unknown: 3 },
+        by_status: CostByStatus {
+            reported: 40,
+            estimated: 5,
+            unknown: 3,
+        },
         per_status: Default::default(),
         reported_usd: 3.28,
         estimated_usd: 0.61,
@@ -1488,6 +1578,12 @@ pub fn demo_snapshot() -> DashboardSnapshot {
         ]),
         db_status: "DEMO 시뮬레이션".to_string(),
         hc_available: true,
+        task_progress: Some(TaskProgress {
+            source_name: "TODO.md".to_string(),
+            done: 3,
+            total: 5,
+            pct: 60,
+        }),
     }
 }
 
@@ -1507,11 +1603,7 @@ impl SharedPollerState {
     /// 현재 스냅숏을 (버전과 함께) 원자적으로 읽는다.
     pub fn take(&self) -> (u64, Option<DashboardSnapshot>) {
         let version = self.version.load(Ordering::SeqCst);
-        let snap = self
-            .snapshot
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or(None);
+        let snap = self.snapshot.lock().map(|g| g.clone()).unwrap_or(None);
         (version, snap)
     }
 }
@@ -1572,11 +1664,9 @@ pub fn spawn_poller(cfg: PollerConfig) -> (PollerHandle, PollerJoinHandle) {
         .spawn(move || {
             let sync_opts = LiveSyncOptions {
                 repo_filter_dir: cfg.repo_dir.clone(),
-                ..LiveSyncOptions::new(
-                    cfg.repo_dir
-                        .clone()
-                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))),
-                )
+                ..LiveSyncOptions::new(cfg.repo_dir.clone().unwrap_or_else(|| {
+                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+                }))
             };
             let mut snapshotter = LiveSyncSnapshotter::new(sync_opts);
             loop {
@@ -1600,8 +1690,15 @@ pub fn spawn_poller(cfg: PollerConfig) -> (PollerHandle, PollerJoinHandle) {
         })
         .expect("dgate-gui 폴러 스레드 기동 실패");
 
-    let handle = PollerHandle { shared: shared.clone(), wake_tx: wake_tx.clone() };
-    let join_handle = PollerJoinHandle { shared, wake_tx, join: Some(join) };
+    let handle = PollerHandle {
+        shared: shared.clone(),
+        wake_tx: wake_tx.clone(),
+    };
+    let join_handle = PollerJoinHandle {
+        shared,
+        wake_tx,
+        join: Some(join),
+    };
     (handle, join_handle)
 }
 
@@ -1636,8 +1733,15 @@ mod tests {
     #[test]
     fn cli_parses_all_flags() {
         let o = parse_gui_cli_options(&args(&[
-            "--db", "/tmp/x.db", "--repo", "/tmp/repo", "--roster", "/tmp/r.json",
-            "--watch-only", "--poll-ms", "500",
+            "--db",
+            "/tmp/x.db",
+            "--repo",
+            "/tmp/repo",
+            "--roster",
+            "/tmp/r.json",
+            "--watch-only",
+            "--poll-ms",
+            "500",
         ]))
         .unwrap();
         assert_eq!(o.db_path.as_deref(), Some("/tmp/x.db"));
@@ -1662,8 +1766,8 @@ mod tests {
         assert!(o.demo);
         assert!(!o.watch_only);
         // 다른 플래그와 조합 가능
-        let o2 = parse_gui_cli_options(&args(&["--demo", "--watch-only", "--poll-ms", "250"]))
-            .unwrap();
+        let o2 =
+            parse_gui_cli_options(&args(&["--demo", "--watch-only", "--poll-ms", "250"])).unwrap();
         assert!(o2.demo);
         assert!(o2.watch_only);
         assert_eq!(o2.poll_ms, 250);
@@ -1700,6 +1804,7 @@ mod tests {
             repo_tag: repo.to_string(),
             activity: "테스트 활동 줄".to_string(),
             status: Some("working".to_string()),
+            turn: None,
         }
     }
 
@@ -1751,6 +1856,7 @@ mod tests {
             parent_map: HashMap::new(),
             db_status: "연결됨".to_string(),
             hc_available: true,
+            task_progress: None,
         }
     }
 
@@ -1840,28 +1946,39 @@ mod tests {
         // 읽기전용으로만 다시 연다 — fetch는 조회만 한다
         let ro = open_db(
             Some(db_path.to_str().unwrap()),
-            OpenDbOptions { read_only: true, busy_timeout_ms: Some(500) },
+            OpenDbOptions {
+                read_only: true,
+                busy_timeout_ms: Some(500),
+            },
         )
         .unwrap();
         let entries = fetch_recent_log(&ro, 6);
         assert_eq!(entries.len(), 6, "limit 존중");
         // 최신순 — 첫 줄이 가장 최근 이벤트(i=9, 실패 + 시크릿 스니펫)
         assert!(entries[0].message.contains("실패"));
-        assert!(entries[0].message.contains("<redacted>"), "Bearer 토큰 리댁션");
+        assert!(
+            entries[0].message.contains("<redacted>"),
+            "Bearer 토큰 리댁션"
+        );
         assert!(!entries[0].message.contains("sk-test1234567890abcdef"));
         assert!(entries[0].time_hhmmss.len() == 8);
         // 역할 매핑 — neon_backprop→Verifier, delegate_swarm→Worker, wrap+tool_select→Decision Gate
         assert!(entries.iter().any(|e| e.source_role == "Verifier"));
         assert!(entries.iter().any(|e| e.source_role == "Worker"));
         assert!(entries.iter().any(|e| e.source_role == "Decision Gate"));
-        assert!(entries.iter().all(|e| e.project_id.as_deref() == Some("proj-log")));
+        assert!(entries
+            .iter()
+            .all(|e| e.project_id.as_deref() == Some("proj-log")));
         // 존재하지 않는 테이블(빈 DB)·limit 0 — 패닉 없이 안전 폴백
         let empty_db = tmp.join("empty.db");
         let w = open_db(empty_db.to_str(), OpenDbOptions::default()).unwrap();
         drop(w);
         let ro2 = open_db(
             Some(empty_db.to_str().unwrap()),
-            OpenDbOptions { read_only: true, busy_timeout_ms: None },
+            OpenDbOptions {
+                read_only: true,
+                busy_timeout_ms: None,
+            },
         )
         .unwrap();
         assert_eq!(fetch_recent_log(&ro2, 6).len(), 0);
@@ -2031,11 +2148,18 @@ mod tests {
         assert_eq!(demo.workers.len(), 5, "DEMO는 5역할 카드를 모두 제시");
         assert_eq!(demo.detected_repos, vec!["demo-app".to_string()]);
         assert!(demo.db_status.contains("DEMO"));
-        assert!(!demo.recent_log.is_empty(), "DEMO에도 세션 기록 미리보기가 있다");
+        assert!(
+            !demo.recent_log.is_empty(),
+            "DEMO에도 세션 기록 미리보기가 있다"
+        );
 
         c.toggle_demo_mode();
         assert!(!c.demo_mode);
-        assert_eq!(c.filtered().workers.len(), 2, "LIVE 복귀 시 실제 스냅숏 재개");
+        assert_eq!(
+            c.filtered().workers.len(),
+            2,
+            "LIVE 복귀 시 실제 스냅숏 재개"
+        );
     }
 
     #[test]
@@ -2045,7 +2169,10 @@ mod tests {
         assert_eq!(s.routes.len(), 4);
         assert!(s.routes.iter().any(|r| r.decision == DecisionLabel::Sharp));
         assert!(s.routes.iter().any(|r| r.decision == DecisionLabel::Split));
-        assert!(s.routes.iter().all(|r| r.basis == "measured" && r.samples > 0));
+        assert!(s
+            .routes
+            .iter()
+            .all(|r| r.basis == "measured" && r.samples > 0));
         // 5역할 로스터 전부 실행 중 + 비용/시간/shadow 요약 존재
         assert_eq!(s.roles.len(), 5);
         assert!(s.roles.iter().all(|r| r.running));
@@ -2054,7 +2181,10 @@ mod tests {
         assert!(s.shadow_summary.is_some());
         // 세션 기록 역할 태그는 TUI 5색 역할 안에서만
         let known = ["Decision Gate", "Worker", "Verifier", "Advisor", "Lead"];
-        assert!(s.recent_log.iter().all(|e| known.contains(&e.source_role.as_str())));
+        assert!(s
+            .recent_log
+            .iter()
+            .all(|e| known.contains(&e.source_role.as_str())));
     }
 
     #[test]
@@ -2081,10 +2211,19 @@ mod tests {
     fn kill_worker_safe_rejects_unknown_monitor_and_arbitrary() {
         let known = vec![
             worker("addr-a", "w-1", "alpha", None),
-            LiveWorkerInfo { name: "dg-monitor".into(), ..worker("addr-mon", "dg-monitor", "x", None) },
-            LiveWorkerInfo { name: "mon-9".into(), ..worker("addr-mon2", "mon-9", "x", None) },
+            LiveWorkerInfo {
+                name: "dg-monitor".into(),
+                ..worker("addr-mon", "dg-monitor", "x", None)
+            },
+            LiveWorkerInfo {
+                name: "mon-9".into(),
+                ..worker("addr-mon2", "mon-9", "x", None)
+            },
         ];
-        let exec = RecordingKill { calls: StdMutex::new(vec![]), result: Ok("killed".into()) };
+        let exec = RecordingKill {
+            calls: StdMutex::new(vec![]),
+            result: Ok("killed".into()),
+        };
 
         // 알려진 워커만 통과
         assert!(kill_worker_safe("addr-a", &known, "hc", &exec).is_ok());
@@ -2105,7 +2244,10 @@ mod tests {
     #[test]
     fn kill_worker_safe_propagates_executor_failure() {
         let known = vec![worker("addr-a", "w-1", "alpha", None)];
-        let exec = RecordingKill { calls: StdMutex::new(vec![]), result: Err("exit 1".into()) };
+        let exec = RecordingKill {
+            calls: StdMutex::new(vec![]),
+            result: Err("exit 1".into()),
+        };
         let res = kill_worker_safe("addr-a", &known, "hc", &exec);
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("exit 1"));
@@ -2279,14 +2421,21 @@ mod tests {
         // 레포 번들 — 실측 라우트 + 비용 + shadow
         let bundle = snap.repo_stats.get("my-gui-repo").unwrap();
         assert_eq!(bundle.project_id.as_deref(), Some(pid.as_str()));
-        let file_route = bundle.routes.iter().find(|r| r.id == "file_select").unwrap();
+        let file_route = bundle
+            .routes
+            .iter()
+            .find(|r| r.id == "file_select")
+            .unwrap();
         assert_eq!(file_route.basis, "measured");
         assert_eq!(file_route.samples, 8);
         assert_eq!(file_route.decision, DecisionLabel::Sharp);
         let cost = bundle.cost.as_ref().unwrap();
         assert!((cost.known_usd - 1.25).abs() < 1e-9);
         assert_eq!(cost.unknown_events, 1);
-        assert_eq!(cost.total_usd_display, None, "불변식 C-1: unknown>0 → 총액 None");
+        assert_eq!(
+            cost.total_usd_display, None,
+            "불변식 C-1: unknown>0 → 총액 None"
+        );
         assert_eq!(cost.tokens.input, 100000);
         let shadow = bundle.shadow.as_ref().unwrap();
         assert_eq!(shadow.total, 1);
@@ -2304,7 +2453,10 @@ mod tests {
         // 세션 기록 — 삽입한 decision_events 2건이 최신순으로 조회된다
         assert_eq!(snap.recent_log.len(), 2);
         assert!(snap.recent_log.iter().all(|e| e.source == "wrap"));
-        assert!(snap.recent_log.iter().all(|e| e.source_role == "Decision Gate"));
+        assert!(snap
+            .recent_log
+            .iter()
+            .all(|e| e.source_role == "Decision Gate"));
         assert!(snap.recent_log.iter().all(|e| !e.message.is_empty()));
 
         // 레포 필터링 연결 확인 — filtered 뷰도 동일 번들로 교체된다
@@ -2419,7 +2571,11 @@ mod tests {
         for i in 0..200 {
             let t = i as f32 * 0.013;
             let op = smooth_pulse_opacity(t, 0.9, 0.25, 0.45, 1.0);
-            assert!((0.45..=1.0).contains(&op), "불투명도 {}가 [0.45,1.0] 밖", op);
+            assert!(
+                (0.45..=1.0).contains(&op),
+                "불투명도 {}가 [0.45,1.0] 밖",
+                op
+            );
         }
         // min==max — 불변 출력
         assert_eq!(smooth_pulse_opacity(1.23, 0.9, 0.0, 0.5, 0.5), 0.5);
@@ -2493,7 +2649,11 @@ mod tests {
     #[test]
     fn lead_display_count_matches_lead_card_state() {
         let mut snap = snapshot_fixture(); // coder 워커 2명 실행 중, lead 슬롯 없음
-        assert_eq!(lead_display_count(&snap), 1, "하위 워커 실행 중 → 조율 중 1");
+        assert_eq!(
+            lead_display_count(&snap),
+            1,
+            "하위 워커 실행 중 → 조율 중 1"
+        );
         // 전원 done — Lead 카드 '대기 중' → 카운터 0
         for w in &mut snap.workers {
             w.status = Some("done".to_string());
@@ -2535,18 +2695,46 @@ mod tests {
         ];
         let parts = partition_sessions_by_role(&workers);
         assert_eq!(
-            parts.leads.iter().map(|w| w.address.as_str()).collect::<Vec<_>>(),
+            parts
+                .leads
+                .iter()
+                .map(|w| w.address.as_str())
+                .collect::<Vec<_>>(),
             vec!["t155", "t165"],
             "같은 레포 lead 2세션이 주소 기준으로 구분된다"
         );
-        assert_eq!(parts.verifiers.iter().map(|w| w.address.as_str()).collect::<Vec<_>>(), vec!["t182"]);
-        assert_eq!(parts.advisors.iter().map(|w| w.address.as_str()).collect::<Vec<_>>(), vec!["t902"]);
         assert_eq!(
-            parts.sub_workers.iter().map(|w| w.address.as_str()).collect::<Vec<_>>(),
+            parts
+                .verifiers
+                .iter()
+                .map(|w| w.address.as_str())
+                .collect::<Vec<_>>(),
+            vec!["t182"]
+        );
+        assert_eq!(
+            parts
+                .advisors
+                .iter()
+                .map(|w| w.address.as_str())
+                .collect::<Vec<_>>(),
+            vec!["t902"]
+        );
+        assert_eq!(
+            parts
+                .sub_workers
+                .iter()
+                .map(|w| w.address.as_str())
+                .collect::<Vec<_>>(),
             vec!["t900", "t901", "t903"]
         );
         // 전원 합산 보존 — 어느 세션도 사라지거나 중복되지 않는다
-        assert_eq!(parts.leads.len() + parts.verifiers.len() + parts.advisors.len() + parts.sub_workers.len(), workers.len());
+        assert_eq!(
+            parts.leads.len()
+                + parts.verifiers.len()
+                + parts.advisors.len()
+                + parts.sub_workers.len(),
+            workers.len()
+        );
         // 빈 입력 — 전부 빈 분할
         let empty = partition_sessions_by_role(&[]);
         assert_eq!(empty, RolePartitions::default());
@@ -2606,7 +2794,11 @@ mod tests {
         );
         // 형식 불일치·빈 응답·실행 실패 — 전부 빈 맵 폴백(패닉 없음)
         for bad in ["", "not json", "{\"rows\":[]}", "[]"] {
-            assert!(fetch_parent_map_with("hc", &ParentMock(bad)).is_empty(), "입력: {:?}", bad);
+            assert!(
+                fetch_parent_map_with("hc", &ParentMock(bad)).is_empty(),
+                "입력: {:?}",
+                bad
+            );
         }
         struct Failing;
         impl dgate_core::live_sync::HcExecRunner for Failing {
@@ -2648,10 +2840,19 @@ mod tests {
         assert_eq!(p.verifier_width, DEFAULT_VERIFIER_WIDTH);
         assert_eq!(p.log_height, DEFAULT_LOG_HEIGHT);
         assert_eq!(p.value_of(DragTarget::AdvisorWidth), DEFAULT_ADVISOR_WIDTH);
-        assert_eq!(p.value_of(DragTarget::VerifierWidth), DEFAULT_VERIFIER_WIDTH);
+        assert_eq!(
+            p.value_of(DragTarget::VerifierWidth),
+            DEFAULT_VERIFIER_WIDTH
+        );
         assert_eq!(p.value_of(DragTarget::LogHeight), DEFAULT_LOG_HEIGHT);
         // Default 트레잇이 명시 값과 일치(파생 Default의 0.0이 아니어야 한다)
-        assert_ne!(PanelSizes::default(), PanelSizes { advisor_width: 0.0, ..PanelSizes::default() });
+        assert_ne!(
+            PanelSizes::default(),
+            PanelSizes {
+                advisor_width: 0.0,
+                ..PanelSizes::default()
+            }
+        );
     }
 
     #[test]
@@ -2659,13 +2860,22 @@ mod tests {
         let mut p = PanelSizes::default();
         // AdvisorWidth — +델타(오른쪽 드래그) widen
         p.apply_drag(DragTarget::AdvisorWidth, DEFAULT_ADVISOR_WIDTH, 52.0);
-        assert!((p.advisor_width - 300.0).abs() < 1e-6, "오른쪽 드래그는 Advisor를 넓힌다");
+        assert!(
+            (p.advisor_width - 300.0).abs() < 1e-6,
+            "오른쪽 드래그는 Advisor를 넓힌다"
+        );
         // VerifierWidth — -델타(왼쪽 드래그) widen (우측 패널)
         p.apply_drag(DragTarget::VerifierWidth, DEFAULT_VERIFIER_WIDTH, -40.0);
-        assert!((p.verifier_width - 280.0).abs() < 1e-6, "왼쪽 드래그는 Verifier를 넓힌다");
+        assert!(
+            (p.verifier_width - 280.0).abs() < 1e-6,
+            "왼쪽 드래그는 Verifier를 넓힌다"
+        );
         // LogHeight — -델타(위로 드래그) heighten (하단 패널)
         p.apply_drag(DragTarget::LogHeight, DEFAULT_LOG_HEIGHT, -60.0);
-        assert!((p.log_height - 164.0).abs() < 1e-6, "위로 드래그는 세션 기록을 높인다");
+        assert!(
+            (p.log_height - 164.0).abs() < 1e-6,
+            "위로 드래그는 세션 기록을 높인다"
+        );
         // 반대 방향은 축소
         let mut q = PanelSizes::default();
         q.apply_drag(DragTarget::AdvisorWidth, DEFAULT_ADVISOR_WIDTH, -48.0);
@@ -2695,7 +2905,10 @@ mod tests {
         q.apply_drag(DragTarget::LogHeight, DEFAULT_LOG_HEIGHT, 10_000.0);
         assert_eq!(q.log_height, MIN_LOG_HEIGHT);
         // 경계 밖 start_val로 시작해도 클램프가 값을 되돌린다(불변식 회복)
-        let mut r = PanelSizes { log_height: MAX_LOG_HEIGHT, ..PanelSizes::default() };
+        let mut r = PanelSizes {
+            log_height: MAX_LOG_HEIGHT,
+            ..PanelSizes::default()
+        };
         r.apply_drag(DragTarget::LogHeight, MAX_LOG_HEIGHT, 0.0);
         assert_eq!(r.log_height, MAX_LOG_HEIGHT);
     }

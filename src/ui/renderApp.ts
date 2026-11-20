@@ -652,7 +652,22 @@ function renderMainPanel(buf: CellBuffer, state: AppState, L: FullLayout): void 
     }
     buf.writeSegmentsCentered(ix, cy++, iw, phaseSegs);
   }
-  if (cy < R.y + R.h - 1) {
+  // 실측 태스크 진행률 — 체크박스 파일이 있을 때만. 없으면 아무것도 그리지 않는다.
+  // 패널 내부 폭이 협소(표시 가능 줄이 제한적)할 땐 modelFlag 줄 대신 이 줄을 보여준다.
+  const tp = state.taskProgress;
+  if (tp && tp.total > 0) {
+    const tpText = `태스크 ${tp.done}/${tp.total} (${tp.pct}%) · ${tp.sourceName}`;
+    if (cy < R.y + R.h - 2) {
+      if (cy < R.y + R.h - 1) {
+        buf.writeCentered(ix, cy++, iw, state.modelFlag, THEME.muted, panelBg, false);
+      }
+      if (cy < R.y + R.h - 1) {
+        buf.writeCentered(ix, cy++, iw, tpText, THEME.green, panelBg, false);
+      }
+    } else if (cy < R.y + R.h - 1) {
+      buf.writeCentered(ix, cy++, iw, tpText, THEME.green, panelBg, false);
+    }
+  } else if (cy < R.y + R.h - 1) {
     buf.writeCentered(ix, cy++, iw, state.modelFlag, THEME.muted, panelBg, false);
   }
 }
@@ -931,13 +946,40 @@ function renderSwarmSection(buf: CellBuffer, state: AppState, L: FullLayout): vo
       buf.writeCentered(ix, cy++, iw, card.model, THEME.blue, cardBg, false);
     }
 
-    // 프로그레스 바 + 우측 라벨 — 실행 중 카드는 두 종류 모두 살아 움직인다.
-    // ① 진행률 0%(라이브 부재 활성)은 흘러가는 블록 바 + 스피너+경과시간.
-    //    우측 라벨 폭만큼 barW를 줄여 `⠋ 01:24` 같은 7자 라벨이 바를 밀어내지 않게 한다.
-    // ② 0%<p<100%(트랜스크립트/데모)은 진행 바 위를 쓸고 지나가는 밝은 하이라이트 셀.
-    // idle/done 카드는 simTime과 무관하게 항상 동일하게 그린다(침착 대기 불변식).
+    // 진행 표시 — GPUI 정렬: LIVE/WATCH의 실측 카드(progress 0/완료)는 무의미한
+    // 빈·흐르는 바 대신 스피너+실측 경과+턴의 중앙 텔레메트리 라인. 데모 모드 또는
+    // 명시 진행률(0<p<100)일 때만 바를 그린다(0% 활성 바·쉬머 포함).
+    // idle 카드는 simTime과 무관하게 항상 동일하게 그린다(침착 대기 불변식).
     if (cy < cardRect.y + cardRect.h - 1) {
-      if (motion && card.status === 'running' && card.progress === 0) {
+      const showBar = state.mode === 'demo' || (card.progress > 0 && card.progress < 100);
+      if (!showBar && motion) {
+        const isDoneLive = card.status === 'done' || card.progress >= 100;
+        const isIdleLive = card.status === 'idle' || card.status === 'error';
+        const turnSuffix = typeof card.turn === 'number' ? ` · turn ${card.turn}` : '';
+        let line: string;
+        let fg: number;
+        let bold: boolean;
+        if (isDoneLive) {
+          line =
+            '✓ 완료' +
+            (typeof card.elapsedSec === 'number' ? ` · ${formatElapsedMmss(card.elapsedSec)}` : '') +
+            turnSuffix;
+          fg = THEME.green;
+          bold = true;
+        } else if (isIdleLive) {
+          line = card.status === 'error' ? '✕ 오류' : '▪ 대기 중';
+          fg = card.status === 'error' ? THEME.trafficRed : THEME.muted;
+          bold = false;
+        } else {
+          line =
+            `${spinnerFrame(state.simTime, idx)} 실행 중 · ` +
+            (typeof card.elapsedSec === 'number' ? formatElapsedMmss(card.elapsedSec) : 'RUN') +
+            turnSuffix;
+          fg = THEME.blue;
+          bold = true;
+        }
+        buf.writeCentered(ix, cy, iw, line, fg, cardBg, bold);
+      } else if (motion && card.status === 'running' && card.progress === 0) {
         const rightLabel =
           typeof card.elapsedSec === 'number'
             ? `${spinnerFrame(state.simTime, idx)} ${formatElapsedMmss(card.elapsedSec)}`
@@ -1349,7 +1391,40 @@ function renderCompactLayout(buf: CellBuffer, state: AppState, L: CompactLayout)
       if (cy >= B.y + B.h - 1) break;
       buf.writeText(ix, cy, padRightWidth(c.name, 10), THEME.blue, THEME.bg, true);
       const barW = Math.max(10, iw - 28);
-      if (motion && c.status === 'running' && c.progress === 0) {
+      // GPUI 정렬 — 데모/명시 진행률(0<p<100)일 때만 바. LIVE/WATCH 실측 카드는
+      // 스피너+실측 경과+턴 텔레메트리 라인으로 대체(빈/흐르는 바 금지).
+      const showBar = state.mode === 'demo' || (c.progress > 0 && c.progress < 100);
+      if (!showBar && motion) {
+        const turnSuffix = typeof c.turn === 'number' ? ` · turn ${c.turn}` : '';
+        const isDoneLive = c.status === 'done' || c.progress >= 100;
+        if (isDoneLive) {
+          buf.writeRight(
+            ix,
+            cy,
+            iw,
+            '✓ 완료' +
+              (typeof c.elapsedSec === 'number' ? ` · ${formatElapsedMmss(c.elapsedSec)}` : '') +
+              turnSuffix,
+            THEME.green,
+            THEME.bg,
+            true
+          );
+        } else if (c.status === 'running') {
+          buf.writeRight(
+            ix,
+            cy,
+            iw,
+            `${spinnerFrame(state.simTime, idx)} 실행 중 · ` +
+              (typeof c.elapsedSec === 'number' ? formatElapsedMmss(c.elapsedSec) : 'RUN') +
+              turnSuffix,
+            THEME.blue,
+            THEME.bg,
+            true
+          );
+        } else {
+          buf.writeRight(ix, cy, iw, c.status === 'error' ? '✕ 오류' : '▪ 대기 중', THEME.muted, THEME.bg, false);
+        }
+      } else if (motion && c.status === 'running' && c.progress === 0) {
         drawIndeterminateBar(buf, ix + 11, cy, barW, THEME.blue, THEME.bgBlueTrack, state.simTime, idx);
         buf.writeRight(ix, cy, iw, typeof c.elapsedSec === 'number' ? `${spinnerFrame(state.simTime, idx)} ${formatElapsedMmss(c.elapsedSec)}` : `${spinnerFrame(state.simTime, idx)} RUN`, THEME.blue, THEME.bg, true);
       } else {

@@ -57,6 +57,8 @@ pub struct HcTerminalSummary {
     pub state: Option<String>,
     pub status: Option<String>,
     pub cwd: Option<String>,
+    /// `hc ls --json`의 `turn` — 현재까지 실측된 턴 수(관측 불가 시 None).
+    pub turn: Option<u64>,
 }
 
 impl HcTerminalSummary {
@@ -68,20 +70,21 @@ impl HcTerminalSummary {
         }
         let status = match raw.get("status") {
             Some(Value::String(s)) => Some(s.clone()),
-            Some(v) if v.is_object() => v
-                .get("state")
-                .and_then(Value::as_str)
-                .map(str::to_string),
+            Some(v) if v.is_object() => v.get("state").and_then(Value::as_str).map(str::to_string),
             _ => None,
         };
         Some(HcTerminalSummary {
             address: address.to_string(),
             agent: raw.get("agent").and_then(Value::as_str).map(str::to_string),
             name: raw.get("name").and_then(Value::as_str).map(str::to_string),
-            parent: raw.get("parent").and_then(Value::as_str).map(str::to_string),
+            parent: raw
+                .get("parent")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             state: raw.get("state").and_then(Value::as_str).map(str::to_string),
             status,
             cwd: raw.get("cwd").and_then(Value::as_str).map(str::to_string),
+            turn: raw.get("turn").and_then(Value::as_u64),
         })
     }
 }
@@ -170,6 +173,8 @@ pub struct LiveWorkerInfo {
     pub activity: String,
     /// `hc` 터미널 상태('working'·'done' 등) — 카드 완료 표시·완료 로그 판정용(선택).
     pub status: Option<String>,
+    /// `hc ls` 실측 턴 수 — LIVE 카드 'turn N' pill 원천(관측 불가 시 None).
+    pub turn: Option<u64>,
 }
 
 /// `merge_live_roster_labels` 결과 — AppState에 반영할 값의 묶음.
@@ -190,7 +195,15 @@ pub struct MergedLiveRoster {
 
 /// 제외할 셸·비워커 에이전트 (antigravity는 리드 관측 대상이지 워커가 아니다).
 const SHELL_AGENTS: [&str; 9] = [
-    "zsh", "bash", "fish", "sh", "ksh", "dash", "pwsh", "powershell.exe", "antigravity",
+    "zsh",
+    "bash",
+    "fish",
+    "sh",
+    "ksh",
+    "dash",
+    "pwsh",
+    "powershell.exe",
+    "antigravity",
 ];
 
 /// parent 매칭 판정에 쓰는 워커 CLI 에이전트 목록.
@@ -198,7 +211,15 @@ const PARENT_MATCH_AGENTS: [&str; 5] = ["pi", "devin", "claude", "codex", "gemin
 
 /// 워커 세션명 접두 — herdr-quad-launch/dispatch가 만드는 이름 규약.
 const WORKER_NAME_PREFIXES: [&str; 9] = [
-    "w-", "exp-", "explore-", "coder", "verify-", "verifier-", "lead-", "advisor-", "carbon-",
+    "w-",
+    "exp-",
+    "explore-",
+    "coder",
+    "verify-",
+    "verifier-",
+    "lead-",
+    "advisor-",
+    "carbon-",
 ];
 
 fn re_monitor_name() -> &'static regex::Regex {
@@ -233,7 +254,15 @@ pub fn is_worker_terminal(t: &HcTerminalSummary) -> bool {
 
 /// 최상위 활성 AI 에이전트 세션으로 인정하는 에이전트 집합 — 관측 대상 확장용.
 /// 셸(zsh/bash/…)·python3·dgate-gui는 절대 포함하지 않는다.
-const TOP_LEVEL_AI_AGENTS: [&str; 7] = ["antigravity", "pi", "claude", "codex", "devin", "gemini", "agy"];
+const TOP_LEVEL_AI_AGENTS: [&str; 7] = [
+    "antigravity",
+    "pi",
+    "claude",
+    "codex",
+    "devin",
+    "gemini",
+    "agy",
+];
 
 /// 모니터·GUI 전용 세션명 — 최상위 세션 관측에서도 제외.
 fn is_monitor_or_gui_name(name: &str) -> bool {
@@ -257,7 +286,11 @@ pub fn is_active_top_level_session(t: &HcTerminalSummary) -> bool {
     if t.status.as_deref() != Some("working") {
         return false;
     }
-    if t.parent.as_deref().map(str::trim).is_some_and(|p| !p.is_empty()) {
+    if t.parent
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|p| !p.is_empty())
+    {
         return false;
     }
     let name = t.name.as_deref().unwrap_or("");
@@ -368,9 +401,7 @@ fn re_hc_status_line() -> &'static regex::Regex {
 fn re_box_only_line() -> &'static regex::Regex {
     use std::sync::OnceLock;
     static RE: OnceLock<regex::Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        regex::Regex::new(r"^[\s─═┌┐└┘│├┤┬┴┼║╔╗╚╝╠╣╦╩╬\-_=·]+$").unwrap()
-    })
+    RE.get_or_init(|| regex::Regex::new(r"^[\s─═┌┐└┘│├┤┬┴┼║╔╗╚╝╠╣╦╩╬\-_=·]+$").unwrap())
 }
 
 fn re_spinner_only_line() -> &'static regex::Regex {
@@ -443,7 +474,10 @@ pub fn extract_last_activity_line(raw_screen: Option<&str>, max_chars: usize) ->
             continue;
         }
         // 시크릿 리덕션은 절단 이전에(레댁션 계약 — 잘린 경계 무효화 방지)
-        let safe = re_whitespace_run().replace_all(&redact_secrets(&line), " ").trim().to_string();
+        let safe = re_whitespace_run()
+            .replace_all(&redact_secrets(&line), " ")
+            .trim()
+            .to_string();
         if safe.is_empty() {
             continue;
         }
@@ -510,7 +544,10 @@ fn strip_dg_wrap_prefix(tokens: &[String]) -> &[String] {
 }
 
 /// argv(+agent 폴백)에서 실제 워커 CLI 이름과 `--model` 값을 찾는다.
-fn parse_worker_cli_and_model(argv: &[String], fallback_agent: Option<&str>) -> (String, Option<String>) {
+fn parse_worker_cli_and_model(
+    argv: &[String],
+    fallback_agent: Option<&str>,
+) -> (String, Option<String>) {
     let cleaned: Vec<String> = argv.iter().filter(|t| !t.is_empty()).cloned().collect();
     let once = strip_env_prefix(&cleaned).to_vec();
     let twice_outer = strip_dg_wrap_prefix(&once).to_vec();
@@ -600,12 +637,7 @@ pub fn roster_labels_from_profile(
         profile
             .roles
             .get(slot)
-            .map(|spec| {
-                format_role_badge(
-                    spec.cli.as_str(),
-                    spec.model.as_deref(),
-                )
-            })
+            .map(|spec| format_role_badge(spec.cli.as_str(), spec.model.as_deref()))
             .unwrap_or_else(|| "—".to_string())
     };
     RosterDisplayLabels {
@@ -623,7 +655,10 @@ pub fn roster_labels_from_profile(
 /// 슬롯은 ① argv의 `HERDR_ROLE=`(carbon→advisor) ② 세션명 규약(verify-/exp-/carbon-/lead-
 /// …) 순으로 판정하고, CLI·모델은 `env`·`dg wrap` 래퍼를 벗겨낸 뒤 실제 CLI와
 /// `--model`에서 읽는다(실패 시 `detail.agent` 폴백).
-pub fn infer_live_worker_slot(detail: &HcTerminalDetail, raw_screen: Option<&str>) -> Option<LiveWorkerInfo> {
+pub fn infer_live_worker_slot(
+    detail: &HcTerminalDetail,
+    raw_screen: Option<&str>,
+) -> Option<LiveWorkerInfo> {
     if detail.address.is_empty() {
         return None;
     }
@@ -634,7 +669,10 @@ pub fn infer_live_worker_slot(detail: &HcTerminalDetail, raw_screen: Option<&str
     let mut role_from_argv = false;
     for token in &argv {
         if let Some(m) = re_herdr_role().captures(token) {
-            let role = m.get(1).map(|g| g.as_str().to_lowercase()).unwrap_or_default();
+            let role = m
+                .get(1)
+                .map(|g| g.as_str().to_lowercase())
+                .unwrap_or_default();
             slot = if role == "carbon" {
                 RoleSlot::Advisor
             } else {
@@ -681,11 +719,16 @@ pub fn infer_live_worker_slot(detail: &HcTerminalDetail, raw_screen: Option<&str
         short_model,
         model_name,
         address: detail.address.clone(),
-        name: if name.is_empty() { detail.address.clone() } else { name },
+        name: if name.is_empty() {
+            detail.address.clone()
+        } else {
+            name
+        },
         cwd: detail.cwd.clone(),
         repo_tag: extract_repo_tag(detail.cwd.as_deref()),
         activity,
         status: detail.status.clone(),
+        turn: None,
     })
 }
 
@@ -699,7 +742,11 @@ pub fn infer_live_worker_slot(detail: &HcTerminalDetail, raw_screen: Option<&str
 /// - `--model` 미파싱 시 shortModel·modelName을 agent명(예: 'antigravity')으로 폴백.
 pub fn normalize_top_level_worker(worker: &mut LiveWorkerInfo, summary: &HcTerminalSummary) {
     worker.slot = RoleSlot::Lead;
-    let name = summary.name.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let name = summary
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     if let Some(n) = name {
         worker.name = n.to_string();
     } else {
@@ -986,11 +1033,11 @@ impl LiveSyncSnapshotter {
 
     /// 현재 캐시 상태를 그대로 병합한 스냅숏(네트워크·프로세스 호출 없음).
     pub fn peek(&self) -> MergedLiveRoster {
-        let labels = self.base_labels.clone().unwrap_or_else(builtin_fallback_labels);
-        let watched = self
-            .get_watched_lead
-            .as_ref()
-            .and_then(|f| f());
+        let labels = self
+            .base_labels
+            .clone()
+            .unwrap_or_else(builtin_fallback_labels);
+        let watched = self.get_watched_lead.as_ref().and_then(|f| f());
         merge_live_roster_labels(&labels, watched.as_deref(), &self.last_workers)
     }
 
@@ -1007,7 +1054,10 @@ impl LiveSyncSnapshotter {
 
     fn run_tick(&mut self) -> MergedLiveRoster {
         self.reload_roster_labels();
-        let labels = self.base_labels.clone().unwrap_or_else(builtin_fallback_labels);
+        let labels = self
+            .base_labels
+            .clone()
+            .unwrap_or_else(builtin_fallback_labels);
 
         // 1) `hc ls --json` — 실행 오류·JSON 파싱 실패 모두 이전 워커 상태 유지(fail-safe).
         //    (파싱 실패 시 빈 목록으로 방송하면 워커 0건 + 허위 종료 로그가 터진다.)
@@ -1032,8 +1082,10 @@ impl LiveSyncSnapshotter {
         // 2) 상세 캐시 갱신 — 떠난 주소는 즉시 증발
         if let Some(summaries) = summaries {
             let active: HashSet<&str> = summaries.iter().map(|t| t.address.as_str()).collect();
-            self.detail_cache.retain(|addr, _| active.contains(addr.as_str()));
-            self.screen_cache.retain(|addr, _| active.contains(addr.as_str()));
+            self.detail_cache
+                .retain(|addr, _| active.contains(addr.as_str()));
+            self.screen_cache
+                .retain(|addr, _| active.contains(addr.as_str()));
 
             // 3) 워커별 상세·활동 수집 (활동 read는 틱당 상한)
             let mut workers: Vec<LiveWorkerInfo> = Vec::new();
@@ -1063,7 +1115,8 @@ impl LiveSyncSnapshotter {
                 detail.state = summary.state.clone().or(detail.state);
                 detail.status = summary.status.clone().or(detail.status);
                 detail.cwd = summary.cwd.clone().or(detail.cwd);
-                self.detail_cache.insert(summary.address.clone(), detail.clone());
+                self.detail_cache
+                    .insert(summary.address.clone(), detail.clone());
 
                 let mut screen: Option<String> = None;
                 if read_count < MAX_ACTIVITY_READS_PER_TICK {
@@ -1082,8 +1135,11 @@ impl LiveSyncSnapshotter {
                         }
                     }
                 }
-                let raw_screen = screen.or_else(|| self.screen_cache.get(&summary.address).cloned());
+                let raw_screen =
+                    screen.or_else(|| self.screen_cache.get(&summary.address).cloned());
                 if let Some(mut worker) = infer_live_worker_slot(&detail, raw_screen.as_deref()) {
+                    // 턴 수는 `hc ls` 요약의 실측값을 그대로 얹는다(detail 캐시에는 없음).
+                    worker.turn = summary.turn;
                     // 최상위 활성 AI 세션(워커 규약 밖 리드 등) — Lead 슬롯·표시명·
                     // shortModel 폴백을 정규화한다. 워커 규약 터미널은 그대로 둔다.
                     if is_active_top_level_session(summary) && !is_worker_terminal(summary) {
@@ -1180,6 +1236,7 @@ mod tests {
             state: Some(state.to_string()),
             status: None,
             cwd: None,
+            turn: None,
         }
     }
 
@@ -1197,32 +1254,100 @@ mod tests {
 
     #[test]
     fn worker_terminal_excludes_monitors_and_shells() {
-        assert!(!is_worker_terminal(&summary("dg-monitor", "pi", "live", None)));
-        assert!(!is_worker_terminal(&summary("dg-monitor-1", "pi", "live", None)));
+        assert!(!is_worker_terminal(&summary(
+            "dg-monitor",
+            "pi",
+            "live",
+            None
+        )));
+        assert!(!is_worker_terminal(&summary(
+            "dg-monitor-1",
+            "pi",
+            "live",
+            None
+        )));
         assert!(!is_worker_terminal(&summary("mon-x", "pi", "live", None)));
-        for shell in ["zsh", "bash", "fish", "sh", "ksh", "dash", "pwsh", "powershell.exe"] {
-            assert!(!is_worker_terminal(&summary("w-1", shell, "live", Some("lead"))), "{}", shell);
+        for shell in [
+            "zsh",
+            "bash",
+            "fish",
+            "sh",
+            "ksh",
+            "dash",
+            "pwsh",
+            "powershell.exe",
+        ] {
+            assert!(
+                !is_worker_terminal(&summary("w-1", shell, "live", Some("lead"))),
+                "{}",
+                shell
+            );
         }
-        assert!(!is_worker_terminal(&summary("w-1", "antigravity", "live", None)));
+        assert!(!is_worker_terminal(&summary(
+            "w-1",
+            "antigravity",
+            "live",
+            None
+        )));
         // 대소문자 혼합 에이전트도 소문자 정규화로 제외된다
-        assert!(!is_worker_terminal(&summary("w-1", "ZSH", "live", Some("p"))));
+        assert!(!is_worker_terminal(&summary(
+            "w-1",
+            "ZSH",
+            "live",
+            Some("p")
+        )));
     }
 
     #[test]
     fn worker_terminal_matches_name_prefix_or_parent_cli() {
-        for name in ["w-1", "exp-2", "explore-3", "coder1", "coder-x", "verify-1", "verifier-2", "lead-1", "advisor-9", "carbon-1"] {
-            assert!(is_worker_terminal(&summary(name, "pi", "live", None)), "{}", name);
+        for name in [
+            "w-1",
+            "exp-2",
+            "explore-3",
+            "coder1",
+            "coder-x",
+            "verify-1",
+            "verifier-2",
+            "lead-1",
+            "advisor-9",
+            "carbon-1",
+        ] {
+            assert!(
+                is_worker_terminal(&summary(name, "pi", "live", None)),
+                "{}",
+                name
+            );
         }
         // parent + 워커 CLI 조합
         for agent in ["pi", "devin", "claude", "codex", "gemini"] {
-            assert!(is_worker_terminal(&summary("some-session", agent, "live", Some("lead-addr"))));
+            assert!(is_worker_terminal(&summary(
+                "some-session",
+                agent,
+                "live",
+                Some("lead-addr")
+            )));
         }
         // parent가 있어도 워커 CLI가 아니면 제외
-        assert!(!is_worker_terminal(&summary("some-session", "python", "live", Some("x"))));
+        assert!(!is_worker_terminal(&summary(
+            "some-session",
+            "python",
+            "live",
+            Some("x")
+        )));
         // 이름 접두 없이 parent 없음 → 제외
-        assert!(!is_worker_terminal(&summary("random-name", "pi", "live", None)));
+        assert!(!is_worker_terminal(&summary(
+            "random-name",
+            "pi",
+            "live",
+            None
+        )));
         // agy는 parent 매칭 대상 아님(이름 접두로만 통과)
-        assert!(!is_worker_terminal(&summary("random-name", "agy", "live", Some("x"))));
+        assert!(!is_worker_terminal(&summary(
+            "random-name",
+            "agy",
+            "live",
+            Some("x")
+        )));
         assert!(is_worker_terminal(&summary("w-agy", "agy", "live", None)));
     }
 
@@ -1237,13 +1362,22 @@ mod tests {
             state: Some("live".to_string()),
             status: status.map(str::to_string),
             cwd: None,
+            turn: None,
         }
     }
 
     #[test]
     fn top_level_active_sessions_are_observable_as_lead() {
         // 긍정 — 최상위 working AI 에이전트는 관측된다(워커 규약 밖 포함)
-        for agent in ["antigravity", "pi", "claude", "codex", "devin", "gemini", "agy"] {
+        for agent in [
+            "antigravity",
+            "pi",
+            "claude",
+            "codex",
+            "devin",
+            "gemini",
+            "agy",
+        ] {
             let t = top_summary(&format!("paperwork-{}", agent), agent, Some("working"));
             assert!(is_active_top_level_session(&t), "{}", agent);
             assert!(is_observable_terminal(&t), "{}", agent);
@@ -1261,8 +1395,14 @@ mod tests {
     fn top_level_session_strict_exclusions() {
         // status 엄격 — idle/done/None 불가
         for status in [Some("idle"), Some("done"), None] {
-            assert!(!is_active_top_level_session(&top_summary("s", "antigravity", status)));
-            assert!(!is_active_top_level_session(&top_summary("s", "pi", status)));
+            assert!(!is_active_top_level_session(&top_summary(
+                "s",
+                "antigravity",
+                status
+            )));
+            assert!(!is_active_top_level_session(&top_summary(
+                "s", "pi", status
+            )));
         }
         // state 불일치
         let mut dead = top_summary("s", "pi", Some("working"));
@@ -1273,8 +1413,20 @@ mod tests {
         child.parent = Some("lead-addr".into());
         assert!(!is_active_top_level_session(&child));
         // 셸·런타임·모니터·GUI 제외
-        for agent in ["zsh", "bash", "sh", "node", "python3", "powershell.exe", "dgate-gui"] {
-            assert!(!is_active_top_level_session(&top_summary("s", agent, Some("working"))), "{}", agent);
+        for agent in [
+            "zsh",
+            "bash",
+            "sh",
+            "node",
+            "python3",
+            "powershell.exe",
+            "dgate-gui",
+        ] {
+            assert!(
+                !is_active_top_level_session(&top_summary("s", agent, Some("working"))),
+                "{}",
+                agent
+            );
         }
         for name in ["dg-monitor", "dg-monitor-x", "mon-x", "dgate-gui-main"] {
             let t = top_summary(name, "antigravity", Some("working"));
@@ -1314,7 +1466,10 @@ mod tests {
             extract_repo_tag(Some("/a/b/my-repo/.herdr/worktrees/coder1")),
             "my-repo"
         );
-        assert_eq!(extract_repo_tag(Some("/Users/x/proj/.herdr/worktrees/exp-1")), "proj");
+        assert_eq!(
+            extract_repo_tag(Some("/Users/x/proj/.herdr/worktrees/exp-1")),
+            "proj"
+        );
         // 역슬래시 정규화
         assert_eq!(
             extract_repo_tag(Some("C:\\work\\repo\\.herdr\\worktrees\\w1")),
@@ -1326,7 +1481,10 @@ mod tests {
     fn repo_tag_uses_basename_for_plain_cwd() {
         let tmp = temp_dir("repo-tag");
         std::fs::create_dir_all(&tmp).unwrap();
-        assert_eq!(extract_repo_tag(Some(tmp.to_str().unwrap())), tmp.file_name().unwrap().to_string_lossy());
+        assert_eq!(
+            extract_repo_tag(Some(tmp.to_str().unwrap())),
+            tmp.file_name().unwrap().to_string_lossy()
+        );
         // 미존재 상대경로도 resolve 폴백으로 basename
         assert_eq!(extract_repo_tag(Some("relative/dir")), "dir");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -1350,7 +1508,10 @@ mod tests {
 
     #[test]
     fn repo_scope_unknown_worker_cwd_is_excluded_when_scoped() {
-        assert!(!matches_repo_scope(None, Some("/Users/kwak/Projects/Gemini_trick")));
+        assert!(!matches_repo_scope(
+            None,
+            Some("/Users/kwak/Projects/Gemini_trick")
+        ));
         assert!(!matches_repo_scope(Some(""), Some("/repo")));
     }
 
@@ -1364,10 +1525,19 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         let repo_s = repo.to_str().unwrap().to_string();
         assert!(matches_repo_scope(Some(repo_s.as_str()), Some(&repo_s)));
-        assert!(matches_repo_scope(Some(wt.to_str().unwrap()), Some(&repo_s)));
-        assert!(!matches_repo_scope(Some(outside.to_str().unwrap()), Some(&repo_s)));
+        assert!(matches_repo_scope(
+            Some(wt.to_str().unwrap()),
+            Some(&repo_s)
+        ));
+        assert!(!matches_repo_scope(
+            Some(outside.to_str().unwrap()),
+            Some(&repo_s)
+        ));
         // 스코프가 워커 cwd의 상위여도 거짓 — 접두사 방향만 허용
-        assert!(!matches_repo_scope(Some(&repo_s), Some(wt.to_str().unwrap())));
+        assert!(!matches_repo_scope(
+            Some(&repo_s),
+            Some(wt.to_str().unwrap())
+        ));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1377,7 +1547,10 @@ mod tests {
         assert!(matches_repo_scope(Some("/Users/anywhere"), Some("/")));
         assert!(matches_repo_scope(Some("/"), Some("/")));
         // 스코프가 미존재 경로여도 resolve 폴백으로 접두사 판정
-        assert!(matches_repo_scope(Some("/definitely/missing/child"), Some("/definitely/missing")));
+        assert!(matches_repo_scope(
+            Some("/definitely/missing/child"),
+            Some("/definitely/missing")
+        ));
     }
 
     // ---------- strip_ansi·extract_last_activity_line ----------
@@ -1394,16 +1567,25 @@ mod tests {
     #[test]
     fn activity_picks_last_meaningful_line() {
         let screen = "\x1B[32mok line\x1B[0m\n\n   \nlast actual line";
-        assert_eq!(extract_last_activity_line(Some(screen), 68).as_deref(), Some("last actual line"));
+        assert_eq!(
+            extract_last_activity_line(Some(screen), 68).as_deref(),
+            Some("last actual line")
+        );
     }
 
     #[test]
     fn activity_skips_hc_footer_box_and_spinner_lines() {
         let screen = "real work\n[hc] idle\n─────────────\n╔════════╗\n⠋\n";
-        assert_eq!(extract_last_activity_line(Some(screen), 68).as_deref(), Some("real work"));
+        assert_eq!(
+            extract_last_activity_line(Some(screen), 68).as_deref(),
+            Some("real work")
+        );
         // 박스형 상태줄 '│ [hc] idle │' — 가장자리 제거 후 스킵
         let boxed = "keep me\n│ [hc] idle │";
-        assert_eq!(extract_last_activity_line(Some(boxed), 68).as_deref(), Some("keep me"));
+        assert_eq!(
+            extract_last_activity_line(Some(boxed), 68).as_deref(),
+            Some("keep me")
+        );
         // 상태줄만 있으면 None
         assert_eq!(extract_last_activity_line(Some("[hc] running"), 68), None);
         assert_eq!(extract_last_activity_line(Some("╚══════╝"), 68), None);
@@ -1413,9 +1595,15 @@ mod tests {
     #[test]
     fn activity_box_edges_stripped_from_content_lines() {
         let screen = "│ cat src/main.rs │";
-        assert_eq!(extract_last_activity_line(Some(screen), 68).as_deref(), Some("cat src/main.rs"));
+        assert_eq!(
+            extract_last_activity_line(Some(screen), 68).as_deref(),
+            Some("cat src/main.rs")
+        );
         let dbl = "║ double border ║";
-        assert_eq!(extract_last_activity_line(Some(dbl), 68).as_deref(), Some("double border"));
+        assert_eq!(
+            extract_last_activity_line(Some(dbl), 68).as_deref(),
+            Some("double border")
+        );
     }
 
     #[test]
@@ -1442,13 +1630,19 @@ mod tests {
         assert!(out2.ends_with('…'));
         // 경계값: 정확히 maxChars면 그대로
         let exact = "y".repeat(68);
-        assert_eq!(extract_last_activity_line(Some(&exact), 68).as_deref(), Some(exact.as_str()));
+        assert_eq!(
+            extract_last_activity_line(Some(&exact), 68).as_deref(),
+            Some(exact.as_str())
+        );
     }
 
     #[test]
     fn activity_collapses_whitespace_and_handles_crlf() {
         let screen = "a\t\tb   c\r\n";
-        assert_eq!(extract_last_activity_line(Some(screen), 68).as_deref(), Some("a b c"));
+        assert_eq!(
+            extract_last_activity_line(Some(screen), 68).as_deref(),
+            Some("a b c")
+        );
         assert_eq!(extract_last_activity_line(None, 68), None);
         assert_eq!(extract_last_activity_line(Some(""), 68), None);
     }
@@ -1491,7 +1685,13 @@ mod tests {
 
     // ---------- 슬롯·모델 추론 ----------
 
-    fn detail(addr: &str, name: &str, agent: &str, argv: &[&str], cwd: Option<&str>) -> HcTerminalDetail {
+    fn detail(
+        addr: &str,
+        name: &str,
+        agent: &str,
+        argv: &[&str],
+        cwd: Option<&str>,
+    ) -> HcTerminalDetail {
         HcTerminalDetail {
             address: addr.to_string(),
             agent: Some(agent.to_string()),
@@ -1591,7 +1791,13 @@ mod tests {
         assert_eq!(w2.short_model, "devin:1"); // cli- 접두 제거로 TS와 동일
 
         // 절대경로 CLI 토큰 basename 인식
-        let d3 = detail("c", "w-3", "pi", &["/usr/local/bin/codex", "--model", "gpt-5"], None);
+        let d3 = detail(
+            "c",
+            "w-3",
+            "pi",
+            &["/usr/local/bin/codex", "--model", "gpt-5"],
+            None,
+        );
         let w3 = infer_live_worker_slot(&d3, None).unwrap();
         assert_eq!(w3.model_name, "gpt-5");
         assert_eq!(w3.short_model, "codex:gpt-5");
@@ -1617,7 +1823,13 @@ mod tests {
         let w = infer_live_worker_slot(&d, None).unwrap();
         assert_eq!(w.model_name, "pi");
 
-        let d2 = detail("b", "w-2", "agy", &["agy", "--model", "gemini-4-neon-high"], None);
+        let d2 = detail(
+            "b",
+            "w-2",
+            "agy",
+            &["agy", "--model", "gemini-4-neon-high"],
+            None,
+        );
         let w2 = infer_live_worker_slot(&d2, None).unwrap();
         assert_eq!(w2.model_name, "gemini-4-neon-high");
         assert_eq!(w2.short_model, "agy:gemini-4-neon-high");
@@ -1642,7 +1854,13 @@ mod tests {
 
     #[test]
     fn infer_assembles_repo_tag_and_name_fallback() {
-        let d = detail("addr-9", "", "pi", &["pi"], Some("/r/my-repo/.herdr/worktrees/c1"));
+        let d = detail(
+            "addr-9",
+            "",
+            "pi",
+            &["pi"],
+            Some("/r/my-repo/.herdr/worktrees/c1"),
+        );
         let w = infer_live_worker_slot(&d, None).unwrap();
         assert_eq!(w.repo_tag, "my-repo");
         assert_eq!(w.name, "addr-9"); // 이름 없으면 address
@@ -1654,14 +1872,20 @@ mod tests {
     #[test]
     fn role_badge_formats() {
         assert_eq!(format_role_badge("pi", None), "pi");
-        assert_eq!(format_role_badge("pi", Some("glm-zcode/glm-5.3")), "pi:glm-5.3");
+        assert_eq!(
+            format_role_badge("pi", Some("glm-zcode/glm-5.3")),
+            "pi:glm-5.3"
+        );
         assert_eq!(format_role_badge("pi", Some("  ")), "pi");
         // 중복 접두 정규화 glm-glm-5.3 → glm-5.3
         assert_eq!(format_role_badge("pi", Some("x/glm-glm-5.3")), "pi:glm-5.3");
         assert_eq!(format_role_badge("devin", Some("devin-1")), "devin:1"); // cli- 접두 제거
-        // 경계: 중복이 아닌 접두는 유지
+                                                                            // 경계: 중복이 아닌 접두는 유지
         assert_eq!(format_role_badge("pi", Some("glm-5.3")), "pi:glm-5.3");
-        assert_eq!(format_role_badge("claude", Some("claude-sonnet-4-6")), "claude:sonnet-4-6");
+        assert_eq!(
+            format_role_badge("claude", Some("claude-sonnet-4-6")),
+            "claude:sonnet-4-6"
+        );
         assert_eq!(format_role_badge("devin", Some("default")), "devin:default");
     }
 
@@ -1684,13 +1908,16 @@ mod tests {
             slot,
             badge: format!("{} (실행 중)", short),
             short_model: short.to_string(),
-            model_name: model.map(str::to_string).unwrap_or_else(|| short.to_string()),
+            model_name: model
+                .map(str::to_string)
+                .unwrap_or_else(|| short.to_string()),
             address: format!("addr-{}", short),
             name: short.to_string(),
             cwd: None,
             repo_tag: "r".into(),
             activity: "a".into(),
             status: None,
+            turn: None,
         }
     }
 
@@ -1759,7 +1986,11 @@ mod tests {
     }
 
     impl MockHc {
-        fn new(ls_json: Vec<String>, details: HashMap<String, String>, screens: HashMap<String, String>) -> Self {
+        fn new(
+            ls_json: Vec<String>,
+            details: HashMap<String, String>,
+            screens: HashMap<String, String>,
+        ) -> Self {
             MockHc {
                 calls: Mutex::new(Vec::new()),
                 ls_json: Mutex::new(ls_json),
@@ -1780,10 +2011,10 @@ mod tests {
 
     impl HcExecRunner for MockHc {
         fn exec(&self, _file: &str, args: &[&str], _timeout_ms: u64) -> Result<String, String> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((args[0].to_string(), args.iter().map(|s| s.to_string()).collect()));
+            self.calls.lock().unwrap().push((
+                args[0].to_string(),
+                args.iter().map(|s| s.to_string()).collect(),
+            ));
             match args[0] {
                 "ls" => {
                     // tick마다 응답 1건씩 소진(선입선출)
@@ -1822,6 +2053,27 @@ mod tests {
             "status": "working",
             "cwd": "/tmp/repo-a"
         })
+    }
+
+    #[test]
+    fn snapshotter_propagates_hc_ls_turn_into_worker() {
+        let _g: MutexGuard<'_, ()> = env_lock();
+        let tmp = temp_dir("live-turn");
+        std::fs::create_dir_all(&tmp).unwrap();
+        isolate_env(&tmp);
+        let mut entry = worker_ls_entry("a1", "w-1");
+        entry["turn"] = serde_json::json!(14);
+        let ls = serde_json::json!({ "terminals": [entry] }).to_string();
+        let details = HashMap::from([(
+            "a1".to_string(),
+            serde_json::json!({ "address": "a1", "agent": "pi", "name": "w-1", "argv": ["pi"] })
+                .to_string(),
+        )]);
+        let mock = Arc::new(MockHc::new(vec![ls], details, HashMap::new()));
+        let mut snap = snapshot_with_mock(mock, &tmp);
+        let merged = snap.tick_now();
+        assert_eq!(merged.workers[0].turn, Some(14));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     fn snapshot_with_mock(mock: Arc<MockHc>, repo_dir: &Path) -> LiveSyncSnapshotter {
@@ -1952,17 +2204,28 @@ mod tests {
         let good = serde_json::json!({ "terminals": [worker_ls_entry("a1", "w-1")] }).to_string();
         let details = HashMap::from([(
             "a1".to_string(),
-            serde_json::json!({ "address": "a1", "agent": "pi", "name": "w-1", "argv": ["pi"] }).to_string(),
+            serde_json::json!({ "address": "a1", "agent": "pi", "name": "w-1", "argv": ["pi"] })
+                .to_string(),
         )]);
-        let mock = Arc::new(MockHc::new(vec![good, "not-json".to_string(), "{}".to_string()], details, HashMap::new()));
+        let mock = Arc::new(MockHc::new(
+            vec![good, "not-json".to_string(), "{}".to_string()],
+            details,
+            HashMap::new(),
+        ));
         let mut snap = snapshot_with_mock(mock, &tmp);
         let m1 = snap.tick_now();
         assert_eq!(m1.active_worker_count, 1);
         // 실행 오류·malformed·terminals 누락 모두 이전 워커 유지(허위 0건 방송 금지)
         let m2 = snap.tick_now();
-        assert_eq!(m2.active_worker_count, 1, "exec error must preserve workers");
+        assert_eq!(
+            m2.active_worker_count, 1,
+            "exec error must preserve workers"
+        );
         let m3 = snap.tick_now();
-        assert_eq!(m3.active_worker_count, 1, "{{}} payload must preserve workers");
+        assert_eq!(
+            m3.active_worker_count, 1,
+            "{{}} payload must preserve workers"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1982,7 +2245,10 @@ mod tests {
         let mut snap = snapshot_with_mock(mock, &tmp);
         assert_eq!(snap.tick_now().active_worker_count, 2);
         assert_eq!(snap.tick_now().active_worker_count, 1);
-        assert!(!snap.detail_cache.contains_key("a2"), "departed address must be evicted");
+        assert!(
+            !snap.detail_cache.contains_key("a2"),
+            "departed address must be evicted"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -2023,9 +2289,11 @@ mod tests {
         let mut outside = worker_ls_entry("a2", "w-2");
         outside["cwd"] = serde_json::json!("/tmp/other-repo");
         let ls = serde_json::json!({ "terminals": [inside, outside] }).to_string();
-        let details = HashMap::from([
-            ("a1".to_string(), serde_json::json!({ "address": "a1", "agent": "pi", "name": "w-1", "argv": ["pi"] }).to_string()),
-        ]);
+        let details = HashMap::from([(
+            "a1".to_string(),
+            serde_json::json!({ "address": "a1", "agent": "pi", "name": "w-1", "argv": ["pi"] })
+                .to_string(),
+        )]);
         let mock = Arc::new(MockHc::new(vec![ls], details, HashMap::new()));
         let _g: MutexGuard<'_, ()> = env_lock();
         isolate_env(&tmp);
@@ -2077,7 +2345,11 @@ mod tests {
         let repo = tmp.join("repo");
         std::fs::create_dir_all(repo.join(".herdr")).unwrap();
         let empty_ls = serde_json::json!({ "terminals": [] }).to_string();
-        let mock = Arc::new(MockHc::new(vec![empty_ls.clone(), empty_ls], HashMap::new(), HashMap::new()));
+        let mock = Arc::new(MockHc::new(
+            vec![empty_ls.clone(), empty_ls],
+            HashMap::new(),
+            HashMap::new(),
+        ));
         let mut snap = snapshot_with_mock(mock, &repo);
 
         let m1 = snap.tick_now();
@@ -2109,7 +2381,8 @@ mod tests {
         let ls = serde_json::json!({ "terminals": [worker_ls_entry("a1", "w-1")] }).to_string();
         let details = HashMap::from([(
             "a1".to_string(),
-            serde_json::json!({ "address": "a1", "agent": "pi", "name": "w-1", "argv": ["pi"] }).to_string(),
+            serde_json::json!({ "address": "a1", "agent": "pi", "name": "w-1", "argv": ["pi"] })
+                .to_string(),
         )]);
         let mock = Arc::new(MockHc::new(vec![ls], details, HashMap::new()));
         let mut snap = snapshot_with_mock(mock.clone(), &tmp);
@@ -2148,7 +2421,11 @@ mod tests {
         let m1 = snap.tick_now();
         assert_eq!(m1.workers[0].status.as_deref(), Some("working"));
         let m2 = snap.tick_now();
-        assert_eq!(m2.workers[0].status.as_deref(), Some("done"), "fresh ls status must override cached detail");
+        assert_eq!(
+            m2.workers[0].status.as_deref(),
+            Some("done"),
+            "fresh ls status must override cached detail"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -2160,7 +2437,8 @@ mod tests {
         isolate_env(&tmp);
         let labels = builtin_fallback_labels();
         let cfg = builtin_roster_config();
-        let expect = roster_labels_from_profile("quota-saver", "builtin", &cfg.profiles["quota-saver"]);
+        let expect =
+            roster_labels_from_profile("quota-saver", "builtin", &cfg.profiles["quota-saver"]);
         assert_eq!(labels, expect);
     }
 }

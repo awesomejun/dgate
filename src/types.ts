@@ -60,6 +60,10 @@ export interface SwarmCard {
   status: 'running' | 'done' | 'idle' | 'error';
   /** 라이브 워커 실측 경과 시간(초) — 렌더에서 MM:SS로 표시. 폴백 카드에는 없음. */
   elapsedSec?: number;
+  /** `hc ls --json` 실측 턴 카운터 — 라이브 카드 텔레메트리(선택). */
+  turn?: number;
+  /** 라이브 워커 hc 터미널 주소 — 경과 추적·디버그 식별용(선택). */
+  address?: string;
 }
 
 export interface SwarmWorker {
@@ -178,6 +182,9 @@ export interface AppState {
   logs: LogEntry[];
   logScrollOffset: number; // 0이면 최신 줄 고정, 양수면 과거로 스크롤
   logFilter: LogFilter;
+
+  /** 레포 마크다운 체크박스 실측 태스크 진행률(watch/live). 없으면 null — 가짜 진행률 금지 */
+  taskProgress?: { sourceName: string; done: number; total: number; pct: number } | null;
 
   // UI 인터랙션 상태
   focus: FocusTarget;

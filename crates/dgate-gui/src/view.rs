@@ -50,11 +50,10 @@ use gpui::{
 };
 
 use crate::state::{
-    continuous_phase, format_elapsed_mmss, has_active_work, kill_worker_safe,
-    lead_display_count, partition_sessions_by_role, smooth_pulse_opacity,
-    visible_worker_columns, DashboardController, DashboardSnapshot, DefaultKillExecutor,
-    DecisionLabel, DragTarget, GuiCliOptions, LogPanelSize, PollerHandle, RecentLogEntry,
-    RouteMetric, ACTIVE_ANIM_FRAME_MS, UI_REFRESH_TICK_MS,
+    continuous_phase, format_elapsed_mmss, has_active_work, kill_worker_safe, lead_display_count,
+    partition_sessions_by_role, smooth_pulse_opacity, visible_worker_columns, DashboardController,
+    DashboardSnapshot, DecisionLabel, DefaultKillExecutor, DragTarget, GuiCliOptions, LogPanelSize,
+    PollerHandle, RecentLogEntry, RouteMetric, ACTIVE_ANIM_FRAME_MS, UI_REFRESH_TICK_MS,
 };
 use dgate_core::live_sync::LiveWorkerInfo;
 use dgate_core::redact::redact_secrets;
@@ -244,7 +243,11 @@ impl DashboardView {
                     .child("DGATE"),
             )
             .child(pill(mode_text, mode_color, BG_CHROME))
-            .child(pill(format!("profile={}", snap.profile_name), MUTED, BG_CHROME))
+            .child(pill(
+                format!("profile={}", snap.profile_name),
+                MUTED,
+                BG_CHROME,
+            ))
             .when(!snap.hc_available && !self.controller.demo_mode, |el| {
                 el.child(pill("hc 없음", LEAD_ORANGE, BG_CHROME))
             });
@@ -262,9 +265,21 @@ impl DashboardView {
             .gap_3()
             .overflow_hidden()
             .child(counter_label("LEAD", lead_display_count(snap), LEAD_ORANGE))
-            .child(counter_label("WORKERS", parts.sub_workers.len(), WORKER_BLUE))
-            .child(counter_label("VERIFIES", parts.verifiers.len(), VERIFIER_NEON))
-            .child(counter_label("ADVISOR", parts.advisors.len(), ADVISOR_PURPLE));
+            .child(counter_label(
+                "WORKERS",
+                parts.sub_workers.len(),
+                WORKER_BLUE,
+            ))
+            .child(counter_label(
+                "VERIFIES",
+                parts.verifiers.len(),
+                VERIFIER_NEON,
+            ))
+            .child(counter_label(
+                "ADVISOR",
+                parts.advisors.len(),
+                ADVISOR_PURPLE,
+            ));
 
         // 우측 컨트롤 — LIVE/DEMO 토글 · 새로고침 · 일시정지 · 제어 허용
         let mut right = div().flex().flex_row().items_center().gap_2();
@@ -340,12 +355,12 @@ impl DashboardView {
             }),
         ));
         if !self.controller.watch_only {
-            let (control_label, control_color, control_active) =
-                if self.controller.control_enabled {
-                    ("제어 허용됨", ROSE_DANGER, true)
-                } else {
-                    ("제어 허용", MUTED, false)
-                };
+            let (control_label, control_color, control_active) = if self.controller.control_enabled
+            {
+                ("제어 허용됨", ROSE_DANGER, true)
+            } else {
+                ("제어 허용", MUTED, false)
+            };
             right = right.child(
                 div()
                     .id("btn-control")
@@ -355,8 +370,16 @@ impl DashboardView {
                     .h_8()
                     .rounded_md()
                     .border_1()
-                    .border_color(if control_active { control_color } else { BORDER_HEADER })
-                    .bg(if control_active { BG_ELEVATED } else { BG_CHROME })
+                    .border_color(if control_active {
+                        control_color
+                    } else {
+                        BORDER_HEADER
+                    })
+                    .bg(if control_active {
+                        BG_ELEVATED
+                    } else {
+                        BG_CHROME
+                    })
                     .hover(|s| s.border_color(control_color))
                     .text_size(px(12.))
                     .font_weight(FontWeight::MEDIUM)
@@ -534,7 +557,11 @@ impl DashboardView {
             .any(|w| w.slot.as_str() == "advisor" && worker_running(w));
         let advisors = partition_sessions_by_role(&snap.workers).advisors;
         let active = self.controller.demo_mode || advisor_running;
-        let border = if active { ADVISOR_PURPLE } else { BORDER_ADVISORY_IDLE };
+        let border = if active {
+            ADVISOR_PURPLE
+        } else {
+            BORDER_ADVISORY_IDLE
+        };
         let model = role_model_label(snap, "advisor");
         let (state_label, state_color) = if active {
             ("자문 중", ADVISOR_PURPLE)
@@ -629,6 +656,7 @@ impl DashboardView {
                 self.anim_secs,
                 false,
                 true,
+                false,
             ));
         }
         panel
@@ -702,7 +730,12 @@ impl DashboardView {
     /// 우측 4단 파이프라인 — Lead+Verifier → Decision Gate → Workers → 다시 Lead.
     /// 커넥터 스템 수는 하위 워커(sub_workers) 수와 정확히 일치한다(동적 N스템) —
     /// 리드/검증/자문 세션은 각자의 박스에만 나타나고 그리드로 중복 배치되지 않는다.
-    fn render_pipeline(&self, snap: &DashboardSnapshot, cx: &Context<Self>, vw: Pixels) -> gpui::Div {
+    fn render_pipeline(
+        &self,
+        snap: &DashboardSnapshot,
+        cx: &Context<Self>,
+        vw: Pixels,
+    ) -> gpui::Div {
         // 하위 워커만 그리드에 — 역할별 분할로 리드/검증/자문 세션을 제외한다.
         let sub_workers = partition_sessions_by_role(&snap.workers).sub_workers;
         // 보이는 워커 열 수 — 좁은 창(<820px)은 2열 상한(카드 가독성), 넓으면 최대 4열.
@@ -732,10 +765,7 @@ impl DashboardView {
                 .flex_col()
                 .gap_1()
                 .child(self.render_lead_card(snap))
-                .child(horizontal_wire(
-                    self.verifier_motion(snap),
-                    self.anim_secs,
-                ))
+                .child(horizontal_wire(self.verifier_motion(snap), self.anim_secs))
                 .child(self.render_verifier_card(snap, vw))
         } else {
             div()
@@ -780,8 +810,7 @@ impl DashboardView {
     /// 폭 확장, 더블클릭 기본폭 복귀. 핸들 자체가 고정 8px 트랙이라 드래그 중에도
     /// 레이아웃 지오메트리는 일정하다(무지터).
     fn render_advisor_splitter(&self, cx: &Context<Self>) -> gpui::Div {
-        let dragging =
-            matches!(self.active_drag, Some((DragTarget::AdvisorWidth, _, _)));
+        let dragging = matches!(self.active_drag, Some((DragTarget::AdvisorWidth, _, _)));
         div()
             .flex()
             .flex_row()
@@ -806,13 +835,11 @@ impl DashboardView {
                     cx.notify();
                 }),
             )
-            .child(
-                div()
-                    .w(px(2.))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(if dragging { ADVISOR_PURPLE } else { BORDER_ADVISORY_IDLE }),
-            )
+            .child(div().w(px(2.)).flex_none().rounded_full().bg(if dragging {
+                ADVISOR_PURPLE
+            } else {
+                BORDER_ADVISORY_IDLE
+            }))
     }
 
     /// Lead↔Verifier 와이어 전체를 Verifier 폭 드래그 핸들로(≥960px) — 왼쪽 드래그로
@@ -822,8 +849,7 @@ impl DashboardView {
         snap: &DashboardSnapshot,
         cx: &Context<Self>,
     ) -> gpui::Div {
-        let dragging =
-            matches!(self.active_drag, Some((DragTarget::VerifierWidth, _, _)));
+        let dragging = matches!(self.active_drag, Some((DragTarget::VerifierWidth, _, _)));
         div()
             .flex()
             .flex_row()
@@ -953,6 +979,49 @@ impl DashboardView {
                     .child(div().flex_1())
                     .child(state_pill),
             );
+        // 실제 태스크 진행률 바 — 레포 마크다운 체크박스 기반(가짜 바 금지).
+        // 없으면 아무것도 그리지 않는다(None → 0줄).
+        if let Some(tp) = &snap.task_progress {
+            card = card.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .h(px(16.))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(10.))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(LEAD_ORANGE)
+                            .child(format!("태스크 {}/{} ({}%)", tp.done, tp.total, tp.pct)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h(px(4.))
+                            .rounded_full()
+                            .bg(BG_GREEN_TRACK)
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w(relative(tp.pct as f32 / 100.0))
+                                    .rounded_full()
+                                    .bg(GATE_GREEN),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(9.))
+                            .text_color(MUTED)
+                            .truncate()
+                            .child(tp.source_name.clone()),
+                    ),
+            );
+        }
         if parts.leads.is_empty() {
             // 세션 없음 폴백 — 기존 단일 카드 표기(활동 1줄 + effort/profile).
             let activity = match snap.workers.iter().find(|w| w.slot.as_str() == "lead") {
@@ -990,6 +1059,7 @@ impl DashboardView {
                     self.anim_secs,
                     true,
                     true,
+                    false,
                 ));
             }
         }
@@ -1026,7 +1096,8 @@ impl DashboardView {
         card = if vw < px(960.) {
             card.w_full()
         } else {
-            card.w(px(self.controller.panel_sizes.verifier_width)).flex_shrink_0()
+            card.w(px(self.controller.panel_sizes.verifier_width))
+                .flex_shrink_0()
         };
         card = card.child(
             div()
@@ -1048,25 +1119,32 @@ impl DashboardView {
         );
         if parts.verifiers.is_empty() {
             // 진행 트랙 — 활성: 네온 알약이 좌↔우 글라이드 / 대기: 빈 트랙(위장 금지).
-            // 높이는 양쪽 다 5px 고정 — 카드 높이 점프 없음.
-            card = card
-                .child(if active {
+            // 데모 미리보기 전용 — LIVE에는 실측 텔레메트리만 보인다(높이 5px 고정).
+            if self.controller.demo_mode {
+                card = card.child(if active {
                     sliding_pill_track(BG_NEON_TRACK, VERIFIER_NEON, self.anim_secs, 0)
                 } else {
-                    div().flex().w_full().h(px(5.)).flex_none().rounded_full().bg(BG_NEON_TRACK)
-                })
-                .child(
                     div()
-                        .h(px(14.))
-                        .text_size(px(10.))
-                        .text_color(if active { VERIFIER_NEON } else { MUTED })
-                        .truncate()
-                        .child(if active {
-                            "◉ 계획·결과 교차 검토"
-                        } else {
-                            "○ 교차 검증 대기"
-                        }),
-                );
+                        .flex()
+                        .w_full()
+                        .h(px(5.))
+                        .flex_none()
+                        .rounded_full()
+                        .bg(BG_NEON_TRACK)
+                });
+            }
+            card = card.child(
+                div()
+                    .h(px(14.))
+                    .text_size(px(10.))
+                    .text_color(if active { VERIFIER_NEON } else { MUTED })
+                    .truncate()
+                    .child(if active {
+                        "◉ 계획·결과 교차 검토"
+                    } else {
+                        "○ 교차 검증 대기"
+                    }),
+            );
         } else {
             for (i, w) in parts.verifiers.iter().enumerate() {
                 let running = worker_running(w);
@@ -1083,12 +1161,22 @@ impl DashboardView {
                         self.anim_secs,
                         false,
                         false,
+                        !self.controller.demo_mode,
                     ))
-                    // 세션별 네온 트랙 — 실행 중 글라이드 / 완료 빈 트랙(높이 5px 고정).
-                    .child(if running {
-                        sliding_pill_track(BG_NEON_TRACK, VERIFIER_NEON, self.anim_secs, i)
-                    } else {
-                        div().flex().w_full().h(px(5.)).flex_none().rounded_full().bg(BG_NEON_TRACK)
+                    // 세션별 네온 트랙 — 데모 전용(활성 글라이드/완료 빈 트랙, 5px 고정).
+                    // LIVE는 스피너·주소·경과·turn 실측 텔레메트리 행이 정보를 대신한다.
+                    .when(self.controller.demo_mode, |el| {
+                        el.child(if running {
+                            sliding_pill_track(BG_NEON_TRACK, VERIFIER_NEON, self.anim_secs, i)
+                        } else {
+                            div()
+                                .flex()
+                                .w_full()
+                                .h(px(5.))
+                                .flex_none()
+                                .rounded_full()
+                                .bg(BG_NEON_TRACK)
+                        })
                     })
                     .child(
                         div()
@@ -1125,41 +1213,38 @@ impl DashboardView {
             .map(|s| format!("{}건", s.shadow_count))
             .unwrap_or_else(|| "0건".to_string());
 
-        let mut panel = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .p_2()
-            .rounded_lg()
-            .bg(BG_ELEVATED)
-            .border_1()
-            .border_color(GATE_GREEN)
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .min_h(px(16.))
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(GATE_GREEN)
-                            .child("Decision Gate · 분기 계층"),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(MUTED)
-                            .truncate()
-                            .child(format!(
+        let mut panel =
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_2()
+                .rounded_lg()
+                .bg(BG_ELEVATED)
+                .border_1()
+                .border_color(GATE_GREEN)
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .min_h(px(16.))
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(GATE_GREEN)
+                                .child("Decision Gate · 분기 계층"),
+                        )
+                        .child(div().flex_1())
+                        .child(div().text_size(px(10.)).text_color(MUTED).truncate().child(
+                            format!(
                                 "forks {} · 비용 {} · shadow {}",
                                 forks_label, cost_label, shadow_label
-                            )),
-                    ),
-            );
+                            ),
+                        )),
+                );
         // 표시 순서 — 강제분기 → split → sharp (TUI sortRoutesForDisplay와 동일)
         let mut routes = snap.routes.clone();
         routes.sort_by_key(route_rank);
@@ -1228,7 +1313,8 @@ impl DashboardView {
         idx: usize,
         parent: Option<&str>,
     ) -> gpui::Div {
-        let confirming = self.controller.confirm_kill_address.as_deref() == Some(w.address.as_str());
+        let confirming =
+            self.controller.confirm_kill_address.as_deref() == Some(w.address.as_str());
         let can_control = self.controller.control_enabled
             && !self.controller.watch_only
             && !self.controller.demo_mode;
@@ -1386,27 +1472,30 @@ impl DashboardView {
                             .child(w.short_model.clone()),
                     ),
             )
-            // 활동바 — 실행 중: WORKER_BLUE 알약이 좌↔우 연속 글라이드(실시간 미정
-            // 진행), 완료: 주소 해시의 안정 채움(애니메이션 없음, 완료율 아님).
-            // 양쪽 다 높이 5px 고정 — 카드 높이 점프 없음.
-            .child(if running {
-                sliding_pill_track(BG_BLUE_TRACK, WORKER_BLUE, self.anim_secs, idx)
-            } else {
-                div()
-                    .flex()
-                    .w_full()
-                    .h(px(5.))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(BG_BLUE_TRACK)
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .h_full()
-                            .w(relative(frac))
-                            .rounded_full()
-                            .bg(WORKER_BLUE),
-                    )
+            // 진행바 — DEMO 미리보기 전용: 실행 중 WORKER_BLUE 알약이 좌↔우 연속
+            // 글라이드, 완료는 주소 해시 안정 채움. 높이 5px 고정 — 카드 높이 점프 없음.
+            // LIVE는 의미 없는 가짜 진행바 대신 아래 텔레메트리 행(스피너·실측 경과·
+            // turn·주소·부모)이 100% 실측 정보를 보여준다.
+            .when(self.controller.demo_mode, |el| {
+                el.child(if running {
+                    sliding_pill_track(BG_BLUE_TRACK, WORKER_BLUE, self.anim_secs, idx)
+                } else {
+                    div()
+                        .flex()
+                        .w_full()
+                        .h(px(5.))
+                        .flex_none()
+                        .rounded_full()
+                        .bg(BG_BLUE_TRACK)
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .h_full()
+                                .w(relative(frac))
+                                .rounded_full()
+                                .bg(WORKER_BLUE),
+                        )
+                })
             })
             .child(
                 div()
@@ -1443,6 +1532,37 @@ impl DashboardView {
                                 Some(t) => format!("✓ 완료 · {}", t),
                                 None => "✓ 완료".to_string(),
                             })
+                    })
+                    // LIVE 실측 텔레메트리 — turn pill(`hc ls` 관측 턴 수, Some일 때)
+                    // + 주소 pill(세션 식별자). DEMO는 위 진행바가 정보를 대신한다.
+                    .when(!self.controller.demo_mode && w.turn.is_some(), |el| {
+                        el.child(pill(
+                            format!("turn {}", w.turn.unwrap_or(0)),
+                            WORKER_BLUE,
+                            BG,
+                        ))
+                    })
+                    .when(!self.controller.demo_mode, |el| {
+                        el.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .px_1()
+                                .h(px(14.))
+                                .min_w(px(30.))
+                                .max_w(px(60.))
+                                .flex_none()
+                                .rounded_sm()
+                                .bg(BG)
+                                .border_1()
+                                .border_color(WORKER_BLUE)
+                                .text_size(px(9.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(WORKER_BLUE)
+                                .truncate()
+                                .child(w.address.clone()),
+                        )
                     })
                     // 부모 리드 표시 — 어느 Lead 세션이 이 워커를 스폰했는지(미상 생략).
                     .when(parent.is_some(), |el| {
@@ -1624,7 +1744,11 @@ impl DashboardView {
         } else {
             LEAD_ORANGE
         };
-        let verifier_state = if verifier_active(snap) { "검증중" } else { "대기" };
+        let verifier_state = if verifier_active(snap) {
+            "검증중"
+        } else {
+            "대기"
+        };
         let forks = match &snap.timing_summary {
             Some(t) if !t.intervals_unavailable && t.forks_total > 0 => t.forks_total,
             _ => 0,
@@ -1642,34 +1766,38 @@ impl DashboardView {
                     .truncate()
                     .child(format!("DB {} · {}", snap.db_status, self.db_path_label)),
             )
-            .child(
-                div()
-                    .text_size(px(10.))
-                    .text_color(MUTED)
-                    .child(format!(
-                        "{} · {}",
-                        self.poll_interval_label,
-                        if self.controller.paused { "일시정지됨" } else { "폴링" }
-                    )),
-            )
-            .when(
-                self.controller.last_action_message.is_some(),
-                |el| {
-                    el.child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(LEAD_ORANGE)
-                            .truncate()
-                            .child(self.controller.last_action_message.clone().unwrap_or_default()),
-                    )
-                },
-            );
+            .child(div().text_size(px(10.)).text_color(MUTED).child(format!(
+                "{} · {}",
+                self.poll_interval_label,
+                if self.controller.paused {
+                    "일시정지됨"
+                } else {
+                    "폴링"
+                }
+            )))
+            .when(self.controller.last_action_message.is_some(), |el| {
+                el.child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(LEAD_ORANGE)
+                        .truncate()
+                        .child(
+                            self.controller
+                                .last_action_message
+                                .clone()
+                                .unwrap_or_default(),
+                        ),
+                )
+            });
         let right = div()
             .flex()
             .flex_row()
             .items_center()
             .gap_2()
-            .child(footer_badge(format!("워커 {}", snap.workers.len()), WORKER_BLUE))
+            .child(footer_badge(
+                format!("워커 {}", snap.workers.len()),
+                WORKER_BLUE,
+            ))
             .child(footer_badge(
                 format!("Verifier {}", verifier_state),
                 VERIFIER_NEON,
@@ -1716,7 +1844,8 @@ impl Render for DashboardView {
                             f32::from(ev.position.x)
                         }
                     };
-                    this.controller.apply_panel_drag(target, start_val, current - start_pos);
+                    this.controller
+                        .apply_panel_drag(target, start_val, current - start_pos);
                     cx.notify();
                 }
             }))
@@ -1751,7 +1880,10 @@ impl Render for DashboardView {
 
 /// live 워커 중 해당 슬롯 세션 수.
 fn live_count(snap: &DashboardSnapshot, slot: &str) -> usize {
-    snap.workers.iter().filter(|w| w.slot.as_str() == slot).count()
+    snap.workers
+        .iter()
+        .filter(|w| w.slot.as_str() == slot)
+        .count()
 }
 
 /// 워커의 부모(스폰 리드) 주소 조회 — 스냅숏 parent_map에서(미상 None).
@@ -1760,9 +1892,10 @@ fn parent_of<'a>(snap: &'a DashboardSnapshot, w: &LiveWorkerInfo) -> Option<&'a 
 }
 
 /// 역할 박스 세션 1행 — 고정 높이(20px) 단일 줄: 스피너(고정폭) + 주소 pill +
-/// [레포] + (선택) 모델 + 경과 mm:ss + (선택) 1줄 활동(truncate). 동일 레포 다중
-/// 세션도 고유 터미널 주소(t155/t182/t165…)로 명확히 구분된다. 모든 슬롯이 고정
-/// 폭·truncate라 어떤 폭에서도 줄바꿈·높이 점프가 없다(무지터).
+/// [레포] + (선택) 모델 + 경과 mm:ss + (LIVE 전용, 선택) 실측 turn pill + (선택)
+/// 1줄 활동(truncate). 동일 레포 다중 세션도 고유 터미널 주소(t155/t182/t165…)로
+/// 명확히 구분된다. 모든 슬롯이 고정 폭·truncate라 어떤 폭에서도 줄바꿈·높이
+/// 점프가 없다(무지터).
 fn role_session_row(
     w: &LiveWorkerInfo,
     idx: usize,
@@ -1771,6 +1904,7 @@ fn role_session_row(
     anim_secs: f32,
     show_model: bool,
     show_activity: bool,
+    show_turn: bool,
 ) -> gpui::Div {
     let mut row = div()
         .flex()
@@ -1840,6 +1974,24 @@ fn role_session_row(
             .truncate()
             .child(elapsed_label.unwrap_or_else(|| "--:--".to_string())),
     );
+    // LIVE 실측 turn pill — `hc ls`에서 관측된 턴 수(관측 불가 시 미표시).
+    if show_turn && w.turn.is_some() {
+        row = row.child(
+            div()
+                .flex()
+                .items_center()
+                .px_1()
+                .h(px(14.))
+                .flex_none()
+                .rounded_sm()
+                .border_1()
+                .border_color(color)
+                .text_size(px(9.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(color)
+                .child(format!("turn {}", w.turn.unwrap_or(0))),
+        );
+    }
     if show_activity {
         row = row.child(
             div()
@@ -1878,7 +2030,11 @@ fn role_model_label(snap: &DashboardSnapshot, slot: &str) -> String {
     snap.roles
         .iter()
         .find(|r| r.slot == slot)
-        .map(|r| r.live_model.clone().unwrap_or_else(|| r.standby_model.clone()))
+        .map(|r| {
+            r.live_model
+                .clone()
+                .unwrap_or_else(|| r.standby_model.clone())
+        })
         .unwrap_or_else(|| "—".to_string())
 }
 
@@ -2005,7 +2161,11 @@ fn log_size_button(
         .border_color(if active { TEXT_SOFT } else { BORDER_LOG })
         .hover(|s| s.border_color(TEXT_SOFT))
         .text_size(px(9.))
-        .font_weight(if active { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
+        .font_weight(if active {
+            FontWeight::SEMIBOLD
+        } else {
+            FontWeight::MEDIUM
+        })
         .text_color(if active { TEXT } else { MUTED })
         .cursor_pointer()
         .child(target.label().to_string())
@@ -2059,7 +2219,11 @@ fn repo_tab(
         .border_color(if selected { GATE_GREEN } else { BORDER_HEADER })
         .hover(|s| s.border_color(GATE_GREEN))
         .text_size(px(11.))
-        .font_weight(if selected { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
+        .font_weight(if selected {
+            FontWeight::SEMIBOLD
+        } else {
+            FontWeight::MEDIUM
+        })
         .text_color(if selected { TEXT } else { MUTED })
         .cursor_pointer()
         .child(label)
@@ -2088,7 +2252,11 @@ fn advisor_gate(active: bool, label: &str, badge: &str, anim_secs: f32, motion: 
         .child(
             div()
                 .text_size(px(11.))
-                .font_weight(if active { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
+                .font_weight(if active {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::MEDIUM
+                })
                 .text_color(color)
                 .truncate()
                 .child(format!("{} {}", prefix, label)),
@@ -2170,20 +2338,15 @@ fn horizontal_wire(neon: bool, anim_secs: f32) -> gpui::Div {
 fn vertical_wire(glowing: bool, anim_secs: f32) -> gpui::Div {
     let mut wire = div().flex().flex_col().items_center();
     let track = || {
-        div()
-            .relative()
-            .flex_none()
-            .w(px(7.))
-            .h(px(18.))
-            .child(
-                div()
-                    .absolute()
-                    .left(px(2.5))
-                    .top(px(0.))
-                    .w(px(2.))
-                    .h(px(18.))
-                    .bg(BORDER_WIRE),
-            )
+        div().relative().flex_none().w(px(7.)).h(px(18.)).child(
+            div()
+                .absolute()
+                .left(px(2.5))
+                .top(px(0.))
+                .w(px(2.))
+                .h(px(18.))
+                .bg(BORDER_WIRE),
+        )
     };
     if glowing {
         let t = continuous_phase(anim_secs, 0.85, 0.0);
@@ -2306,17 +2469,13 @@ fn stem_assembly(
         let dots = stem_dots_row(n, active, anim_secs);
         let stems = stem_row(n, active, anim_secs, converging);
         if converging {
-            out = out
-                .child(stems)
-                .child(dots)
-                .child(rail)
-                .child(
-                    div()
-                        .text_size(px(10.))
-                        .text_color(MUTED)
-                        .h(px(13.))
-                        .child("▼"),
-                );
+            out = out.child(stems).child(dots).child(rail).child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(MUTED)
+                    .h(px(13.))
+                    .child("▼"),
+            );
         } else {
             out = out.child(rail).child(dots).child(stems);
         }
@@ -2369,7 +2528,14 @@ fn stem_row(n: usize, active: &[bool], anim_secs: f32, converging: bool) -> gpui
                 .justify_center()
                 .child(div().w(px(2.)).h(px(STEM_H)).bg(color))
         };
-        row = row.child(div().flex_1().flex().flex_row().justify_center().child(cell));
+        row = row.child(
+            div()
+                .flex_1()
+                .flex()
+                .flex_row()
+                .justify_center()
+                .child(cell),
+        );
     }
     row
 }
@@ -2386,20 +2552,16 @@ fn stem_dots_row(n: usize, active: &[bool], anim_secs: f32) -> gpui::Div {
             let grow = smooth_pulse_opacity(anim_secs, 0.8, i as f32 * 0.37, 0.0, 1.0);
             let s = 4.0 + 4.0 * grow;
             let inset = (DOT_BOX - s) * 0.5;
-            div()
-                .relative()
-                .flex_none()
-                .size(px(DOT_BOX))
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(inset))
-                        .left(px(inset))
-                        .size(px(s))
-                        .rounded_full()
-                        .bg(WORKER_BLUE)
-                        .opacity(op),
-                )
+            div().relative().flex_none().size(px(DOT_BOX)).child(
+                div()
+                    .absolute()
+                    .top(px(inset))
+                    .left(px(inset))
+                    .size(px(s))
+                    .rounded_full()
+                    .bg(WORKER_BLUE)
+                    .opacity(op),
+            )
         } else {
             div()
                 .flex()
@@ -2424,20 +2586,16 @@ fn single_stem(active: bool, anim_secs: f32, idx: usize, converging: bool) -> gp
         let grow = smooth_pulse_opacity(anim_secs, 0.8, idx as f32 * 0.37, 0.0, 1.0);
         let s = 4.0 + 4.0 * grow;
         let inset = (12.0 - s) * 0.5;
-        div()
-            .relative()
-            .flex_none()
-            .size(px(12.))
-            .child(
-                div()
-                    .absolute()
-                    .top(px(inset))
-                    .left(px(inset))
-                    .size(px(s))
-                    .rounded_full()
-                    .bg(WORKER_BLUE)
-                    .opacity(op),
-            )
+        div().relative().flex_none().size(px(12.)).child(
+            div()
+                .absolute()
+                .top(px(inset))
+                .left(px(inset))
+                .size(px(s))
+                .rounded_full()
+                .bg(WORKER_BLUE)
+                .opacity(op),
+        )
     } else {
         div()
             .flex()
@@ -2557,7 +2715,11 @@ fn route_row(r: &RouteMetric) -> gpui::Div {
                 .w(px(155.))
                 .flex_none()
                 .text_size(px(10.))
-                .font_weight(if forced { FontWeight::BOLD } else { FontWeight::MEDIUM })
+                .font_weight(if forced {
+                    FontWeight::BOLD
+                } else {
+                    FontWeight::MEDIUM
+                })
                 .text_color(fill)
                 .text_right()
                 .truncate()

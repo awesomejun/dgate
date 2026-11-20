@@ -18,6 +18,7 @@ import {
   type LiveWorkerInfo,
   type MergedLiveRoster,
 } from './backend/liveWorkerSync.ts';
+import { readRepoTaskProgress } from './backend/taskProgress.ts';
 import { parseKeyEvents, TerminalScreen, type KeyEvent } from './core/terminal.ts';
 import {
   applyDemoTime,
@@ -1036,6 +1037,8 @@ function main(): void {
   const applyLiveRosterUpdate = (merged: MergedLiveRoster): void => {
     const prevSig = liveRosterStateSignature();
     state.rosterLabels = merged.labels;
+    // 라이브 로스터 폴 틱마다 마크다운 체크박스 진행률 갱신(읽기 전용, 빠름)
+    state.taskProgress = readRepoTaskProgress(repoFilterDir ?? process.cwd());
     state.liveSessionCounts = computeLiveSessionCounts(merged.workers);
     state.neonModelName = merged.verifierModelName;
     state.neonModelFlag = merged.verifierModelFlag;
@@ -1080,6 +1083,8 @@ function main(): void {
         description: w.activity,
         status: done ? ('done' as const) : ('running' as const),
         elapsedSec: frozenElapsedSec ?? liveElapsed,
+        turn: w.turn,
+        address: w.address,
       };
     });
     state.swarmActive = subWorkers.filter((w) => w.status !== 'done').length;
@@ -1216,6 +1221,8 @@ function main(): void {
   }
 
   if (opts.mode === 'live' && runner) {
+    // 라이브 모드 시작 시 태스크 체크박스 진행률 스냅샷(읽기 전용)
+    state.taskProgress = readRepoTaskProgress(repoFilterDir ?? process.cwd());
     if (runner.backend === 'none') {
       appendLog(
         state,
@@ -1239,6 +1246,8 @@ function main(): void {
 
   // 트랜스크립트 실시간 감시 (watch 모드) 또는 일반 스트림 어댑터 연결
   if (opts.watchMode || opts.mode === 'watch') {
+    // 시작 시 태스크 체크박스 진행률 1회 스냅샷(읽기 전용). 이후 로스터 폴 틱마다 갱신.
+    state.taskProgress = readRepoTaskProgress(repoFilterDir ?? process.cwd());
     // 첫 hc 폴 이전에 트랜스크립트 카운터(217/325/534 등)가 깜빡이지 않도록 0으로 초기화
     if (!state.liveSessionCounts) {
       state.liveSessionCounts = { lead: 0, workers: 0, verifiers: 0, advisors: 0 };

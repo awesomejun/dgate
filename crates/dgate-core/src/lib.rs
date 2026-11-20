@@ -14,6 +14,7 @@ pub mod report;
 pub mod roster;
 pub mod setup;
 pub mod stats;
+pub mod task_progress;
 pub mod telemetry;
 pub mod verdict;
 

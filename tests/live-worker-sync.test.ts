@@ -1059,20 +1059,25 @@ test('15. 실행 중 워커 카드 라이브 모션 — 펄스·부재 활성 �
   }
 });
 
-test('15b. 실행 중 카드 바 모션 — progress 0(부재 활성 바)과 35%(쉬머) 모두 simTime으로 움직인다', () => {
+test('15b. 실행 중 카드 모션 — 실측 텔레메트리(0%)와 35% 쉬머 모두 simTime으로 움직인다', () => {
   const state = makeLiveWatchState(3);
   const base = state.liveWorkers!;
   state.liveWorkers = [
-    { ...base[0]!, status: 'running' as const, progress: 0 },
+    { ...base[0]!, status: 'running' as const, progress: 0, elapsedSec: 65, turn: 7 },
     { ...base[1]!, status: 'running' as const, progress: 35 },
     { ...base[2]!, status: 'idle' as const },
   ];
   const f1 = renderFrame({ ...state, simTime: 1.0 }, 148, 43).toPlainString();
   const f2 = renderFrame({ ...state, simTime: 2.7 }, 148, 43).toPlainString();
   assert.notEqual(f1, f2, 'running 0%·35% 카드 → simTime 변화가 프레임에 보인다');
-  assert.ok(/\d{2}:\d{2}|RUN/.test(f1) || /\d{2}:\d{2}|RUN/.test(f2), '0% 실행 카드 우측 활성 라벨');
+  // 0% 라이브 카드 — 스피너 + 실측 MM:SS + 실측 turn 텔레메트리(빈 바 없음)
+  assert.ok(/[⠋⠙⠹⠸⠼⠴⠦⠧] 실행 중 · 01:05( · turn 7)?/.test(f1), '0% 실행 카드 스피너+실행 중+실측 경과');
+  assert.ok(f1.includes('01:05'), '0% 실행 카드 실측 경과 MM:SS');
+  assert.ok(f1.includes('turn 7'), '0% 실행 카드 실측 turn 카운터');
+  assert.ok(/\d{2}:\d{2}|RUN/.test(f1) || /\d{2}:\d{2}|RUN/.test(f2), '0% 실행 카드 활성 라벨');
   assert.ok(f1.includes('35%'), '35% 카드 진행 바 퍼센트');
   assert.ok(/[⠋⠙⠹⠸⠼⠴⠦⠧] 실행 중/.test(f2), '실행 상태줄 스피너');
+  assert.ok(f1.includes('▪ 대기 중'), 'idle 카드는 침착 정지 텔레메트리');
 
   // 침착 대기 불변식 — 전부 idle이면 simTime이 달라도 프레임 100% 동일
   const idleState = makeLiveWatchState(3, 'idle');
@@ -1643,4 +1648,115 @@ test('explicit --watch-dir <dir> auto-attaches within the scoped dir', () => {
     shouldAutoAttachTranscript({ filePath: null, watchDir: '/path/to/dir' }),
     true
   );
+});
+
+// ---------------------------------------------------------------------------
+// 태스크 진행률(taskProgress) — 마크다운 체크박스 실측
+
+import { parseMarkdownCheckboxes, readRepoTaskProgress } from '../src/backend/taskProgress.ts';
+
+test('taskProgress: parseMarkdownCheckboxes counts checkboxes and ignores fenced blocks', () => {
+  const md = [
+    '# 계획',
+    '- [x] 완료 항목',
+    '* [X] 대문자 완료',
+    '+ [ ] 미완료',
+    '- [ ] 다른 미완료',
+    '```',
+    '- [x] 펜스 내부 — 무시',
+    '- [ ] 펜스 내부 미완료 — 무시',
+    '```',
+    '~~~',
+    '* [x] 물결 펜스 — 무시',
+    '~~~',
+    '일반 텍스트 [x] 체크박스 아님',
+  ].join('\n');
+  const { done, total } = parseMarkdownCheckboxes(md);
+  assert.equal(done, 2);
+  assert.equal(total, 4);
+
+  // 빈 문자열/체크박스 없음
+  assert.deepEqual(parseMarkdownCheckboxes(''), { done: 0, total: 0 });
+  assert.deepEqual(parseMarkdownCheckboxes('- 일반 불릿'), { done: 0, total: 0 });
+});
+
+test('taskProgress: readRepoTaskProgress priority order — root files first', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-root-'));
+  try {
+    // 낮은 우선순위(todo/)만 있을 때 — todo 파일 사용
+    fs.mkdirSync(path.join(tmp, 'todo'));
+    fs.writeFileSync(path.join(tmp, 'todo', 'sprint.md'), '- [x] a\n- [ ] b\n');
+    const fromSub = readRepoTaskProgress(tmp);
+    assert.ok(fromSub);
+    assert.equal(fromSub.sourceName, 'todo/sprint.md');
+    assert.equal(fromSub.done, 1);
+    assert.equal(fromSub.total, 2);
+    assert.equal(fromSub.pct, 50);
+
+    // 루트 TODO.md 추가 — 루트가 우선
+    fs.writeFileSync(path.join(tmp, 'TODO.md'), '- [x] a\n- [x] b\n- [ ] c\n');
+    const fromRoot = readRepoTaskProgress(tmp);
+    assert.ok(fromRoot);
+    assert.equal(fromRoot.sourceName, 'TODO.md');
+    assert.equal(fromRoot.done, 2);
+    assert.equal(fromRoot.total, 3);
+    assert.equal(fromRoot.pct, 66);
+
+    // pct 상한 100
+    fs.writeFileSync(path.join(tmp, 'TODO.md'), '- [x] a\n- [x] b\n');
+    assert.equal(readRepoTaskProgress(tmp)?.pct, 100);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('taskProgress: readRepoTaskProgress newest mtime in todo/ dir', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-mtime-'));
+  try {
+    fs.mkdirSync(path.join(tmp, 'todo'));
+    const oldF = path.join(tmp, 'todo', 'old.md');
+    const newF = path.join(tmp, 'todo', 'new.md');
+    fs.writeFileSync(oldF, '- [x] old\n');
+    fs.writeFileSync(newF, '- [ ] new\n');
+    const past = Date.now() / 1000 - 3600;
+    fs.utimesSync(oldF, past, past);
+    const tp = readRepoTaskProgress(tmp);
+    assert.ok(tp);
+    assert.equal(tp.sourceName, 'todo/new.md');
+    assert.equal(tp.done, 0);
+    assert.equal(tp.total, 1);
+    assert.equal(tp.pct, 0);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('taskProgress: readRepoTaskProgress empty dir -> null (no fake progress)', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-empty-'));
+  try {
+    assert.equal(readRepoTaskProgress(tmp), null);
+    // 체크박스 0개 파일만 있어도 null
+    fs.writeFileSync(path.join(tmp, 'TODO.md'), '# 제목만\n');
+    assert.equal(readRepoTaskProgress(tmp), null);
+    // 읽기 전용 검증 — 대상 파일이 생성되지 않았음을 확인
+    assert.equal(fs.existsSync(path.join(tmp, 'todo')), false);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('taskProgress: renderFrame shows real progress line only when taskProgress is set', () => {
+  const withTp = createInitialState('watch');
+  withTp.taskProgress = { sourceName: 'TODO.md', done: 3, total: 5, pct: 60 };
+  const text = renderFrame(withTp, 148, 43).toPlainString();
+  assert.ok(text.includes('태스크 3/5 (60%) · TODO.md'), 'real progress line rendered');
+
+  const nullTp = createInitialState('watch');
+  nullTp.taskProgress = null;
+  const nullText = renderFrame(nullTp, 148, 43).toPlainString();
+  assert.ok(!nullText.includes('태스크 3/5'), 'no fake progress when null');
+
+  const undefTp = createInitialState('watch');
+  const undefText = renderFrame(undefTp, 148, 43).toPlainString();
+  assert.ok(!undefText.includes('태스크'), 'no progress line when undefined');
 });
