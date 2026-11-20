@@ -557,10 +557,7 @@ impl DashboardView {
             .any(|w| w.slot.as_str() == "advisor" && worker_running(w));
         let advisors = partition_sessions_by_role(&snap.workers).advisors;
         let active = self.controller.demo_mode || advisor_running;
-        let focused = self.controller.focused_panel == FocusPanel::Advisor;
-        let border = if focused {
-            FOCUS_BORDER
-        } else if active {
+        let border = if active {
             ADVISOR_PURPLE
         } else {
             BORDER_ADVISORY_IDLE
@@ -614,7 +611,16 @@ impl DashboardView {
             .rounded_lg()
             .bg(if active { BG_GLOW_PURPLE } else { BG_ELEVATED })
             .border_1()
-            .border_color(border);
+            .border_color(border)
+            .cursor_pointer()
+            .hover(|s| s.border_color(ADVISOR_PURPLE))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.controller.open_detail(FocusPanel::Advisor);
+                    cx.notify();
+                }),
+            );
         // 반응형 폭 — 넓은 창 드래그 가능 고정 폭 사이드 패널 / 좁은 창 전체 폭.
         panel = if vw < px(960.) {
             panel.w_full()
@@ -633,15 +639,6 @@ impl DashboardView {
                 .min_h(px(18.))
                 .child(title)
                 .child(div().flex_1())
-                .child(detail_pill(
-                    "detail-advisor",
-                    focused,
-                    ADVISOR_PURPLE,
-                    cx.listener(|this, _, _, cx| {
-                        this.controller.open_detail(FocusPanel::Advisor);
-                        cx.notify();
-                    }),
-                ))
                 .child(pill(state_label, state_color, BG)),
         );
         // 명시적 advisor 세션 — 자문 카드 위에 세션마다 고정 높이 1행(주소 구분).
@@ -935,7 +932,6 @@ impl DashboardView {
     /// 다중 lead도 각자 보인다), 없으면 기존 폴백(조율 중/대기 중) 표기.
     fn render_lead_card(&self, snap: &DashboardSnapshot, cx: &Context<Self>) -> gpui::Div {
         let parts = partition_sessions_by_role(&snap.workers);
-        let focused = self.controller.focused_panel == FocusPanel::Lead;
         let subordinates_running = parts.sub_workers.iter().any(|w| worker_running(w));
         let motion = self.controller.demo_mode
             || parts.leads.iter().any(|w| worker_running(w))
@@ -964,7 +960,16 @@ impl DashboardView {
             .rounded_lg()
             .bg(BG_ELEVATED)
             .border_2()
-            .border_color(if focused { FOCUS_BORDER } else { LEAD_ORANGE })
+            .border_color(LEAD_ORANGE)
+            .cursor_pointer()
+            .hover(|s| s.border_color(FOCUS_BORDER))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.controller.open_detail(FocusPanel::Lead);
+                    cx.notify();
+                }),
+            )
             .child(
                 div()
                     .flex()
@@ -981,15 +986,6 @@ impl DashboardView {
                             .child("Lead"),
                     )
                     .child(div().flex_1())
-                    .child(detail_pill(
-                        "detail-lead",
-                        focused,
-                        LEAD_ORANGE,
-                        cx.listener(|this, _, _, cx| {
-                            this.controller.open_detail(FocusPanel::Lead);
-                            cx.notify();
-                        }),
-                    ))
                     .child(state_pill),
             );
         // 실제 태스크 진행률 바 — 레포 마크다운 체크박스 기반(가짜 바 금지).
@@ -1107,7 +1103,6 @@ impl DashboardView {
     ) -> gpui::Div {
         let parts = partition_sessions_by_role(&snap.workers);
         let active = self.verifier_motion(snap);
-        let focused = self.controller.focused_panel == FocusPanel::Verifier;
         let badge_pill = if active {
             spinner_pill(
                 spinner_char(self.anim_secs, 0),
@@ -1126,13 +1121,16 @@ impl DashboardView {
             .rounded_lg()
             .bg(if active { BG_GLOW_NEON } else { BG_ELEVATED })
             .border_2()
-            .border_color(if focused {
-                FOCUS_BORDER
-            } else if active {
-                VERIFIER_NEON
-            } else {
-                BORDER_WIRE
-            });
+            .border_color(if active { VERIFIER_NEON } else { BORDER_WIRE })
+            .cursor_pointer()
+            .hover(|s| s.border_color(VERIFIER_NEON))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.controller.open_detail(FocusPanel::Verifier);
+                    cx.notify();
+                }),
+            );
         card = if vw < px(960.) {
             card.w_full()
         } else {
@@ -1155,15 +1153,6 @@ impl DashboardView {
                         .child("Verifier"),
                 )
                 .child(div().flex_1())
-                .child(detail_pill(
-                    "detail-verifier",
-                    focused,
-                    VERIFIER_NEON,
-                    cx.listener(|this, _, _, cx| {
-                        this.controller.open_detail(FocusPanel::Verifier);
-                        cx.notify();
-                    }),
-                ))
                 .child(badge_pill),
         );
         if parts.verifiers.is_empty() {
@@ -1242,7 +1231,6 @@ impl DashboardView {
 
     /// Stage 2 — Decision Gate · 분기 계층 (라우트 확률 바 + 우측 compact 지표).
     fn render_decision_gate(&self, snap: &DashboardSnapshot, cx: &Context<Self>) -> gpui::Div {
-        let focused = self.controller.focused_panel == FocusPanel::Decision;
         let forks_label = match &snap.timing_summary {
             Some(t) if !t.intervals_unavailable && t.forks_total > 0 => {
                 format!("{}", t.forks_total)
@@ -1272,7 +1260,16 @@ impl DashboardView {
                 .rounded_lg()
                 .bg(BG_ELEVATED)
                 .border_1()
-                .border_color(if focused { FOCUS_BORDER } else { GATE_GREEN })
+                .border_color(GATE_GREEN)
+                .cursor_pointer()
+                .hover(|s| s.border_color(FOCUS_BORDER))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.controller.open_detail(FocusPanel::Decision);
+                        cx.notify();
+                    }),
+                )
                 .child(
                     div()
                         .flex()
@@ -1288,15 +1285,6 @@ impl DashboardView {
                                 .child("Decision Gate · 분기 계층"),
                         )
                         .child(div().flex_1())
-                        .child(detail_pill(
-                            "detail-decision",
-                            focused,
-                            GATE_GREEN,
-                            cx.listener(|this, _, _, cx| {
-                                this.controller.open_detail(FocusPanel::Decision);
-                                cx.notify();
-                            }),
-                        ))
                         .child(div().text_size(px(10.)).text_color(MUTED).truncate().child(
                             format!(
                                 "forks {} · 비용 {} · shadow {}",
@@ -1323,29 +1311,6 @@ impl DashboardView {
         sub_workers: &[LiveWorkerInfo],
         cols: usize,
     ) -> gpui::Div {
-        let focused = self.controller.focused_panel == FocusPanel::Workers;
-        let header = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .px_1()
-            .child(
-                div()
-                    .text_size(px(10.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(if focused { FOCUS_BORDER } else { WORKER_BLUE })
-                    .child(format!("Workers · {}개", sub_workers.len())),
-            )
-            .child(detail_pill(
-                "detail-workers",
-                focused,
-                WORKER_BLUE,
-                cx.listener(|this, _, _, cx| {
-                    this.controller.open_detail(FocusPanel::Workers);
-                    cx.notify();
-                }),
-            ));
         if sub_workers.is_empty() {
             // 라이브 워커 0 — 가짜 청사진 슬롯 없이 정직한 단일 빈 상태 박스.
             // 스냅숏 미수신이면 로딩 문구, 수신 후면 안내 문구만 보여준다.
@@ -1366,8 +1331,17 @@ impl DashboardView {
                 .h(px(56.))
                 .rounded_lg()
                 .border_1()
-                .border_color(if focused { FOCUS_BORDER } else { BORDER_LOG })
+                .border_color(BORDER_LOG)
                 .bg(BG_ELEVATED)
+                .cursor_pointer()
+                .hover(|s| s.border_color(WORKER_BLUE))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.controller.open_detail(FocusPanel::Workers);
+                        cx.notify();
+                    }),
+                )
                 .child(
                     div()
                         .text_size(px(12.))
@@ -1382,54 +1356,19 @@ impl DashboardView {
                         .child(subtitle),
                 );
             }
-            return div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .w_full()
-                .child(header)
-                .child(box_);
+            return div().flex().flex_row().justify_center().child(box_);
         }
         if cols == 1 {
             // 단일 워커 — 중앙 정렬 카드(단일 중앙 스템과 정렬, 가로 레일 없음)
-            return div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .w_full()
-                .when(focused, |el| {
-                    el.p_1()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(FOCUS_BORDER)
-                })
-                .child(header)
-                .child(
-                    div().flex().flex_row().justify_center().child(
-                        self.render_worker_card(
-                            &sub_workers[0],
-                            cx,
-                            0,
-                            parent_of(snap, &sub_workers[0]),
-                        )
-                        .w_full()
-                        .max_w(px(460.)),
-                    ),
-                );
+            return div().flex().flex_row().justify_center().child(
+                self.render_worker_card(&sub_workers[0], cx, 0, parent_of(snap, &sub_workers[0]))
+                    .w_full()
+                    .max_w(px(460.)),
+            );
         }
         // 2~4열 — 카드 flex_1·mx_1 → 셀 중심 = 스템 중심 정확 정렬.
         // cols 초과분은 cols열씩 랩하고 마지막 행 빈 열은 스페이서로 열 폭 유지.
-        let mut column = div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .when(focused, |el| {
-                el.p_1()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(FOCUS_BORDER)
-            })
-            .child(header);
+        let mut column = div().flex().flex_col().gap_2();
         for (row_idx, chunk) in sub_workers.chunks(cols).enumerate() {
             let mut row = div().flex().flex_row();
             for (i, w) in chunk.iter().enumerate() {
@@ -1473,7 +1412,15 @@ impl DashboardView {
             .worker_elapsed_secs(&w.address, Some(idx))
             .map(format_elapsed_mmss);
 
-        let mut actions = div().flex().flex_row().gap_2().items_center().min_w_0();
+        let mut actions = div()
+            .flex()
+            .flex_row()
+            .gap_2()
+            .items_center()
+            .min_w_0()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            });
         if confirming {
             actions = actions
                 .child(
@@ -1587,6 +1534,15 @@ impl DashboardView {
             .bg(BG_ELEVATED)
             .border_1()
             .border_color(if confirming { ROSE_DANGER } else { WORKER_BLUE })
+            .cursor_pointer()
+            .hover(|s| s.border_color(FOCUS_BORDER))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.controller.open_detail(FocusPanel::Workers);
+                    cx.notify();
+                }),
+            )
             .child(
                 div()
                     .flex()
@@ -1795,7 +1751,6 @@ impl DashboardView {
     fn render_session_log(&self, snap: &DashboardSnapshot, cx: &Context<Self>) -> gpui::Div {
         let size = self.controller.log_panel_size;
         let rows = self.controller.panel_sizes.visible_log_rows();
-        let focused = self.controller.focused_panel == FocusPanel::Logs;
         let mut panel = div()
             .flex()
             .flex_col()
@@ -1810,7 +1765,16 @@ impl DashboardView {
             .rounded_lg()
             .bg(BG_ELEVATED)
             .border_1()
-            .border_color(if focused { FOCUS_BORDER } else { BORDER_LOG })
+            .border_color(BORDER_LOG)
+            .cursor_pointer()
+            .hover(|s| s.border_color(TEXT_SOFT))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.controller.open_detail(FocusPanel::Logs);
+                    cx.notify();
+                }),
+            )
             // 헤더 바 — 제목·건수 + 크기 토글(접기/작게/크게, 현재 모드 강조)
             .child(
                 div()
@@ -1819,6 +1783,9 @@ impl DashboardView {
                     .items_center()
                     .gap_2()
                     .min_h(px(16.))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
                     .child(
                         div()
                             .id("log-panel-cycle")
@@ -1842,15 +1809,6 @@ impl DashboardView {
                             .text_color(MUTED)
                             .child(format!("{}건", snap.recent_log.len())),
                     )
-                    .child(detail_pill(
-                        "detail-logs",
-                        focused,
-                        TEXT_SOFT,
-                        cx.listener(|this, _, _, cx| {
-                            this.controller.open_detail(FocusPanel::Logs);
-                            cx.notify();
-                        }),
-                    ))
                     .child(div().flex_1())
                     .child(log_size_button(LogPanelSize::Compact, size, cx))
                     .child(log_size_button(LogPanelSize::Expanded, size, cx))
@@ -1928,7 +1886,7 @@ impl DashboardView {
                 div()
                     .text_size(px(10.))
                     .text_color(DIM)
-                    .child("Tab:이동 · Enter:상세 · Esc:닫기"),
+                    .child("패널 클릭:상세 · Esc:닫기"),
             )
             .child(div().text_size(px(10.)).text_color(MUTED).child(format!(
                 "{} · {}",
@@ -2361,37 +2319,6 @@ impl Render for DashboardView {
 // ---------------------------------------------------------------------------
 // 공통 조립 헬퍼 — 스냅숏 파생 수치·와이어·카드 조각
 // ---------------------------------------------------------------------------
-
-/// 패널 헤더 우측 클릭 가능 '상세' / 'Enter:상세' 배지.
-fn detail_pill(
-    id: &'static str,
-    focused: bool,
-    accent: Rgba,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .px_2()
-        .h(px(16.))
-        .flex_none()
-        .rounded_sm()
-        .bg(BG)
-        .border_1()
-        .border_color(if focused { FOCUS_BORDER } else { BORDER_HEADER })
-        .hover(move |s| s.border_color(accent))
-        .text_size(px(9.))
-        .font_weight(if focused {
-            FontWeight::BOLD
-        } else {
-            FontWeight::MEDIUM
-        })
-        .text_color(if focused { FOCUS_BORDER } else { MUTED })
-        .cursor_pointer()
-        .child(if focused { "Enter:상세" } else { "상세" })
-        .on_click(on_click)
-}
 
 /// live 워커 중 해당 슬롯 세션 수.
 fn live_count(snap: &DashboardSnapshot, slot: &str) -> usize {
