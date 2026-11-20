@@ -720,6 +720,14 @@ export function computeLiveSessionCounts(
   return { lead, workers: subWorkers, verifiers, advisors };
 }
 
+/**
+ * Workers 카드에 남길 종속(부하) 워커만 걸러낸다 — explore/coder만 반환하고
+ * lead/verifier/advisor는 각자의 역할 패널이 담당하므로 카드에서 배제한다(GPUI 파티션 계약).
+ */
+export function filterSubordinateWorkers(workers: readonly LiveWorkerInfo[]): LiveWorkerInfo[] {
+  return workers.filter((w) => w.slot !== 'lead' && w.slot !== 'verifier' && w.slot !== 'advisor');
+}
+
 function main(): void {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.showHelp) {
@@ -993,15 +1001,28 @@ function main(): void {
     // 고정 3슬롯(tool 카테고리) 계약이므로 절대 덮어쓰지 않는다(레이아웃·렌더는 liveWorkers 우선).
     const scoped = Boolean(repoFilterDir);
     const nowMs = Date.now();
-    // 주소별 경과 추적 — 첫 관측 startedAtMs 고정, done 시 경과 동결, 소멸 시 제거
+    // 주소별 경과 추적 — 첫 관찰 startedAtMs 고정, done 시 경과 동결, 소멸 시 제거.
+    // 역할 세션(lead/verifier/advisor)도 prevLiveWorkers 추적용으로 함께 계산한다.
     const elapsedByAddr = new Map<string, { startedAtMs: number; frozenElapsedSec: number | null }>();
-    state.liveWorkers = merged.workers.map((w) => {
+    for (const w of merged.workers) {
       const prev = prevLiveWorkers.get(w.address);
       const startedAtMs = prev?.startedAtMs ?? nowMs;
       const done = w.status === 'done';
       const liveElapsed = Math.max(0, Math.floor((nowMs - startedAtMs) / 1000));
-      const frozenElapsedSec = done ? (prev?.frozenElapsedSec ?? liveElapsed) : null;
-      elapsedByAddr.set(w.address, { startedAtMs, frozenElapsedSec });
+      elapsedByAddr.set(w.address, {
+        startedAtMs,
+        frozenElapsedSec: done ? (prev?.frozenElapsedSec ?? liveElapsed) : null,
+      });
+    }
+    // GPUI 파티션 계약 — Workers 카드에는 종속(explore/coder) 워커만. Lead/Verifier/Advisor는
+    // applyLiveRolePanels이 갱신하는 각 역할 패널에만 남고 카드로 새지 않는다.
+    const subWorkers = filterSubordinateWorkers(merged.workers);
+    state.liveWorkers = subWorkers.map((w) => {
+      const basis = elapsedByAddr.get(w.address)!;
+      const startedAtMs = basis.startedAtMs;
+      const done = w.status === 'done';
+      const liveElapsed = Math.max(0, Math.floor((nowMs - startedAtMs) / 1000));
+      const frozenElapsedSec = done ? basis.frozenElapsedSec : null;
       return {
         name: scoped ? `${w.name} · ${w.shortModel}` : `[${w.repoTag}] ${w.name} · ${w.shortModel}`,
         model: w.shortModel,
@@ -1011,9 +1032,9 @@ function main(): void {
         elapsedSec: frozenElapsedSec ?? liveElapsed,
       };
     });
-    state.swarmActive = merged.activeWorkerCount;
+    state.swarmActive = subWorkers.filter((w) => w.status !== 'done').length;
     liveElapsedBasis.length = state.liveWorkers.length;
-    merged.workers.forEach((w, i) => {
+    subWorkers.forEach((w, i) => {
       liveElapsedBasis[i] = elapsedByAddr.get(w.address) ?? null;
     });
 

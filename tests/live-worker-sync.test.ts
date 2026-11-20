@@ -1598,3 +1598,22 @@ test('liveSessionCounts 미설정 시 기존 트랜스크립트 카운터 배지
     .join('\n');
   assert.ok(header.includes('LEAD BUILDS [217]'), `기존 배지 없음: ${header}`);
 });
+
+test('filterSubordinateWorkers — Workers 카드에는 explore/coder만 남는다(GPUI 역할 파티션)', async () => {
+  const { filterSubordinateWorkers } = await import('../src/cli.ts');
+  assert.deepEqual(filterSubordinateWorkers([]), []);
+  const workers = [
+    makeWorker({ slot: 'lead', address: 't165' }),
+    makeWorker({ slot: 'verifier', address: 'v1' }),
+    makeWorker({ slot: 'advisor', address: 'a1' }),
+    makeWorker({ slot: 'explore', address: 'e1' }),
+    makeWorker({ slot: 'coder', address: 'c1' }),
+  ];
+  const filtered = filterSubordinateWorkers(workers);
+  assert.deepEqual(
+    filtered.map((w) => w.address),
+    ['e1', 'c1'],
+    'lead/verifier/advisor는 배제되고 explore/coder만 유지된다'
+  );
+  assert.ok(filtered.every((w) => w.slot === 'explore' || w.slot === 'coder'));
+});
