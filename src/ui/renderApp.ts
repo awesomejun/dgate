@@ -917,12 +917,19 @@ function renderSwarmSection(buf: CellBuffer, state: AppState, L: FullLayout): vo
       buf.writeCentered(ix, cy++, iw, card.model, THEME.blue, cardBg, false);
     }
 
-    // 프로그레스 바 + 퍼센트 — 라이브 실행 중 0%는 고정 바가 아니라
-    // 부재 활성 바(흘러가는 블록) + 스피너 + RUN 으로 살아 있음을 표시한다.
+    // 프로그레스 바 + 우측 라벨 — 실행 중 카드는 두 종류 모두 살아 움직인다.
+    // ① 진행률 0%(라이브 부재 활성)은 흘러가는 블록 바 + 스피너+경과시간.
+    //    우측 라벨 폭만큼 barW를 줄여 `⠋ 01:24` 같은 7자 라벨이 바를 밀어내지 않게 한다.
+    // ② 0%<p<100%(트랜스크립트/데모)은 진행 바 위를 쓸고 지나가는 밝은 하이라이트 셀.
+    // idle/done 카드는 simTime과 무관하게 항상 동일하게 그린다(침착 대기 불변식).
     if (cy < cardRect.y + cardRect.h - 1) {
-      const barW = Math.max(6, iw - 6);
-      const startX = ix + Math.max(0, Math.floor((iw - (barW + 1 + 4)) / 2));
       if (motion && card.status === 'running' && card.progress === 0) {
+        const rightLabel =
+          typeof card.elapsedSec === 'number'
+            ? `${spinnerFrame(state.simTime, idx)} ${formatElapsedMmss(card.elapsedSec)}`
+            : `${spinnerFrame(state.simTime, idx)} RUN`;
+        const barW = Math.max(6, iw - stringWidth(rightLabel) - 1);
+        const startX = ix + Math.max(0, Math.floor((iw - (barW + 1 + stringWidth(rightLabel))) / 2));
         drawIndeterminateBar(
           buf,
           startX,
@@ -933,18 +940,21 @@ function renderSwarmSection(buf: CellBuffer, state: AppState, L: FullLayout): vo
           state.simTime,
           idx
         );
-        buf.writeText(
-          startX + barW + 1,
-          cy,
-          typeof card.elapsedSec === 'number'
-            ? `${spinnerFrame(state.simTime, idx)} ${formatElapsedMmss(card.elapsedSec)}`
-            : `${spinnerFrame(state.simTime, idx)} RUN`,
-          THEME.blue,
-          cardBg,
-          true
-        );
+        buf.writeText(startX + barW + 1, cy, rightLabel, THEME.blue, cardBg, true);
+      } else if (motion && card.status === 'running' && card.progress > 0 && card.progress < 100) {
+        const pctStr = padLeftWidth(`${card.progress}%`, 4);
+        const barW = Math.max(6, iw - 6);
+        const startX = ix + Math.max(0, Math.floor((iw - (barW + 1 + 4)) / 2));
+        buf.drawProgressBar(startX, cy, barW, card.progress / 100, THEME.blue, THEME.bgBlueTrack);
+        // 채워진 구간 위를 쓸고 지나가는 하이라이트 셀 — simTime+idx 구동
+        const filledCols = Math.max(1, Math.round((card.progress / 100) * barW));
+        const hi = ((Math.floor(state.simTime * 8 + idx * 3) % filledCols) + filledCols) % filledCols;
+        buf.setChar(startX + hi, cy, '█', THEME.borderFocusBoost, THEME.bgBlueTrack, true);
+        buf.writeText(startX + barW + 1, cy, pctStr, THEME.muted, cardBg);
       } else {
         const pctStr = padLeftWidth(`${card.progress}%`, 4);
+        const barW = Math.max(6, iw - 6);
+        const startX = ix + Math.max(0, Math.floor((iw - (barW + 1 + 4)) / 2));
         buf.drawProgressBar(startX, cy, barW, card.progress / 100, THEME.blue, THEME.bgBlueTrack);
         buf.writeText(startX + barW + 1, cy, pctStr, THEME.muted, cardBg);
       }

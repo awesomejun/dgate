@@ -1059,6 +1059,28 @@ test('15. 실행 중 워커 카드 라이브 모션 — 펄스·부재 활성 �
   }
 });
 
+test('15b. 실행 중 카드 바 모션 — progress 0(부재 활성 바)과 35%(쉬머) 모두 simTime으로 움직인다', () => {
+  const state = makeLiveWatchState(3);
+  const base = state.liveWorkers!;
+  state.liveWorkers = [
+    { ...base[0]!, status: 'running' as const, progress: 0 },
+    { ...base[1]!, status: 'running' as const, progress: 35 },
+    { ...base[2]!, status: 'idle' as const },
+  ];
+  const f1 = renderFrame({ ...state, simTime: 1.0 }, 148, 43).toPlainString();
+  const f2 = renderFrame({ ...state, simTime: 2.7 }, 148, 43).toPlainString();
+  assert.notEqual(f1, f2, 'running 0%·35% 카드 → simTime 변화가 프레임에 보인다');
+  assert.ok(/\d{2}:\d{2}|RUN/.test(f1) || /\d{2}:\d{2}|RUN/.test(f2), '0% 실행 카드 우측 활성 라벨');
+  assert.ok(f1.includes('35%'), '35% 카드 진행 바 퍼센트');
+  assert.ok(/[⠋⠙⠹⠸⠼⠴⠦⠧] 실행 중/.test(f2), '실행 상태줄 스피너');
+
+  // 침착 대기 불변식 — 전부 idle이면 simTime이 달라도 프레임 100% 동일
+  const idleState = makeLiveWatchState(3, 'idle');
+  const c1 = renderFrame({ ...idleState, simTime: 1.0 }, 148, 43).toPlainString();
+  const c2 = renderFrame({ ...idleState, simTime: 2.7 }, 148, 43).toPlainString();
+  assert.equal(c1, c2, 'idle 카드만 있으면 simTime 무관 프레임 동일');
+});
+
 test('16. 라이브 역할 패널 동기화 — verifier/advisor/lead 활성화·완료·침착 복귀', () => {
   const state = createInitialState('watch');
   const trail = createLiveRoleTrail();
@@ -1295,17 +1317,18 @@ test('18.9 syncer — 최상위 working antigravity/pi만 Lead로 관측, idle·
 
 // ---------- TUI 세션 스코프 기본값 (w-tui-session-scope) ----------
 
-test('19. resolveTuiScope — 5가지 스코프 판정 (기본 세션/레포·--all·--repo·--session)', () => {
+test('19. resolveTuiScope — 사이드 셸 HC_TERMINAL_ID 무시·기본 cwd 레포 스코프·--session·--all', () => {
   const cwd = path.join('/tmp', 'Gemini_trick');
   const envOther: NodeJS.ProcessEnv = {};
-  const envSession: NodeJS.ProcessEnv = { HC_TERMINAL_ID: '  t1bg  ' };
+  // 사이드 빈 zsh 탭에 herdr가 주입하는 HC_TERMINAL_ID(t17x)는 스코프를 좁히지 않는다.
+  const envSession: NodeJS.ProcessEnv = { HC_TERMINAL_ID: 't17x' };
 
-  // ① 기본 + HC_TERMINAL_ID — 현재 세션 스코프, 라벨 '레포명·세션ID'
+  // ① 기본(+HC_TERMINAL_ID 있어도) — 현재 cwd 레포 스코프: 레포 전체 Lead·워커 노출
   const s1 = resolveTuiScope({}, envSession, cwd);
-  assert.equal(s1.kind, 'session');
-  assert.equal(s1.sessionId, 't1bg'); // trim 적용
-  assert.equal(s1.repoFilterDir, null);
-  assert.equal(s1.scopeLabel, 'Gemini_trick·t1bg');
+  assert.equal(s1.kind, 'repo');
+  assert.equal(s1.sessionId, null);
+  assert.equal(s1.repoFilterDir, path.resolve(cwd));
+  assert.equal(s1.scopeLabel, 'Gemini_trick');
 
   // ② 기본 + HC_TERMINAL_ID 부재 — 현재 cwd 레포 스코프
   const s2 = resolveTuiScope({}, envOther, cwd);

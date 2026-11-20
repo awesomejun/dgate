@@ -421,12 +421,13 @@ export interface TuiScope {
 /**
  * TUI 기본 관측 스코프 판정(순수 함수):
  * ① `--all`이면 전역 ② `--session <id>`면 해당 세션(+`--repo` 병행 가능)
- * ③ `--repo <dir>`면 해당 레포 ④ HC_TERMINAL_ID 환경변수가 있으면 현재 hc 세션
- * (라벨은 `레포명·세션ID`) ⑤ 마지막 폴백은 현재 cwd 레포.
+ * ③ `--repo <dir>`면 해당 레포 ④ 마지막 폴백은 현재 cwd 레포.
+ * HC_TERMINAL_ID는 빈 사이드 셸 탭을 세션으로 좁혀 실제 Lead/워커를 가리는
+ * 원인이 되므로 더 이상 스코프 판정에 쓰지 않는다.
  */
 export function resolveTuiScope(
   opts: TuiScopeOptions,
-  env: NodeJS.ProcessEnv,
+  _env: NodeJS.ProcessEnv,
   cwd: string
 ): TuiScope {
   if (opts.all) {
@@ -447,15 +448,6 @@ export function resolveTuiScope(
       repoFilterDir: dir,
       sessionId: null,
       scopeLabel: path.basename(dir) || dir,
-    };
-  }
-  const envSession = env.HC_TERMINAL_ID?.trim();
-  if (envSession) {
-    return {
-      kind: 'session',
-      repoFilterDir: null,
-      sessionId: envSession,
-      scopeLabel: path.basename(path.resolve(cwd)) + '·' + envSession,
     };
   }
   const dir = path.resolve(cwd);
