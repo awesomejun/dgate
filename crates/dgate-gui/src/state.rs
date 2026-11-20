@@ -507,12 +507,12 @@ pub fn filter_snapshot_by_repo(
 // ---------------------------------------------------------------------------
 
 /// 화면에 배치할 워커 카드 열 수(= 커넥터 스템 수).
-/// - 라이브 0 — 3슬롯 청사진 토폴로지 유지(침묵 3스템 와이어와 정렬).
+/// - 라이브 0 — 중앙 단일 스템·단일 빈 상태 박스(가짜 3슬롯 청사진 금지 — 정직한 빈 상태).
 /// - 1/2/3 — 카드 수와 정확히 같은 수의 스템(매달린 여분 스템 금지).
 /// - 4+ — 최대 4열, 초과 워커는 2행 랩('+M개 추가' 배지로 절대 가리지 않는다).
 pub fn visible_worker_columns(worker_count: usize) -> usize {
     match worker_count {
-        0 => 3,
+        0 => 1,
         1 => 1,
         2 => 2,
         3 => 3,
@@ -1029,12 +1029,69 @@ impl PollerConfig {
 /// 로컬 타임존 기준 HH:MM:SS 라벨(마지막 새로고침 표시).
 pub fn format_local_time_label(now_ms: i64) -> String {
     let secs = now_ms.div_euclid(1000);
-    let t: libc::time_t = secs as libc::time_t;
+    let (h, m, s) = local_hms(secs);
+    format!("{h:02}:{m:02}:{s:02}")
+}
+
+/// 로컬 타임존 시/분/초 — Unix: `localtime_r`(스레드 안전).
+#[cfg(unix)]
+fn local_hms(secs: i64) -> (u32, u32, u32) {
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let t: libc::time_t = secs as libc::time_t;
     unsafe {
         libc::localtime_r(&t, &mut tm);
     }
-    format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
+    (tm.tm_hour as u32, tm.tm_min as u32, tm.tm_sec as u32)
+}
+
+/// MSVCRT `struct tm` 레이아웃 — `_localtime64_s`가 i32 필드 9개를 채운다.
+/// extern 선언만으로 MSVC·GNU 양 Rust 툴체인에서 msvcrt에 링크된다(추가 크레이트 0).
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Default)]
+struct WinTm {
+    tm_sec: i32,
+    tm_min: i32,
+    tm_hour: i32,
+    tm_mday: i32,
+    tm_mon: i32,
+    tm_year: i32,
+    tm_wday: i32,
+    tm_yday: i32,
+    tm_isdst: i32,
+}
+
+#[cfg(windows)]
+extern "C" {
+    fn _localtime64_s(tm: *mut WinTm, time: *const i64) -> i32;
+}
+
+/// Windows: MSVCRT `_localtime64_s`(반환 0 = 성공). 실패 시 UTC 폴백.
+#[cfg(windows)]
+fn local_hms(secs: i64) -> (u32, u32, u32) {
+    let mut tm = WinTm::default();
+    let t: i64 = secs;
+    if unsafe { _localtime64_s(&mut tm, &t) } != 0 {
+        return utc_hms(secs);
+    }
+    (tm.tm_hour as u32, tm.tm_min as u32, tm.tm_sec as u32)
+}
+
+/// 그 외 플랫폼: 로컬 타임존 API가 없으므로 UTC로 계산한다.
+#[cfg(not(any(unix, windows)))]
+fn local_hms(secs: i64) -> (u32, u32, u32) {
+    utc_hms(secs)
+}
+
+/// UTC 기준 시/분/초.
+#[cfg(not(unix))]
+fn utc_hms(secs: i64) -> (u32, u32, u32) {
+    let day_secs = secs.rem_euclid(86_400);
+    (
+        (day_secs / 3_600) as u32,
+        ((day_secs % 3_600) / 60) as u32,
+        (day_secs % 60) as u32,
+    )
 }
 
 fn now_ms() -> i64 {
@@ -2018,7 +2075,7 @@ mod tests {
     #[test]
     fn visible_worker_columns_matches_topology() {
         // 라이브 0 — 3슬롯 청사진(침묵 3스템 와이어)
-        assert_eq!(visible_worker_columns(0), 3);
+        assert_eq!(visible_worker_columns(0), 1);
         // 1/2/3 — 카드 수 = 스템 수 (고정 3스템 매달림 금지)
         assert_eq!(visible_worker_columns(1), 1);
         assert_eq!(visible_worker_columns(2), 2);

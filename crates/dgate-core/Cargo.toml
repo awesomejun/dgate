@@ -13,5 +13,8 @@ sha2 = "0.10"
 ureq = { version = "2", features = ["json"] }
 regex = "1"
 dirs = "5"
-libc = "0.2"
 rand = "0.8"
+
+# libc은 Unix 전용(localtime_r 등) — Windows 빌드는 의존성에서 완전히 제외한다.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -1188,11 +1188,12 @@ test('18. per-worker 실측 경과 MM:SS — formatElapsedMmss 경계 + 라이�
 });
 
 test('17. 라이브 동기 카드 모션 게이트 — watch 폴백 cards(자리표)는 정지 유지', () => {
-  // 라이브 목록 없음(liveWorkers=[]) → 폴백 cards가 running 상태여도 모션 없음
+  // 라이브 목록 미정(liveWorkers=undefined, 명시 트랜스크립트 모드) → 폴백 cards가
+  // running 상태여도 모션 없음. 라이브 목록이 '빈 배열'이면 정직한 빈 상태 박스 경로.
   const state = createInitialState('watch');
   state.phase = '완료';
   state.neonState = 'pass';
-  state.liveWorkers = [];
+  state.liveWorkers = undefined;
   state.swarmActive = 0;
   state.cards = state.cards.map((c, i) =>
     i === 1 ? { ...c, status: 'running' as const, progress: 0 } : c
@@ -1759,4 +1760,44 @@ test('taskProgress: renderFrame shows real progress line only when taskProgress 
   const undefTp = createInitialState('watch');
   const undefText = renderFrame(undefTp, 148, 43).toPlainString();
   assert.ok(!undefText.includes('태스크'), 'no progress line when undefined');
+});
+
+test('watch + liveWorkers=[] — 정직한 단일 빈 상태 박스(자리표 3카드 없음, 침착 정지 프레임)', () => {
+  const base = createInitialState('watch');
+  base.liveWorkers = [];
+  // 순수 DB+hc 관제 모드(cli.ts)의 실제 초기 상태 — 침착 대기(phase·스피너 정지)
+  base.phase = '대기 중';
+  base.neonState = 'idle';
+  base.advisorState = '대기 중';
+  base.activeTrigger = -1;
+  base.simTime = 1.0;
+  const text = renderFrame(base, 148, 43).toPlainString();
+
+  // 1) 정직한 빈 상태 안내 문구가 렌더된다
+  assert.ok(
+    text.includes('현재 실행 중인 하위 워커가 없습니다'),
+    '빈 상태 메시지 렌더'
+  );
+
+  // 2) 가짜 자리표 카드(explore/coder/verifier, search/grep/audit)가 없다
+  for (const fake of ['explore', 'coder', 'verifier', 'search', 'grep', 'audit']) {
+    assert.ok(!text.includes(fake), `자리표 카드 "${fake}" 미노출`);
+  }
+
+  // 3) 단일 수직 스템 — 3방향 팬아웃 갈래(레일 접합 문자)·초과 배지가 없다
+  assert.ok(!/[┬┴┼]/.test(text), '3분기 팬아웃 스템 부재(단일 세로 와이어)');
+  assert.ok(!text.includes('+2개 더'), '빈 상태에서 초과 배지 오탐 없음');
+
+  // 4) 침착 대기 불변식 — 전부 idle이면 simTime이 달라도 프레임 100% 동일
+  const f1 = renderFrame({ ...base, simTime: 1.0 }, 148, 43).toPlainString();
+  const f2 = renderFrame({ ...base, simTime: 2.7 }, 148, 43).toPlainString();
+  const f3 = renderFrame({ ...base, simTime: 13.4 }, 148, 43).toPlainString();
+  assert.equal(f1, f2, 'simTime 1.0 vs 2.7 — 프레임 동일');
+  assert.equal(f1, f3, 'simTime 1.0 vs 13.4 — 프레임 동일');
+
+  // 5) 데모/명시 트랜스크립트 모드(liveWorkers === undefined)는 기존 3슬롯 cards 유지
+  const demo = createInitialState('demo');
+  const demoText = renderFrame(demo, 148, 43).toPlainString();
+  assert.ok(demoText.includes('search'), '데모 모드 기존 cards 폴백 유지');
+  assert.ok(!demoText.includes('현재 실행 중인 하위 워커가 없습니다'), '데모에는 빈 상태 미적용');
 });

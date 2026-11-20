@@ -23,12 +23,74 @@ pub const GLOBAL_PROJECT_ID: &str = "__GLOBAL__";
 /// 로컬 타임존 기준 `YYYY-MM-DD` — agy 일일 예산 키 (TS `localDay`와 동일).
 fn local_day(now_ms: i64) -> String {
     let secs = now_ms.div_euclid(1000);
+    let (year, mon, day) = local_ymd(secs);
+    format!("{:04}-{:02}-{:02}", year, mon, day)
+}
+
+/// 로컬 타임존 연/월/일 — Unix: `localtime_r`(스레드 안전).
+#[cfg(unix)]
+fn local_ymd(secs: i64) -> (i32, u32, u32) {
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     let t: libc::time_t = secs as libc::time_t;
     unsafe {
         libc::localtime_r(&t, &mut tm);
     }
-    format!("{:04}-{:02}-{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday)
+    (tm.tm_year + 1900, (tm.tm_mon + 1) as u32, tm.tm_mday as u32)
+}
+
+/// MSVCRT `struct tm` 레이아웃 — `_localtime64_s`가 i32 필드 9개를 채운다.
+/// extern 선언만으로 MSVC·GNU 양 Rust 툴체인에서 msvcrt에 링크된다(추가 크레이트 0).
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Default)]
+struct WinTm {
+    tm_sec: i32,
+    tm_min: i32,
+    tm_hour: i32,
+    tm_mday: i32,
+    tm_mon: i32,
+    tm_year: i32,
+    tm_wday: i32,
+    tm_yday: i32,
+    tm_isdst: i32,
+}
+
+#[cfg(windows)]
+extern "C" {
+    fn _localtime64_s(tm: *mut WinTm, time: *const i64) -> i32;
+}
+
+/// Windows: MSVCRT `_localtime64_s`(반환 0 = 성공). 실패 시 UTC 폴백.
+#[cfg(windows)]
+fn local_ymd(secs: i64) -> (i32, u32, u32) {
+    let mut tm = WinTm::default();
+    let t: i64 = secs;
+    if unsafe { _localtime64_s(&mut tm, &t) } != 0 {
+        return civil_from_days_utc(secs);
+    }
+    (tm.tm_year + 1900, (tm.tm_mon + 1) as u32, tm.tm_mday as u32)
+}
+
+/// 그 외 플랫폼: 로컬 타임존 API가 없으므로 UTC로 계산한다.
+#[cfg(not(any(unix, windows)))]
+fn local_ymd(secs: i64) -> (i32, u32, u32) {
+    civil_from_days_utc(secs)
+}
+
+/// UTC 기준 연/월/일 — Howard Hinnant `civil_from_days` 산법(라이브러리 0).
+#[cfg(not(unix))]
+fn civil_from_days_utc(secs: i64) -> (i32, u32, u32) {
+    let days = secs.div_euclid(86_400);
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe: u64 = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let month = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32; // [1, 12]
+    let year = yoe as i64 + era * 400 + i64::from(month <= 2);
+    (year as i32, month, day)
 }
 
 /// `$XDG_STATE_HOME`(비빈 값) 또는 `~/.local/state` + `/dgate/decision.db`.
@@ -677,7 +739,14 @@ pub struct ProjectIdentity {
 }
 
 fn canonical(p: &Path) -> PathBuf {
-    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+    let c = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    // Windows canonicalize는 `\\?\C:\...` verbatim 접두를 붙인다 — Node v1
+    // realpathSync(접두 없음)와 project_id 해시 입력이 동일해야 하므로 제거한다.
+    #[cfg(windows)]
+    if let Some(stripped) = c.to_string_lossy().strip_prefix(r"\\?\") {
+        return PathBuf::from(stripped);
+    }
+    c
 }
 
 fn identity_for_path(real_root: &Path) -> ProjectIdentity {
@@ -878,7 +947,8 @@ mod tests {
         let ident = resolve_project_identity(&tmp);
         assert!(ident.project_id.starts_with("proj_"));
         // macOS /tmp → /private/tmp canonicalize 후에도 동일 식별
-        let real = tmp.canonicalize().unwrap();
+        // (Windows에서는 canonical()이 `\\?\` 접두를 제거한 경로를 쓴다)
+        let real = canonical(&tmp);
         let s = real.to_string_lossy();
         let d = Sha256::digest(s.as_bytes());
         let hex: String = d.iter().take(8).map(|b| format!("{:02x}", b)).collect();

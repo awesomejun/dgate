@@ -14,4 +14,7 @@ dgate-core = { path = "../dgate-core" }
 gpui = "0.2.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde_json = "1"
+
+# libc은 Unix 전용(localtime_r) — Windows 빌드는 끌어오지 않는다.
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"

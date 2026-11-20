@@ -39,11 +39,27 @@ fn node_path() -> &'static str {
 
 fn which(name: &str) -> Option<&'static str> {
     let path = std::env::var("PATH").unwrap_or_default();
-    for dir in path.split(':') {
-        let cand = Path::new(dir).join(name);
-        if cand.is_file() {
-            // 정적 문자열로 돌려주기 위해 누적 버퍼 사용
-            return Some(Box::leak(cand.to_string_lossy().into_owned().into_boxed_str()));
+    // PATH 목록 구분자 — Unix `:`, Windows `;`
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    for dir in path.split(sep) {
+        // Windows는 PATHEXT 변형(node.exe/node.cmd)까지 탐색한다.
+        #[cfg(windows)]
+        let candidates: Vec<PathBuf> = {
+            let mut v = vec![Path::new(dir).join(name)];
+            if !name.contains('.') {
+                for ext in ["exe", "cmd", "bat"] {
+                    v.push(Path::new(dir).join(format!("{name}.{ext}")));
+                }
+            }
+            v
+        };
+        #[cfg(not(windows))]
+        let candidates: Vec<PathBuf> = vec![Path::new(dir).join(name)];
+        for cand in candidates {
+            if cand.is_file() {
+                // 정적 문자열로 돌려주기 위해 누적 버퍼 사용
+                return Some(Box::leak(cand.to_string_lossy().into_owned().into_boxed_str()));
+            }
         }
     }
     None
@@ -181,9 +197,14 @@ fn test_node_rust_sqlite_cross_compatibility() {
     assert_eq!(record.status, 0, "node record: {}", record.stderr);
     assert_eq!(last_json(&record.stdout)["recorded"], true);
 
+    // wrap 자식 — Unix: /bin/sh -c, Windows: cmd /C(크로스플랫폼)
+    #[cfg(unix)]
+    let wrap_child: Vec<&str> = vec!["/bin/sh", "-c", "echo compat-ok"];
+    #[cfg(windows)]
+    let wrap_child: Vec<&str> = vec!["cmd", "/C", "echo compat-ok"];
     let wrap = run_node_dg(
         &["wrap", "--route", "file_select", "--tool-class", "file_edit",
-          "--project", &repo_s, "--", "/bin/sh", "-c", "echo compat-ok"],
+          "--project", &repo_s, "--", wrap_child[0], wrap_child[1], wrap_child[2]],
         &dbs,
     );
     assert_eq!(wrap.status, 0, "node wrap: {}", wrap.stderr);
@@ -294,7 +315,14 @@ fn test_project_id_hash_algorithm_identity() {
     let pid_node = last_json(&node.stdout)["project_id"].as_str().unwrap().to_string();
 
     // realpath(canonicalize) 기준 해시 재현
+    // Windows canonicalize는 `\\?\` verbatim 접두를 붙인다 — Node realpathSync와
+    // 해시 입력을 맞추기 위해 db.rs canonical()과 동일하게 제거한다.
     let real = std::fs::canonicalize(&repo).unwrap();
+    #[cfg(windows)]
+    let real = {
+        let s = real.to_string_lossy().into_owned();
+        PathBuf::from(s.strip_prefix(r"\\?\").unwrap_or(&s))
+    };
     let digest = Sha256::digest(real.to_string_lossy().as_bytes());
     let hex: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
     let expected = format!("proj_{hex}");

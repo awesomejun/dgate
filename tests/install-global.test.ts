@@ -71,3 +71,88 @@ test('refuses to overwrite a non-dgate file with the same name', () => {
   assert.equal(fs.readFileSync(file, 'utf8'), '#!/bin/sh\necho precious\n');
   fs.rmSync(bin, { recursive: true, force: true });
 });
+
+// ---------------------------------------------------------------------------
+// Windows(.cmd) 래퍼 — --platform win32 로 모든 호스트에서 결정적 검증
+// ---------------------------------------------------------------------------
+
+test('win32: install creates 4 .cmd wrappers (@echo off + rem marker, no posix files)', () => {
+  const bin = tmpBinDir();
+  const { status, stderr } = runInstaller(['--bin-dir', bin, '--platform', 'win32']);
+  assert.equal(status, 0, stderr);
+  for (const name of WRAPPER_NAMES) {
+    const file = path.join(bin, `${name}.cmd`);
+    assert.ok(fs.existsSync(file), `missing ${name}.cmd`);
+    const lines = fs.readFileSync(file, 'utf8').split('\r\n');
+    assert.equal(lines[0], '@echo off', `${name}.cmd first line`);
+    assert.equal(lines[1], 'rem dgate-global-wrapper', `${name}.cmd marker on line 2`);
+    assert.ok(!fs.existsSync(path.join(bin, name)), `posix wrapper ${name} must not be created on win32`);
+  }
+  // gui 래퍼 — .exe 우선 + cargo run --release 폴백 계약
+  const gui = fs.readFileSync(path.join(bin, 'dgate-gui.cmd'), 'utf8');
+  assert.ok(gui.includes('target\\release\\dgate-gui.exe'), 'gui release .exe check');
+  assert.ok(gui.includes('cargo run --release'), 'gui cargo fallback');
+  // dg/dgate — .exe + node 폴백 계약
+  const dgw = fs.readFileSync(path.join(bin, 'dg.cmd'), 'utf8');
+  assert.ok(dgw.includes('target\\release\\dg.exe'), 'dg release .exe check');
+  assert.ok(dgw.includes('dg.ts'), 'dg node fallback');
+  const dgatew = fs.readFileSync(path.join(bin, 'dgate.cmd'), 'utf8');
+  assert.ok(dgatew.includes('target\\release\\dgate.exe'), 'dgate release .exe check');
+  assert.ok(dgatew.includes('cli.ts'), 'dgate node fallback');
+  fs.rmSync(bin, { recursive: true, force: true });
+});
+
+test('win32: --uninstall removes ONLY managed .cmd files; unmanaged files untouched', () => {
+  const bin = tmpBinDir();
+  assert.equal(runInstaller(['--bin-dir', bin, '--platform', 'win32']).status, 0);
+  const userCmd = path.join(bin, 'my-own-tool.cmd');
+  fs.writeFileSync(userCmd, '@echo off\r\nrem my tool\r\n');
+  const userSh = path.join(bin, 'dg'); // 같은 basename의 비관리 posix 파일도 보호되어야 한다
+  fs.writeFileSync(userSh, '#!/bin/sh\necho hi\n', { mode: 0o755 });
+  const { status, stderr } = runInstaller(['--bin-dir', bin, '--platform', 'win32', '--uninstall']);
+  assert.equal(status, 0, stderr);
+  for (const name of WRAPPER_NAMES) {
+    assert.ok(!fs.existsSync(path.join(bin, `${name}.cmd`)), `${name}.cmd still present`);
+  }
+  assert.ok(fs.existsSync(userCmd), 'unmanaged user .cmd was removed!');
+  assert.ok(fs.existsSync(userSh), 'unmanaged posix-name file was removed!');
+  fs.rmSync(bin, { recursive: true, force: true });
+});
+
+test('win32: refuses to overwrite a non-dgate .cmd file with the same name', () => {
+  const bin = tmpBinDir();
+  const file = path.join(bin, 'dg.cmd');
+  fs.writeFileSync(file, '@echo off\r\nrem precious\r\n');
+  const { status, stderr } = runInstaller(['--bin-dir', bin, '--platform', 'win32']);
+  assert.equal(status, 1);
+  assert.ok(stderr.includes('Refusing to overwrite'), stderr);
+  assert.ok(fs.readFileSync(file, 'utf8').startsWith('@echo off\r\nrem precious'), 'original content intact');
+  fs.rmSync(bin, { recursive: true, force: true });
+});
+
+test('win32: --dry-run creates 0 files', () => {
+  const bin = tmpBinDir();
+  const { status } = runInstaller(['--bin-dir', bin, '--platform', 'win32', '--dry-run']);
+  assert.equal(status, 0);
+  assert.deepEqual(fs.readdirSync(bin), []);
+  fs.rmSync(bin, { recursive: true, force: true });
+});
+
+test('invalid --platform value exits 2 with usage', () => {
+  const bin = tmpBinDir();
+  const { status, stderr } = runInstaller(['--bin-dir', bin, '--platform', 'plan9']);
+  assert.equal(status, 2);
+  assert.ok(stderr.includes('Invalid --platform'), stderr);
+  fs.rmSync(bin, { recursive: true, force: true });
+});
+
+test('posix: re-running installer over managed wrappers is idempotent', () => {
+  const bin = tmpBinDir();
+  assert.equal(runInstaller(['--bin-dir', bin]).status, 0);
+  const { status, stderr } = runInstaller(['--bin-dir', bin]);
+  assert.equal(status, 0, stderr);
+  for (const name of WRAPPER_NAMES) {
+    assert.ok(fs.existsSync(path.join(bin, name)));
+  }
+  fs.rmSync(bin, { recursive: true, force: true });
+});

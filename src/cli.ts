@@ -88,7 +88,7 @@ function appendRecentDecisionEvents(state: AppState, dbPath: string, limit = 6):
       const body = ok
         ? `[${row.source}] ${row.tool_name} — ok`
         : `[${row.source}] ${row.tool_name} — ${row.error_snippet ?? 'fail'}`;
-      appendLog(state, 'DB', ok ? 'green' : 'red', redactSecrets(body).slice(0, 160), time);
+      appendLog(state, 'DB', ok ? 'green' : 'orange', redactSecrets(body).slice(0, 160), time);
     }
   } catch {
     // 결정 DB 읽기 실패 시 빈 기록 유지 — 추측 기록을 채우지 않는다.
@@ -1270,6 +1270,12 @@ function main(): void {
       state.neonState = 'idle';
       state.advisorState = '대기 중';
       state.activeTrigger = -1;
+      // 첫 hc 폴 이전에도 가짜 3슬롯 자리표 카드가 1프레임이라도 깜빡이지 않도록
+      // liveWorkers를 즉시 빈 목록으로 초기화한다(렌더는 빈 상태 박스로 폴백).
+      state.liveWorkers = [];
+      state.mainSummary = '활성 세션 관측 중 (실제 DB + hc 상태)';
+      state.latestAdvice = '» 대기 중 — 자문 세션 없음';
+      state.neonSummary = '교차 검증 대기 중';
       state.cards = [
         {
           name: 'explore',

@@ -17,7 +17,10 @@ export function renderFrame(state: AppState, cols: number, rows: number): CellBu
   const buf = new CellBuffer(cols, rows, THEME.bg, THEME.fg);
   // 실제 보여줄 워커 카드 수(라이브 가변 목록 우선)만큼 레이아웃 카드 슬롯을 구성한다.
   const workerCards = workerCardsOf(state);
-  const visibleCount = Math.max(1, Math.min(workerCards.length, maxCardSlotsFor(cols)));
+  // 라이브 watch에서 활성 하위 워커 0명 — 카드 1칸짜리 정직한 빈 상태(와이어는 단일 수직 스템).
+  const visibleCount = isEmptyLiveWatch(state)
+    ? 1
+    : Math.max(1, Math.min(workerCards.length, maxCardSlotsFor(cols)));
   const layout = computeLayout(cols, rows, visibleCount);
 
   if (layout.kind === 'full') {
@@ -95,6 +98,13 @@ function renderFullLayout(buf: CellBuffer, state: AppState, L: FullLayout): void
 function workerCardsOf(state: AppState): SwarmCard[] {
   return state.liveWorkers && state.liveWorkers.length > 0 ? state.liveWorkers : state.cards;
 }
+
+/** 라이브 watch 폴링은 살아 있지만 활성 하위 워커가 0명인 정직한 빈 상태. */
+function isEmptyLiveWatch(state: AppState): boolean {
+  return state.mode === 'watch' && state.liveWorkers !== undefined && state.liveWorkers.length === 0;
+}
+
+const EMPTY_WORKERS_MESSAGE = '현재 실행 중인 하위 워커가 없습니다';
 
 /**
  * 카드/와이어 라이브 모션 게이트 — 데모이거나 실제 라이브 워커 목록이 있을 때만 움직인다.
@@ -600,7 +610,13 @@ function renderMainPanel(buf: CellBuffer, state: AppState, L: FullLayout): void 
     style: glowing || focused ? 'heavy' : 'single',
     borderColor,
     fillBg: panelBg,
-    rightLabel: focused ? 'Enter:편집' : glowing ? 'Advisor 자문' : undefined,
+    rightLabel: focused
+      ? state.mode === 'watch' || state.mode === 'stream'
+        ? '관측 중'
+        : 'Enter:편집'
+      : glowing
+        ? 'Advisor 자문'
+        : undefined,
     rightLabelColor: glowing ? THEME.purple : THEME.orange,
     boldBorder: glowing || focused,
   });
@@ -906,7 +922,8 @@ function renderDecisionPanel(buf: CellBuffer, state: AppState, L: FullLayout): v
 function renderSwarmSection(buf: CellBuffer, state: AppState, L: FullLayout): void {
   // 위임 라벨 (하위 에이전트에 위임 · Workers) — 슬롯 초과 워커는 +N 배지로 안내
   const workerCards = workerCardsOf(state);
-  const overflow = workerCards.length - L.cards.length;
+  // 라이브 watch 빈 상태(카드 1칸)에서 cards(3) 폴백 길이로 '+N개 더' 오탐 방지
+  const overflow = isEmptyLiveWatch(state) ? 0 : workerCards.length - L.cards.length;
   if (L.delegateLabelY < L.fanOutY) {
     const first = L.cards[0]!;
     const last = L.cards[L.cards.length - 1]!;
@@ -931,6 +948,31 @@ function renderSwarmSection(buf: CellBuffer, state: AppState, L: FullLayout): vo
 
   const focused = state.focus === 'swarm';
   const errAdvisory = state.activeTrigger === 1;
+
+  // 라이브 watch + 활성 하위 워커 0명 — 정직한 단일 뮤트 빈 상태 박스.
+  // 가짜 explore/coder/verifier·search/grep/audit 자리표 카드를 절대 그리지 않는다.
+  if (isEmptyLiveWatch(state)) {
+    const emptyRect = L.cards[0]!;
+    buf.drawBox(emptyRect, {
+      style: 'single',
+      borderColor: THEME.borderLog,
+      fillBg: THEME.bg,
+    });
+    const msgY = emptyRect.y + Math.max(1, Math.floor(emptyRect.h / 2));
+    if (msgY < emptyRect.y + emptyRect.h - 1) {
+      buf.writeCentered(
+        emptyRect.x + 1,
+        msgY,
+        emptyRect.w - 2,
+        EMPTY_WORKERS_MESSAGE,
+        THEME.muted,
+        THEME.bg,
+        false
+      );
+    }
+    return;
+  }
+
   // 라이브 동기화 중이면 가변 길이 라이브 워커 카드를, 아니면 트랜스크립트 3슬롯 cards를
   const motion = liveMotionOf(state);
 
@@ -1412,6 +1454,12 @@ function renderCompactLayout(buf: CellBuffer, state: AppState, L: CompactLayout)
     const ix = B.x + 2;
     const iw = B.w - 4;
     let cy = B.y + 1;
+    if (isEmptyLiveWatch(state)) {
+      // 라이브 watch + 활성 하위 워커 0명 — 가짜 자리표 카드 대신 정직한 빈 상태 한 줄.
+      buf.writeCentered(B.x + 2, cy, B.w - 4, EMPTY_WORKERS_MESSAGE, THEME.muted, THEME.bg, false);
+      renderFooter(buf, state, 1, L.footerY, L.cols - 2);
+      return;
+    }
     const motion = liveMotionOf(state);
     for (const [idx, c] of workerCardsOf(state).entries()) {
       if (cy >= B.y + B.h - 1) break;

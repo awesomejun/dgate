@@ -18,8 +18,11 @@ path = "src/lib.rs"
 dgate-core = { path = "../dgate-core" }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
-libc = "0.2"
 rand = "0.8"
+
+# libc은 Unix 전용(신그널·프로세스 그룹) — Windows 빌드는 끌어오지 않는다.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

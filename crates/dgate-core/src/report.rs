@@ -1072,19 +1072,26 @@ mod tests {
         for d in ["src", "scripts", ".agents", ".herdr/report", ".herdr/roles"] {
             fs::create_dir_all(repo.join(d)).unwrap();
         }
-        // 심볼릭 링크 우회: repo/src-link → repo/src
+        // 심볼릭 링크 우회: repo/src-link → repo/src (Unix 전용 — Windows 심볼릭 링크는 권한 필요)
+        #[cfg(unix)]
         std::os::unix::fs::symlink(repo.join("src"), repo.join("src-link")).unwrap();
         fs::write(repo.join("package.json"), "{}").unwrap();
 
-        let denied = [
+        let mut denied = vec![
             repo.join("src").join("x.md"),
             repo.join("scripts").join("x.md"),
             repo.join(".agents").join("x.md"),
             repo.join(".herdr").join("roles").join("lead.md"),
-            repo.join(".herdr").join("report").join("..").join("..").join("src").join("x.md"),
-            repo.join("src-link").join("x.md"),
+            repo.join(".herdr")
+                .join("report")
+                .join("..")
+                .join("..")
+                .join("src")
+                .join("x.md"),
             repo.join("package.json"),
         ];
+        #[cfg(unix)]
+        denied.push(repo.join("src-link").join("x.md"));
         for p in &denied {
             let v = validate_report_out_path(p.to_str().unwrap(), &repo);
             assert!(!v.allowed, "거부 예상: {:?}", p);

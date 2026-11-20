@@ -12,6 +12,11 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::{Arc, Mutex};
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
+
 use serde_json::{json, Map, Value};
 
 use crate::args::{optional_flag, parse_int_flag, require_flag, ParsedArgs};
@@ -23,7 +28,8 @@ use dgate_core::engine::{
 };
 use dgate_core::redact::{build_sanitized_child_env, redact_secrets};
 
-/// TS `SIGNAL_EXIT_OFFSET` — 시그널 종료 시 exit code 매핑.
+/// TS `SIGNAL_EXIT_OFFSET` — 시그널 종료 시 exit code 매핑(Unix 전용 신호 상수).
+#[cfg(unix)]
 fn signal_exit_offset(signal: i32) -> i32 {
     match signal {
         libc::SIGHUP => 1,
@@ -36,6 +42,7 @@ fn signal_exit_offset(signal: i32) -> i32 {
     }
 }
 
+#[cfg(unix)]
 fn signal_name(signal: i32) -> Option<&'static str> {
     match signal {
         libc::SIGHUP => Some("SIGHUP"),
@@ -46,6 +53,17 @@ fn signal_name(signal: i32) -> Option<&'static str> {
         libc::SIGTERM => Some("SIGTERM"),
         _ => None,
     }
+}
+
+/// Windows엔 유닉스 시그널이 없다 — 종료 원인은 exit code로만 구분된다.
+#[cfg(windows)]
+fn signal_exit_offset(_exit_code: i32) -> i32 {
+    0
+}
+
+#[cfg(windows)]
+fn signal_name(_exit_code: i32) -> Option<&'static str> {
+    None
 }
 
 /// 스트림 공유 상태 — 두 스트림이 하나의 테일 버퍼에 라인을 누적한다(TS `ingest`).
@@ -92,6 +110,18 @@ impl CaptureState {
     }
 }
 
+/// Windows 프로세스 트리 강제 종료 — `taskkill /T /F`가 자식의 자식(손자)까지
+/// 한 번에 끝낸다. Unix의 `kill(-pgid, SIGKILL)` 그룹 킬에 대응하는 유일한
+/// 신뢰 가능한 네이티브 수단(별도 크레이트 0, System32 기본 내장).
+#[cfg(windows)]
+fn kill_process_tree_hard(pid: u32) {
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
 /// 워치독 + 판스루 리더를 구동하고 자식 종료를 기다린다.
 struct WrapRunResult {
     exit_code: Option<i64>,
@@ -117,8 +147,6 @@ fn run_wrapped_child(
     started_epoch_ms: i64,
     exec_attempt: Option<i64>,
 ) -> std::io::Result<WrapRunResult> {
-    use std::os::unix::process::CommandExt;
-
     let started = std::time::Instant::now();
     let state = Arc::new(CaptureState {
         last_output_ms: AtomicI64::new(started_epoch_ms),
@@ -137,9 +165,11 @@ fn run_wrapped_child(
         }
         None => {}
     }
-    // 자체 프로세스 그룹 리더 — kill(-pgid)가 트리 전체(자식의 자식까지)를 끝낸다.
+    // Unix: 자체 프로세스 그룹 리더 — kill(-pgid)가 트리 전체(자식의 자식까지)를 끝낸다.
     // brief 계약상 setsid 대신 setpgid(0,0)을 쓴다: macOS fork 자식에서 setsid는
     // EINVAL을 내고 후속 setpgid 폴백까지 오염시켜 스폰 전체가 실패한다(실측).
+    // Windows: 프로세스 그룹 개념이 없어 그냥 스폰한다(킬은 taskkill /T가 트리 단위로 처리).
+    #[cfg(unix)]
     unsafe {
         cmd.pre_exec(|| {
             if libc::setpgid(0, 0) != 0 {
@@ -150,7 +180,7 @@ fn run_wrapped_child(
     }
 
     let mut child = cmd.spawn()?;
-    let child_pid = child.id() as i32;
+    let child_pid = child.id();
     state
         .last_output_ms
         .store(started_epoch_ms, std::sync::atomic::Ordering::SeqCst);
@@ -242,12 +272,17 @@ fn run_wrapped_child(
                 return;
             }
             if wd_state.kill_sent.load(std::sync::atomic::Ordering::SeqCst) {
-                // 킬 개시 — grace 후 SIGKILL 확정 킬
-                std::thread::sleep(std::time::Duration::from_millis(kill_grace_ms.max(0) as u64));
-                if !wd_state.settled.load(std::sync::atomic::Ordering::SeqCst) {
-                    unsafe {
-                        libc::kill(-child_pid, libc::SIGKILL);
-                        libc::kill(child_pid, libc::SIGKILL);
+                // 킬 개시 — grace 후 SIGKILL 확정 킬(Unix).
+                // Windows: taskkill /T /F는 이미 즉시 강제 종료라 grace 재킬이 불필요(멱등).
+                #[cfg(unix)]
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(kill_grace_ms.max(0) as u64));
+                    if !wd_state.settled.load(std::sync::atomic::Ordering::SeqCst) {
+                        let pid = child_pid as i32;
+                        unsafe {
+                            libc::kill(-pid, libc::SIGKILL);
+                            libc::kill(pid, libc::SIGKILL);
+                        }
                     }
                 }
                 return;
@@ -257,13 +292,19 @@ fn run_wrapped_child(
             if stall_ms > 0 && now - last_output >= stall_ms {
                 wd_state.stalled.store(true, std::sync::atomic::Ordering::SeqCst);
                 wd_state.kill_sent.store(true, std::sync::atomic::Ordering::SeqCst);
-                unsafe { libc::kill(-child_pid, libc::SIGTERM) };
+                #[cfg(unix)]
+                unsafe { libc::kill(-(child_pid as i32), libc::SIGTERM) };
+                #[cfg(windows)]
+                kill_process_tree_hard(child_pid);
                 continue;
             }
             if max_ms > 0 && now - started_epoch_ms >= max_ms {
                 wd_state.timed_out.store(true, std::sync::atomic::Ordering::SeqCst);
                 wd_state.kill_sent.store(true, std::sync::atomic::Ordering::SeqCst);
-                unsafe { libc::kill(-child_pid, libc::SIGTERM) };
+                #[cfg(unix)]
+                unsafe { libc::kill(-(child_pid as i32), libc::SIGTERM) };
+                #[cfg(windows)]
+                kill_process_tree_hard(child_pid);
                 continue;
             }
             let has_progress = wd_state.has_new_progress.load(std::sync::atomic::Ordering::SeqCst);
@@ -285,6 +326,11 @@ fn run_wrapped_child(
     });
 
     let status = child.wait()?;
+    // brief 계약(Windows): taskkill 트리 킬 후 child.kill() 백업 — 이미 종료 시 no-op
+    #[cfg(windows)]
+    {
+        let _ = child.kill();
+    }
     state
         .settled
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -303,10 +349,11 @@ fn run_wrapped_child(
         }
     }
 
-    let signal = {
-        use std::os::unix::process::ExitStatusExt;
-        status.signal()
-    };
+    // Windows엔 시그널 개념이 없다 — signal은 항상 None(원인은 exit code로 구분).
+    #[cfg(unix)]
+    let signal = status.signal();
+    #[cfg(not(unix))]
+    let signal: Option<i32> = None;
     let result = WrapRunResult {
         exit_code: status.code().map(|c| c as i64),
         signal,

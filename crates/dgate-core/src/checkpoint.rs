@@ -17,7 +17,6 @@
 //!   여부까지 대조한다(검증 대상 파일을 심볼릭 링크로 바꿔치기하는 변조 차단).
 
 use std::fs;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -30,6 +29,40 @@ pub const MAX_CHECKPOINT_BYTES: u64 = 12 * 1024 * 1024;
 
 /// 체크포인트 디렉터리명(run_id·wt_name) 허용 문자셋 — 경로 탈출 원천 차단
 const SAFE_NAME_RE: &str = r"^[A-Za-z0-9][A-Za-z0-9._-]*$";
+
+/// untracked 파일의 권한 비트 저장 — Unix 전용(Windows엔 실행 비트 개념이 없어 None).
+#[cfg(unix)]
+fn file_mode(st: &fs::Metadata) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    Some(st.mode() & 0o777)
+}
+
+#[cfg(not(unix))]
+fn file_mode(_st: &fs::Metadata) -> Option<u32> {
+    None
+}
+
+/// 체크포인트 심볼릭 링크 재생성 — Unix: `symlink`, Windows: `symlink_file`
+/// (링크 대상은 항상 파일 경로 문자열로 저장되어 있다. Windows 심볼릭 링크는
+/// 개발자 모드/관리자 권한이 필요 — 실패 시 호출자가 동일하게 오류 처리한다).
+fn create_file_symlink(link_target: &str, dest: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(link_target, dest)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_file(link_target, dest)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (link_target, dest);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "symlink restore unsupported on this platform",
+        ))
+    }
+}
 
 /// untracked 제외 세그먼트 — save·verify·restore가 같은 목록을 쓴다
 const EXCLUDED_SEGMENTS: [&str; 4] = [".git", "node_modules", ".herdr", ".verify"];
@@ -383,7 +416,7 @@ fn create_checkpoint_inner(
                 continue;
             }
             match fs::read(&src_abs) {
-                Ok(c) => (false, c, Some(st.mode() & 0o777)),
+                Ok(c) => (false, c, file_mode(&st)),
                 Err(e) => {
                     errors.push(format!("untracked read failed ({}): {}", rel, e));
                     continue;
@@ -759,16 +792,21 @@ pub fn restore_worktree_checkpoint(checkpoint_dir: &Path, target_worktree_dir: &
             if dest.exists() || fs::symlink_metadata(&dest).is_ok() {
                 let _ = fs::remove_file(&dest);
             }
-            if let Err(e) = std::os::unix::fs::symlink(&link_target, &dest) {
+            if let Err(e) = create_file_symlink(&link_target, &dest) {
                 errors.push(format!("restore failed (target kept for inspection): {}", e));
                 continue;
             }
         } else if let Err(e) = fs::copy(&src_abs, &dest) {
             errors.push(format!("restore failed (target kept for inspection): {}", e));
             continue;
-        } else if let Some(mode) = entry.mode {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&dest, fs::Permissions::from_mode(mode));
+        }
+        // 실행 비트 보존은 Unix 전용 — Windows엔 권한 비트가 없다.
+        #[cfg(unix)]
+        {
+            if let Some(mode) = entry.mode {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&dest, fs::Permissions::from_mode(mode));
+            }
         }
     }
     RestoreCheckpointResult { restored: errors.is_empty(), errors }
@@ -848,7 +886,6 @@ pub fn safe_remove_worktree(input: &SafeRemoveInput) -> SafeRemoveResult {
 mod tests {
     use super::*;
     use crate::testutil::temp_dir;
-    use std::os::unix::fs::PermissionsExt;
 
     fn git_ok(cwd: &Path, args: &[&str]) -> String {
         let r = git_run(cwd, args);
@@ -883,8 +920,13 @@ mod tests {
         fs::create_dir_all(wt.join("notes")).unwrap();
         fs::write(wt.join("notes").join("draft.txt"), "draft-초안\n").unwrap();
         fs::write(wt.join("run.sh"), "#!/bin/sh\necho hi\n").unwrap();
-        fs::set_permissions(&wt.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
-        std::os::unix::fs::symlink("notes/draft.txt", wt.join("link.txt")).unwrap();
+        // 실행 비트·심볼릭 링크는 Unix 전용 — Windows는 파일 자체만 만든다.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&wt.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+            std::os::unix::fs::symlink("notes/draft.txt", wt.join("link.txt")).unwrap();
+        }
         wt
     }
 
@@ -915,13 +957,15 @@ mod tests {
             .iter()
             .map(|f| format!("{}|{}{}", f.relpath, f.kind.as_str(), if f.symlink { "|symlink" } else { "" }))
             .collect();
-        for expected in [
+        let mut expected_entries = vec![
             "index.patch|index_patch",
             "worktree.patch|worktree_patch",
-            "untracked/link.txt|untracked|symlink",
             "untracked/notes/draft.txt|untracked",
             "untracked/run.sh|untracked",
-        ] {
+        ];
+        #[cfg(unix)]
+        expected_entries.push("untracked/link.txt|untracked|symlink");
+        for expected in expected_entries {
             assert!(relpaths.iter().any(|r| r == expected), "manifest missing entry: {} (got {:?})", expected, relpaths);
         }
 
@@ -950,9 +994,14 @@ mod tests {
         assert_eq!(fs::read_to_string(target.join("base.txt")).unwrap(), "v2-wt\n", "unstaged 내용 일치");
         assert_eq!(git_ok(&target, &["show", ":base.txt"]), "v2-idx\n", "staged(index) 내용 일치");
         assert_eq!(fs::read_to_string(target.join("notes").join("draft.txt")).unwrap(), "draft-초안\n");
-        let mode = fs::metadata(target.join("run.sh")).unwrap().mode() & 0o777;
-        assert_eq!(mode, 0o755, "실행 비트 보존");
-        assert_eq!(fs::read_link(target.join("link.txt")).unwrap().to_string_lossy(), "notes/draft.txt", "심볼릭 링크 대상 일치");
+        // 실행 비트·심볼릭 링크 복원 검증은 Unix 전용
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let mode = fs::metadata(target.join("run.sh")).unwrap().mode() & 0o777;
+            assert_eq!(mode, 0o755, "실행 비트 보존");
+            assert_eq!(fs::read_link(target.join("link.txt")).unwrap().to_string_lossy(), "notes/draft.txt", "심볼릭 링크 대상 일치");
+        }
 
         // 원본 워크트리와 전체 diff 상태 동등성(패치 적용 결과 = 원본 상태)
         let orig_index = git_ok(&wt, &["diff", "--cached", "--binary"]);
@@ -970,21 +1019,26 @@ mod tests {
         fs::create_dir_all(&ckpt_root).unwrap();
 
         // (a) 읽기전용 checkpointRoot — 체크포인트 저장 자체가 실패
-        fs::set_permissions(&ckpt_root, fs::Permissions::from_mode(0o500)).unwrap();
-        let rm_a = safe_remove_worktree(&SafeRemoveInput {
-            repo_dir: &repo,
-            worktree_dir: &wt,
-            run_id: "run-2",
-            worktree_name: None,
-            checkpoint_root: Some(&ckpt_root),
-            force_git_remove: false,
-        });
-        assert!(!rm_a.removed, "읽기전용 root에서는 삭제 거부");
-        assert_eq!(rm_a.exit_code, 4, "게이트 거부 exitCode는 4 (got {})", rm_a.exit_code);
-        assert!(!rm_a.errors.is_empty());
-        assert!(wt.join("base.txt").exists(), "워크트리가 그대로 보존되어야 한다");
-        assert!(wt.join("notes").join("draft.txt").exists(), "untracked 파일도 보존");
-        fs::set_permissions(&ckpt_root, fs::Permissions::from_mode(0o755)).unwrap();
+        //     (Windows는 디렉터리 읽기전용 비트가 쓰기 차단이 아니므로 Unix 전용 시나리오)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&ckpt_root, fs::Permissions::from_mode(0o500)).unwrap();
+            let rm_a = safe_remove_worktree(&SafeRemoveInput {
+                repo_dir: &repo,
+                worktree_dir: &wt,
+                run_id: "run-2",
+                worktree_name: None,
+                checkpoint_root: Some(&ckpt_root),
+                force_git_remove: false,
+            });
+            assert!(!rm_a.removed, "읽기전용 root에서는 삭제 거부");
+            assert_eq!(rm_a.exit_code, 4, "게이트 거부 exitCode는 4 (got {})", rm_a.exit_code);
+            assert!(!rm_a.errors.is_empty());
+            assert!(wt.join("base.txt").exists(), "워크트리가 그대로 보존되어야 한다");
+            assert!(wt.join("notes").join("draft.txt").exists(), "untracked 파일도 보존");
+            fs::set_permissions(&ckpt_root, fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
         // (b) 용량 초과(12MiB+) untracked — 저장 실패 → 삭제 거부 + 파일 보존
         let big = wt.join("big.bin");

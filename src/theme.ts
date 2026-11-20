@@ -86,5 +86,7 @@ export function resolveColorKey(key: AgentColorKey): RGB {
       return THEME.muted;
     case 'fg':
       return THEME.fg;
+    default:
+      return THEME.fg;
   }
 }

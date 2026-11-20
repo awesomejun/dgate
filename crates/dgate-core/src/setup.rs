@@ -358,21 +358,65 @@ fn is_executable_file(p: &Path) -> bool {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn is_executable_file(_p: &Path) -> bool {
     false
 }
 
-/// `which`와 동일한 의미론 — 검색 디렉터리를 순서대로 훑어 첫 실행 가능 파일을 반환.
+/// Windows — 실행 비트가 없으므로 PATHEXT 확장(.EXE/.CMD/.…) 보유를
+/// 실행 가능 판정으로 쓴다(`where.exe`와 동일 의미론).
+#[cfg(windows)]
+fn is_executable_file(p: &Path) -> bool {
+    let Some(ext) = p.extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    executable_extensions().iter().any(|e| e.eq_ignore_ascii_case(ext))
+}
+
+/// PATHEXT 실행 확장 목록(앞점 제거). 환경 변수가 없으면 Windows 기본값.
+#[cfg(windows)]
+fn executable_extensions() -> Vec<String> {
+    let default = ".COM;.EXE;.BAT;.CMD;.VBS;.JS;.WS;.MSC";
+    let raw = std::env::var("PATHEXT").unwrap_or_else(|_| default.to_string());
+    raw.split(';')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.trim_start_matches('.').to_string())
+        .collect()
+}
+
+/// `which`(Unix)/`where`(Windows)와 동일한 의미론 — 검색 디렉터리를 순서대로 훑어
+/// 첫 실행 가능 파일을 반환한다. Windows는 `dg` 검색 시 `dg.exe`/`dg.cmd` 등
+/// PATHEXT 변형도 함께 탐색한다.
 pub fn find_on_path(name: &str, search_dirs: &[PathBuf]) -> Option<String> {
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for dir in search_dirs {
         if dir.as_os_str().is_empty() || !seen.insert(dir.clone()) {
             continue;
         }
-        let cand = dir.join(name);
-        if is_executable_file(&cand) {
-            return Some(cand.to_string_lossy().into_owned());
+        #[cfg(not(windows))]
+        {
+            let cand = dir.join(name);
+            if is_executable_file(&cand) {
+                return Some(cand.to_string_lossy().into_owned());
+            }
+        }
+        #[cfg(windows)]
+        {
+            // 확장자 없는 이름은 PATHEXT 변형까지 후보로 늘린다(where.exe 패리티).
+            let mut candidates = vec![name.to_string()];
+            if !name.contains('.') {
+                candidates.extend(
+                    executable_extensions()
+                        .into_iter()
+                        .map(|ext| format!("{name}.{ext}")),
+                );
+            }
+            for cand in candidates {
+                let p = dir.join(cand);
+                if is_executable_file(&p) {
+                    return Some(p.to_string_lossy().into_owned());
+                }
+            }
         }
     }
     None
@@ -387,8 +431,10 @@ fn detect_bin(name: &str, search_dirs: &[PathBuf]) -> CliDetection {
 }
 
 fn split_path_list(v: Option<&str>) -> Vec<PathBuf> {
+    // PATH 목록 구분자 — Unix `:`, Windows `;`
+    let sep = if cfg!(windows) { ';' } else { ':' };
     v.unwrap_or("")
-        .split(':')
+        .split(sep)
         .filter(|s| !s.trim().is_empty())
         .map(PathBuf::from)
         .collect()
@@ -1575,7 +1621,7 @@ pub fn install_skill_links(opts: &InstallSkillLinksOptions) -> SkillLinkResult {
             }
             Err(_) => {
                 // 기존 경로 없음 — 심볼릭 링크 생성(실패는 조용히 스킵 처리)
-                match std::os::unix::fs::symlink(&source, &target) {
+                match link_or_copy_refuse(&source, &target) {
                     Ok(()) => res.linked.push(agent_dir.to_string_lossy().into_owned()),
                     Err(_) => res.skipped.push(SkipEntry {
                         dir: agent_dir.to_string_lossy().into_owned(),
@@ -1586,6 +1632,32 @@ pub fn install_skill_links(opts: &InstallSkillLinksOptions) -> SkillLinkResult {
         }
     }
     res
+}
+
+/// 스킬/훅 소스 연결 — Unix: 심볼릭 링크. Windows: `symlink_dir`/`symlink_file`
+/// (개발자 모드·관리자 권한 필요 — 실패 시 호출자가 기존과 동일하게
+/// 'symlink-failed' 스킵으로 처리한다. 관리되지 않은 파일은 절대 덮어쓰지 않는다).
+fn link_or_copy_refuse(source: &Path, target: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(source, target)
+    }
+    #[cfg(windows)]
+    {
+        if source.is_dir() {
+            std::os::windows::fs::symlink_dir(source, target)
+        } else {
+            std::os::windows::fs::symlink_file(source, target)
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (source, target);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "symlink unsupported on this platform",
+        ))
+    }
 }
 
 /// 타깃 프로젝트 훅 상태 진단(읽기전용) — `--repo` 지정 시 리포트에 포함된다.
@@ -1684,7 +1756,7 @@ pub fn install_repo_hooks(repo_dir: &Path, orchestrator_root: Option<&Path>) -> 
     let dst_hook = hooks_dir.join("dg-hook.ts");
     match std::fs::symlink_metadata(&dst_hook) {
         Err(_) => {
-            match std::os::unix::fs::symlink(&src_hook, &dst_hook) {
+            match link_or_copy_refuse(&src_hook, &dst_hook) {
                 Ok(()) => res.written.push(dst_hook.to_string_lossy().into_owned()),
                 Err(_) => res.skipped.push(PathSkipEntry {
                     path: dst_hook.to_string_lossy().into_owned(),
@@ -2113,7 +2185,12 @@ mod tests {
     // ---------- 테스트 픽스처 ----------
 
     fn make_exec(dir: &Path, name: &str) {
-        let p = dir.join(name);
+        // Windows 실행 판정은 확장 기반이므로 `<name>.exe`로 만든다.
+        #[cfg(windows)]
+        let file_name = format!("{name}.exe");
+        #[cfg(not(windows))]
+        let file_name = name.to_string();
+        let p = dir.join(file_name);
         std::fs::write(&p, "#!/bin/sh\nexit 0\n").unwrap();
         #[cfg(unix)]
         {
@@ -2146,10 +2223,12 @@ mod tests {
         make_exec(&tmp.join("b"), "tool");
         make_non_exec(&tmp.join("a"), "plain");
         let dirs = vec![tmp.join("a"), tmp.join("b")];
-        assert_eq!(
-            find_on_path("tool", &dirs),
-            Some(tmp.join("a").join("tool").to_string_lossy().into_owned())
-        );
+        // Windows는 make_exec이 `tool.exe`를 만든다 — 발견 파일명이 플랫폼별로 다르다.
+        #[cfg(windows)]
+        let expected = tmp.join("a").join("tool.exe").to_string_lossy().into_owned();
+        #[cfg(not(windows))]
+        let expected = tmp.join("a").join("tool").to_string_lossy().into_owned();
+        assert_eq!(find_on_path("tool", &dirs), Some(expected));
         assert_eq!(find_on_path("plain", &dirs), None, "실행 권한 없는 파일은 미검출");
         assert_eq!(find_on_path("missing", &dirs), None);
         // 빈 디렉터리·중복 디렉터리 무시

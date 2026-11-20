@@ -741,7 +741,7 @@ impl DashboardView {
         // 보이는 워커 열 수 — 좁은 창(<820px)은 2열 상한(카드 가독성), 넓으면 최대 4열.
         let col_cap = if vw < px(820.) { 2 } else { 4 };
         let cols = if sub_workers.is_empty() {
-            // 라이브 0 — 3슬롯 청사진(뷰포트와 무관한 침묵 3스템 토폴로지)
+            // 라이브 0 — 중앙 단일 스템 + 단일 빈 상태 박스(가짜 3스템 금지)
             visible_worker_columns(0)
         } else {
             visible_worker_columns(sub_workers.len()).min(col_cap)
@@ -1256,7 +1256,7 @@ impl DashboardView {
 
     /// Stage 3 — Workers 그리드 — 보이는 하위 워커 수 = 열 수(1/2/3/4+, 초과 2행 랩).
     /// lead/verifier/advisor 세션은 호출부에서 이미 제외되어 여기 내려오지 않는다.
-    /// 라이브 0이면 3슬롯 청사진(침묵 3스템 와이어와 동일 지오메트리).
+    /// 라이브 0이면 중앙 정렬된 조용한 빈 상태 박스(단일 뮤트 스템과 정렬).
     fn render_workers_section(
         &self,
         snap: &DashboardSnapshot,
@@ -1265,12 +1265,42 @@ impl DashboardView {
         cols: usize,
     ) -> gpui::Div {
         if sub_workers.is_empty() {
-            // 라이브 워커 0 — 침착한 청사진 슬롯 3열
-            let mut grid = div().flex().flex_row();
-            for slot in ["explore", "coder", "verifier"] {
-                grid = grid.child(blueprint_slot_card(slot, &role_model_label(snap, slot)));
+            // 라이브 워커 0 — 가짜 청사진 슬롯 없이 정직한 단일 빈 상태 박스.
+            // 스냅숏 미수신이면 로딩 문구, 수신 후면 안내 문구만 보여준다.
+            let (title, subtitle) = if self.controller.snapshot.is_none() {
+                ("활성 세션 조회 중…", "")
+            } else {
+                (
+                    "현재 실행 중인 하위 워커가 없습니다",
+                    "워커가 기동되면 여기에 자동으로 표시됩니다",
+                )
+            };
+            let mut box_ = div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .w_full()
+                .h(px(56.))
+                .rounded_lg()
+                .border_1()
+                .border_color(BORDER_LOG)
+                .bg(BG_ELEVATED)
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(TEXT_SOFT)
+                        .child(title),
+                );
+            if !subtitle.is_empty() {
+                box_ = box_.child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(MUTED)
+                        .child(subtitle),
+                );
             }
-            return grid;
+            return div().flex().flex_row().justify_center().child(box_);
         }
         if cols == 1 {
             // 단일 워커 — 중앙 정렬 카드(단일 중앙 스템과 정렬, 가로 레일 없음)
@@ -2736,79 +2766,6 @@ fn route_rank(r: &RouteMetric) -> u8 {
     } else {
         2
     }
-}
-
-/// 라이브 워커 0일 때의 청사진 슬롯 카드 — 실제 roster 모델 라벨 + 정직한 대기 상태.
-/// 가짜 진행바·애니메이션 일절 없음(3열 토폴로지 형태만 유지).
-fn blueprint_slot_card(slot: &str, model: &str) -> gpui::Div {
-    let description = match slot {
-        "explore" => "파일·구조 탐색 대기",
-        "coder" => "코드 수정·빌드 대기",
-        _ => "계획·결과 교차 검증 대기",
-    };
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .p_2()
-        .min_h(px(96.))
-        .rounded_lg()
-        .bg(BG)
-        .border_1()
-        .border_color(WORKER_BLUE)
-        .flex_1()
-        .min_w_0()
-        .mx_1()
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .min_w_0()
-                .min_h(px(18.))
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(TEXT_SOFT)
-                        .truncate()
-                        .child(slot.to_string()),
-                )
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .text_size(px(10.))
-                        .text_color(MUTED)
-                        .child("○ 대기 중"),
-                ),
-        )
-        .child(
-            div()
-                .h(px(14.))
-                .text_size(px(10.))
-                .text_color(MUTED)
-                .truncate()
-                .child(model.to_string()),
-        )
-        // 빈 트랙 — 채움 0 (대기 상태 위장 금지), 높이는 실행 카드와 동일 5px
-        .child(
-            div()
-                .flex()
-                .w_full()
-                .h(px(5.))
-                .flex_none()
-                .rounded_full()
-                .bg(BG_BLUE_TRACK),
-        )
-        .child(
-            div()
-                .h(px(16.))
-                .text_size(px(10.))
-                .text_color(DIM)
-                .truncate()
-                .child(description),
-        )
 }
 
 /// 세션 기록 1줄 — HH:MM:SS (dim) + 역할색 태그 + 1줄 요약.

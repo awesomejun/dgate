@@ -79,6 +79,49 @@ fn dg(args: &[&str], envs: &[(&str, &str)]) -> DgResult {
     dg_with_env(args, envs, None, None)
 }
 
+// ---------------------------------------------------------------------------
+// 크로스플랫폼 wrap 자식 헬퍼 — Unix: /bin/sh -c, Windows: cmd /C
+// ---------------------------------------------------------------------------
+
+fn strs(v: &[String]) -> Vec<&str> {
+    v.iter().map(String::as_str).collect()
+}
+
+fn shell_command(script: &str) -> Vec<String> {
+    #[cfg(unix)]
+    {
+        vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()]
+    }
+    #[cfg(windows)]
+    {
+        vec!["cmd".to_string(), "/C".to_string(), script.to_string()]
+    }
+}
+
+/// 산출물 생성 스크립트 — redirect 인용규칙이 셸마다 다르다(sh '…' / cmd "…").
+fn write_artifact_script(path: &str) -> String {
+    #[cfg(unix)]
+    {
+        format!("echo working; echo result > '{path}'; echo done")
+    }
+    #[cfg(windows)]
+    {
+        format!("echo working & echo result > \"{path}\" & echo done")
+    }
+}
+
+/// 스톨 유도 스크립트 — 60초 무출력 손자 프로세스(워치독 그룹/트리 킬 검증).
+fn stall_script() -> String {
+    #[cfg(unix)]
+    {
+        "echo start; /bin/sh -c 'sleep 60' ; echo never".to_string()
+    }
+    #[cfg(windows)]
+    {
+        "echo start & ping -n 60 127.0.0.1 > nul & echo never".to_string()
+    }
+}
+
 /// exit 0 + 마지막 stdout 줄을 JSON로 파싱
 fn dg_json(args: &[&str], envs: &[(&str, &str)]) -> Value {
     let mut all = args.to_vec();
@@ -153,17 +196,19 @@ fn test_01_route_wrap_lifecycle_stats_report_readonly() {
 
     // ---------- wrap 성공(산출물 AND 게이트 통과) ----------
     let artifact = base.join("out.txt");
-    let r = dg(
-        &[
-            "wrap", "--route", "file_select", "--tool-class", "file_edit",
-            "--fork", &fork_id, "--project", &repo_s,
-            "--require-artifact", &artifact.display().to_string(),
-            "--require-nonempty", "--require-stdout-nonempty",
-            "--stall-ms", "8000",
-            "--", "/bin/sh", "-c", &format!("echo working; echo result > '{}'; echo done", artifact.display()),
-        ],
-        &envs,
-    );
+    let mut wrap_args: Vec<String> = [
+        "wrap", "--route", "file_select", "--tool-class", "file_edit",
+        "--fork", &fork_id, "--project", &repo_s,
+        "--require-artifact", &artifact.display().to_string(),
+        "--require-nonempty", "--require-stdout-nonempty",
+        "--stall-ms", "8000",
+        "--",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    wrap_args.extend(shell_command(&write_artifact_script(&artifact.display().to_string())));
+    let r = dg(&strs(&wrap_args), &envs);
     assert_eq!(r.status, 0, "wrap success exit=0 (stderr={})", r.stderr);
     let summary: Value = serde_json::from_str(r.stderr.trim().lines().last().unwrap()).unwrap();
     assert_eq!(summary["ok"], 1, "AND 게이트 통과: {summary}");
@@ -171,46 +216,58 @@ fn test_01_route_wrap_lifecycle_stats_report_readonly() {
     assert_eq!(summary["committed"], true);
     assert_eq!(summary["closed"], true);
 
-    // ---------- wrap 스톨 타임아웃 — 프로세스 그룹 전체 킬 ----------
+    // ---------- wrap 스톨 타임아웃 — 프로세스 그룹/트리 전체 킬 ----------
     let gate2 = dg_json(&["gate", "--route", "tool_select", "--tool-class", "shell_exec", "--project", &repo_s], &envs);
     let fork2 = gate2["fork_id"].as_str().unwrap().to_string();
     let started = std::time::Instant::now();
-    let r = dg(
-        &[
-            "wrap", "--route", "tool_select", "--tool-class", "shell_exec",
-            "--fork", &fork2, "--project", &repo_s,
-            "--stall-ms", "800", "--kill-grace-ms", "300", "--max-ms", "60000",
-            "--", "/bin/sh", "-c", "echo start; /bin/sh -c 'sleep 60' ; echo never",
-        ],
-        &envs,
-    );
+    let mut wrap_args: Vec<String> = [
+        "wrap", "--route", "tool_select", "--tool-class", "shell_exec",
+        "--fork", &fork2, "--project", &repo_s,
+        "--stall-ms", "800", "--kill-grace-ms", "300", "--max-ms", "60000",
+        "--",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    wrap_args.extend(shell_command(&stall_script()));
+    let r = dg(&strs(&wrap_args), &envs);
     let elapsed = started.elapsed();
-    assert_eq!(r.status, 143, "SIGTERM 그룹 킬 → 128+15 (got {})", r.status);
+    if cfg!(unix) {
+        assert_eq!(r.status, 143, "SIGTERM 그룹 킬 → 128+15 (got {})", r.status);
+    } else {
+        // Windows: taskkill /T /F 강제 종료 — 자식은 비정상 종료 코드로 끝난다
+        assert_ne!(r.status, 0, "taskkill 트리 킬 → 비정상 종료 (got {})", r.status);
+    }
     assert!(elapsed.as_secs() < 10, "워치독이 60s 슬립을 조기 킬해야 함: {elapsed:?}");
     let summary: Value = serde_json::from_str(r.stderr.trim().lines().last().unwrap()).unwrap();
     assert_eq!(summary["stalled"], true);
     assert_eq!(summary["cause"], "stall");
     assert_eq!(summary["outcome"], "fail");
     assert_eq!(summary["committed"], true, "스톨 실패도 단일 Tx 커밋");
-    // 손자 sleep 60도 그룹 킬로 소멸 확인
-    let leftover = Command::new("pgrep").args(["-f", "sleep 60"]).output().unwrap();
-    assert!(
-        String::from_utf8_lossy(&leftover.stdout).trim().is_empty(),
-        "프로세스 그룹 킬 후 sleep 60 잔존 없음"
-    );
+    // 손자 sleep 60도 그룹 킬로 소멸 확인(Unix 전용 pgrep)
+    #[cfg(unix)]
+    {
+        let leftover = Command::new("pgrep").args(["-f", "sleep 60"]).output().unwrap();
+        assert!(
+            String::from_utf8_lossy(&leftover.stdout).trim().is_empty(),
+            "프로세스 그룹 킬 후 sleep 60 잔존 없음"
+        );
+    }
 
     // ---------- wrap 산출물 누락 → fail 기록(exit은 자식 종료코드) ----------
     let gate3 = dg_json(&["gate", "--route", "file_select", "--tool-class", "file_edit", "--project", &repo_s], &envs);
     let fork3 = gate3["fork_id"].as_str().unwrap().to_string();
-    let r = dg(
-        &[
-            "wrap", "--route", "file_select", "--tool-class", "file_edit",
-            "--fork", &fork3, "--project", &repo_s,
-            "--require-artifact", &base.join("missing.txt").display().to_string(),
-            "--", "/bin/sh", "-c", "echo clean-but-no-artifact",
-        ],
-        &envs,
-    );
+    let mut wrap_args: Vec<String> = [
+        "wrap", "--route", "file_select", "--tool-class", "file_edit",
+        "--fork", &fork3, "--project", &repo_s,
+        "--require-artifact", &base.join("missing.txt").display().to_string(),
+        "--",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    wrap_args.extend(shell_command("echo clean-but-no-artifact"));
+    let r = dg(&strs(&wrap_args), &envs);
     assert_eq!(r.status, 0, "자식 exit 0 → wrap exit 0(계약 위반은 DB에 fail)");
     let summary: Value = serde_json::from_str(r.stderr.trim().lines().last().unwrap()).unwrap();
     assert_eq!(summary["ok"], 0);
@@ -220,15 +277,17 @@ fn test_01_route_wrap_lifecycle_stats_report_readonly() {
     // ---------- wrap rerouted — 첫 줄 "rerouted" → 표본·실패 아님 ----------
     let gate4 = dg_json(&["gate", "--route", "file_select", "--tool-class", "file_edit", "--project", &repo_s], &envs);
     let fork4 = gate4["fork_id"].as_str().unwrap().to_string();
-    let r = dg(
-        &[
-            "wrap", "--route", "file_select", "--tool-class", "file_edit",
-            "--fork", &fork4, "--project", &repo_s,
-            "--require-stdout-nonempty",
-            "--", "/bin/sh", "-c", "echo rerouted",
-        ],
-        &envs,
-    );
+    let mut wrap_args: Vec<String> = [
+        "wrap", "--route", "file_select", "--tool-class", "file_edit",
+        "--fork", &fork4, "--project", &repo_s,
+        "--require-stdout-nonempty",
+        "--",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    wrap_args.extend(shell_command("echo rerouted"));
+    let r = dg(&strs(&wrap_args), &envs);
     assert_eq!(r.status, 0);
     let summary: Value = serde_json::from_str(r.stderr.trim().lines().last().unwrap()).unwrap();
     assert_eq!(summary["outcome"], "rerouted");
@@ -424,25 +483,29 @@ fn test_03_checkpoint_worktree_gates() {
     assert_eq!(r.status, 1, "변조 체크포인트 verify → exit 1");
 
     // worktree remove — 읽기전용 ckpt root → 게이트 거부 exit 4 + 워크트리 보존
+    // (Windows는 디렉터리 읽기전용 비트가 쓰기를 차단하지 않는다 — Unix 전용 시나리오)
     let ckpt_ro = base.join("ckpt-ro");
     std::fs::create_dir_all(&ckpt_ro).unwrap();
-    let mut perm = std::fs::metadata(&ckpt_ro).unwrap().permissions();
-    use std::os::unix::fs::PermissionsExt;
-    perm.set_mode(0o500);
-    std::fs::set_permissions(&ckpt_ro, perm).unwrap();
-    let denied = dg(
-        &[
-            "worktree", "remove", "--worktree", &wt.display().to_string(),
-            "--repo", &repo_s, "--run-id", "rm-fail",
-            "--checkpoint-root", &ckpt_ro.display().to_string(),
-        ],
-        &envs,
-    );
-    assert_eq!(denied.status, 4, "체크포인트 게이트 거부 → exit 4");
-    assert!(wt.join("base.txt").exists(), "워크트리 보존(거부 시)");
-    let mut perm2 = std::fs::metadata(&ckpt_ro).unwrap().permissions();
-    perm2.set_mode(0o755);
-    std::fs::set_permissions(&ckpt_ro, perm2).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = std::fs::metadata(&ckpt_ro).unwrap().permissions();
+        perm.set_mode(0o500);
+        std::fs::set_permissions(&ckpt_ro, perm).unwrap();
+        let denied = dg(
+            &[
+                "worktree", "remove", "--worktree", &wt.display().to_string(),
+                "--repo", &repo_s, "--run-id", "rm-fail",
+                "--checkpoint-root", &ckpt_ro.display().to_string(),
+            ],
+            &envs,
+        );
+        assert_eq!(denied.status, 4, "체크포인트 게이트 거부 → exit 4");
+        assert!(wt.join("base.txt").exists(), "워크트리 보존(거부 시)");
+        let mut perm2 = std::fs::metadata(&ckpt_ro).unwrap().permissions();
+        perm2.set_mode(0o755);
+        std::fs::set_permissions(&ckpt_ro, perm2).unwrap();
+    }
 
     // 정상 경로 → exit 0 + 삭제 + 체크포인트 보존
     let removed = dg(

@@ -135,7 +135,9 @@ fn report_json(rep: &setup::EnvironmentReport) -> Value {
 }
 
 fn stdin_is_tty() -> bool {
-    unsafe { libc::isatty(0) == 1 }
+    // std IsTerminal — 100% 안전·크로스플랫폼(libc isatty 대체)
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
 }
 
 fn prompt_yes(question: &str, default_yes: bool) -> bool {
