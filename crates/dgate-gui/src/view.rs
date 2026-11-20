@@ -1842,8 +1842,8 @@ impl DashboardView {
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll();
-            for e in snap.recent_log.iter().take(rows) {
-                body = body.child(log_line(e));
+            for (idx, e) in snap.recent_log.iter().take(rows).enumerate() {
+                body = body.child(log_line(e, idx == 0));
             }
             panel = panel.child(body);
         }
@@ -1988,19 +1988,34 @@ impl DashboardView {
                         .border_color(BORDER_HEADER)
                         .child(
                             div()
-                                .text_size(px(11.))
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(TEXT)
-                                .child(format!(
-                                    "[{}] {} ({}) · {} · {}{}",
-                                    w.repo_tag, w.name, w.address, status, elapsed, turn
-                                )),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(10.))
-                                .text_color(WORKER_BLUE)
-                                .child(w.telemetry_line()),
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(TEXT)
+                                        .child(format!(
+                                            "[{}] {} ({}) · {} · {}{}",
+                                            w.repo_tag, w.name, w.address, status, elapsed, turn
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .bg(BG_ELEVATED)
+                                        .border_1()
+                                        .border_color(WORKER_BLUE)
+                                        .text_size(px(9.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(WORKER_BLUE)
+                                        .child(w.telemetry_line()),
+                                ),
                         )
                         .child(
                             div()
@@ -3275,8 +3290,45 @@ fn route_rank(r: &RouteMetric) -> u8 {
     }
 }
 
-/// 세션 기록 1줄 — HH:MM:SS (dim) + 역할색 태그 + 1줄 요약.
-fn log_line(e: &RecentLogEntry) -> gpui::Div {
+/// 세션 기록 1줄의 우측 시맨틱 태그(1단어)와 색을 판정한다.
+fn classify_log_tag(role: &str, message: &str) -> (&'static str, Rgba) {
+    let lower = message.to_lowercase();
+    if role == "사용자" {
+        return ("input", WORKER_BLUE);
+    }
+    if lower.contains("오류")
+        || lower.contains("실패")
+        || lower.contains("error")
+        || lower.contains("fail")
+    {
+        return ("err", ROSE_DANGER);
+    }
+    if lower.contains("split") || lower.contains("분할") {
+        return ("split", LEAD_ORANGE);
+    }
+    if lower.contains("sharp") || lower.contains("직행") {
+        return ("sharp", GATE_GREEN);
+    }
+    if lower.contains("완료")
+        || lower.contains("종료")
+        || lower.contains("통과")
+        || lower.contains("pass")
+    {
+        return ("done", GATE_GREEN);
+    }
+    match role {
+        "Verifier" => ("verify", VERIFIER_NEON),
+        "Advisor" => ("advice", ADVISOR_PURPLE),
+        "Lead" => ("reply", LEAD_ORANGE),
+        "Worker" => ("spawn", WORKER_BLUE),
+        "Decision Gate" => ("gate", GATE_GREEN),
+        _ => ("live", MUTED),
+    }
+}
+
+/// 세션 기록 1줄 — › 마커 + HH:MM:SS (dim) + 역할색 태그 + 1줄 요약 + 우측 시맨틱 태그.
+fn log_line(e: &RecentLogEntry, is_latest: bool) -> gpui::Div {
+    let (tag_label, tag_color) = classify_log_tag(&e.source_role, &e.message);
     div()
         .flex()
         .flex_row()
@@ -3285,6 +3337,15 @@ fn log_line(e: &RecentLogEntry) -> gpui::Div {
         .min_w_0()
         .h(px(16.))
         .flex_none()
+        .child(
+            div()
+                .w(px(10.))
+                .flex_none()
+                .text_size(px(10.))
+                .font_weight(FontWeight::BOLD)
+                .text_color(if is_latest { TEXT } else { DIM })
+                .child(if is_latest { "›" } else { " " }),
+        )
         .child(
             div()
                 .w(px(56.))
@@ -3309,9 +3370,25 @@ fn log_line(e: &RecentLogEntry) -> gpui::Div {
                 .flex_1()
                 .min_w_0()
                 .text_size(px(10.))
-                .text_color(TEXT_SOFT)
+                .font_weight(if is_latest {
+                    FontWeight::MEDIUM
+                } else {
+                    FontWeight::NORMAL
+                })
+                .text_color(if is_latest { TEXT } else { TEXT_SOFT })
                 .truncate()
                 .child(e.message.clone()),
+        )
+        .child(
+            div()
+                .w(px(46.))
+                .flex_none()
+                .flex()
+                .justify_end()
+                .text_size(px(9.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(tag_color)
+                .child(tag_label),
         )
 }
 
@@ -3319,7 +3396,7 @@ fn log_line(e: &RecentLogEntry) -> gpui::Div {
 fn log_role_color(role: &str) -> Rgba {
     match role {
         "Decision Gate" => GATE_GREEN,
-        "Worker" => WORKER_BLUE,
+        "Worker" | "사용자" => WORKER_BLUE,
         "Verifier" => VERIFIER_NEON,
         "Advisor" => ADVISOR_PURPLE,
         "Lead" => LEAD_ORANGE,

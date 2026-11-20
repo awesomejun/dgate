@@ -1,5 +1,5 @@
 import { CellBuffer, type Rect } from '../core/buffer.ts';
-import { padLeftWidth, padRightWidth, truncateWidth, wrapByWidth } from '../core/width.ts';
+import { padLeftWidth, padRightWidth, stringWidth, truncateWidth, wrapByWidth } from '../core/width.ts';
 import { LOG_FILTER_LABELS, getFilteredLogs, sortRoutesForDisplay } from '../state/store.ts';
 import { THEME, lerpColor, resolveColorKey } from '../theme.ts';
 import type { AppState } from '../types.ts';
@@ -210,10 +210,16 @@ function renderSwarmModal(buf: CellBuffer, rect: Rect, state: AppState): void {
       const maxEndY = rect.y + rect.h - 2;
       for (const c of liveCards) {
         if (cy >= maxEndY) break;
-        buf.writeText(ix, cy, `◉ ${truncateWidth(c.name, 34, '…')}`, THEME.fgSoft, THEME.bgModal, false, iw);
-        const barW = 14;
-        const bx = ix + 36;
-        if (bx + barW + 6 < rect.x + rect.w - 2) {
+        const namePart = `◉ ${truncateWidth(c.name, 22, '…')}`;
+        const modelPill = c.model ? ` [${truncateWidth(c.model, 22, '…')}]` : '';
+        buf.writeText(ix, cy, namePart, THEME.fgSoft, THEME.bgModal, true, iw);
+        if (modelPill) {
+          const pillX = ix + Math.min(25, stringWidth(namePart));
+          buf.writeText(pillX, cy, modelPill, THEME.blue, THEME.bgModal, false, Math.max(0, iw - (pillX - ix)));
+        }
+        const barW = 12;
+        const bx = ix + Math.max(36, Math.min(52, iw - barW - 6));
+        if (bx + barW + 5 <= rect.x + rect.w - 2) {
           buf.drawProgressBar(
             bx,
             cy,

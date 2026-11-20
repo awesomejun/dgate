@@ -1195,6 +1195,32 @@ function renderBackPanel(buf: CellBuffer, state: AppState, L: FullLayout): void 
   }
 }
 
+/** 세션 기록 1줄의 우측 시맨틱 태그(1단어)와 강조색을 판정한다. */
+function classifyLogTag(entry: AppState['logs'][number]): { label: string; color: RGB } {
+  const agent = entry.agent.toLowerCase();
+  const msg = entry.message.toLowerCase();
+  if (agent === '사용자' || agent === 'you') return { label: 'input', color: THEME.blue };
+  if (msg.includes('오류') || msg.includes('실패') || msg.includes('error') || msg.includes('fail')) {
+    return { label: 'err', color: THEME.red };
+  }
+  if (msg.includes('split') || msg.includes('분할')) return { label: 'split', color: THEME.orange };
+  if (msg.includes('sharp') || msg.includes('직행')) return { label: 'sharp', color: THEME.green };
+  if (msg.includes('완료') || msg.includes('종료') || msg.includes('통과') || msg.includes('pass')) {
+    return { label: 'done', color: THEME.green };
+  }
+  if (agent.includes('verifier') || agent.includes('neon') || msg.includes('검증')) {
+    return { label: 'verify', color: THEME.neon };
+  }
+  if (agent.includes('advisor') || agent.includes('carbon') || msg.includes('자문')) {
+    return { label: 'advice', color: THEME.purple };
+  }
+  if (agent === 'lead') return { label: 'reply', color: THEME.orange };
+  if (msg.includes('실행') || msg.includes('스폰') || msg.includes('시작') || msg.includes('wrap')) {
+    return { label: 'spawn', color: THEME.blue };
+  }
+  return { label: 'live', color: THEME.muted };
+}
+
 function renderLogsPanel(buf: CellBuffer, state: AppState, R: Rect): void {
   const focused = state.focus === 'logs';
   const borderColor = focused ? THEME.fgSoft : THEME.borderLog;
@@ -1226,19 +1252,30 @@ function renderLogsPanel(buf: CellBuffer, state: AppState, R: Rect): void {
 
   const ix = R.x + 2;
   const iw = R.w - 4;
+  const markerW = 2;
   const timeColW = 10;
-  const agentColW = Math.min(20, Math.max(15, Math.floor(iw * 0.16)));
-  const msgColX = ix + timeColW + agentColW;
-  const msgColW = Math.max(10, iw - timeColW - agentColW);
+  const agentColW = Math.min(20, Math.max(14, Math.floor(iw * 0.15)));
+  const tagColW = iw >= 56 ? 8 : 0;
+  const msgColX = ix + markerW + timeColW + agentColW;
+  const msgColW = Math.max(10, iw - markerW - timeColW - agentColW - tagColW);
 
   for (let i = 0; i < visible.length; i++) {
     const entry = visible[i]!;
     const y = R.y + 1 + i;
     const isLatest = scroll === 0 && i === visible.length - 1;
 
-    buf.writeText(ix, y, entry.time, THEME.dim, THEME.bg, false, timeColW);
     buf.writeText(
-      ix + timeColW,
+      ix,
+      y,
+      isLatest ? '› ' : '  ',
+      isLatest ? THEME.fg : THEME.dim,
+      THEME.bg,
+      isLatest,
+      markerW
+    );
+    buf.writeText(ix + markerW, y, entry.time, THEME.dim, THEME.bg, false, timeColW);
+    buf.writeText(
+      ix + markerW + timeColW,
       y,
       padRightWidth(entry.agent, agentColW - 1),
       resolveColorKey(entry.color),
@@ -1255,6 +1292,18 @@ function renderLogsPanel(buf: CellBuffer, state: AppState, R: Rect): void {
       isLatest,
       msgColW
     );
+    if (tagColW > 0) {
+      const tag = classifyLogTag(entry);
+      buf.writeText(
+        ix + iw - tagColW,
+        y,
+        padLeftWidth(tag.label, tagColW),
+        tag.color,
+        THEME.bg,
+        isLatest,
+        tagColW
+      );
+    }
   }
 }
 

@@ -112,6 +112,7 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
       - 이유: 내장 서브에이전트는 리드와 같은 모델·쿼터를 쓰고(roster 역할별 모델·`agy` 0회 규칙 무력화), 격리 worktree가 없으며, `hc`/프로세스에 흔적이 없어 dgate TUI·GUI에 보이지 않는다(관측·통계·`dg backprop` 불가).
       - 워커는 역할별 모델(roster.json)·격리 worktree·`--stall-ms` 감시·`fork` 통계가 모두 적용되고, `dgate-tui`/`dgate-gui` Workers 카드에 CLI·모델·effort·경과 시간이 실측으로 표시된다.
       - 예외: 파일 1~2개를 읽고 결론만 필요한 극히 작은 질의는 리드가 직접 처리한다(서브에이전트도 쓰지 않는다).
+      - **Claude Code 탐색 안전망 (`Explore.md` 4줄 오버라이드)**: `claude` CLI 환경에서는 기본 내장 `Explore` 서브에이전트가 Opus로 `Grep/Read/Glob`을 실행해 토큰을 낭비한다. `~/.claude/agents/Explore.md`(또는 레포 `.claude/agents/Explore.md`)에 `name: Explore / model: haiku / effort: low / tools: Read, Grep, Glob`을 두면(`scripts/setup.ts`의 `installClaudeExploreOverride`로 설치 가능) 탐색이 자동으로 경량 모델로 강등된다.
 4. **검증·체크포인트·정리**:
    - 구조화 판정 반영(검증 실패/HEAD 불일치 시 `exit 3` 차단): `dg backprop --fork <FORK_ID> --verdict-file <PATH> --expected-head <SHA>`
    - 워크트리 삭제 전 체크포인트 강제(실패 시 `exit 4`·워크트리 보존): `dg worktree remove --worktree <PATH> --fork <FORK_ID>`

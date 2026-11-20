@@ -229,6 +229,8 @@ export interface EnvironmentReport {
   /** 동반 스킬 4종 환경 비교 추천 (`--check --json`에도 포함) */
   companionAdvice: CompanionAdvice[];
   repoHooks: RepoHooksStatus | null;
+  /** Claude Code 내장 Explore 서브에이전트 경량 오버라이드 (`~/.claude/agents/Explore.md`) 상태 */
+  claudeExploreOverride: { installed: boolean; path: string };
 }
 
 export interface DetectDeps {
@@ -458,6 +460,11 @@ export function detectEnvironment(deps: DetectDeps = {}): EnvironmentReport {
   const discoveredModels = discoverAvailableModels(homeDir, clis);
   const companionAdvice = recommendCompanionTools({ clis, git, companions, recommendation });
   const repoHooks = deps.repoDir ? inspectRepoHooks(deps.repoDir, orchRoot) : null;
+  const claudeExplorePath = path.join(homeDir, '.claude', 'agents', 'Explore.md');
+  const claudeExploreOverride = {
+    installed: fs.existsSync(claudeExplorePath),
+    path: claudeExplorePath,
+  };
 
   return {
     ok: node.ok && nodeSqlite.ok && git.installed,
@@ -474,6 +481,7 @@ export function detectEnvironment(deps: DetectDeps = {}): EnvironmentReport {
     discoveredModels,
     companionAdvice,
     repoHooks,
+    claudeExploreOverride,
   };
 }
 
@@ -1393,6 +1401,40 @@ export function starGithubRepo(
   return { ok: true, repoSlug, fallbackUrl };
 }
 
+/**
+ * Claude Code 내장 `Explore` 서브에이전트 4줄 오버라이드 템플릿.
+ * 같은 이름(`Explore`)으로 `.claude/agents/Explore.md`를 두면 내장 Explore의
+ * 읽기전용 검색(Read/Grep/Glob)이 Opus 대신 Haiku(effort: low)로 실행되어
+ * 탐색 토큰 비용을 절감한다.
+ */
+export const CLAUDE_EXPLORE_OVERRIDE_MD = [
+  '---',
+  'name: Explore',
+  'model: haiku',
+  'effort: low',
+  'tools: Read, Grep, Glob',
+  '---',
+  '',
+].join('\n');
+
+export function installClaudeExploreOverride(opts: {
+  homeDir?: string;
+  repoDir?: string;
+  overwrite?: boolean;
+} = {}): { installed: boolean; path: string; reason: 'created' | 'overwritten' | 'exists' } {
+  const baseDir = opts.repoDir
+    ? path.join(path.resolve(opts.repoDir), '.claude', 'agents')
+    : path.join(opts.homeDir ?? os.homedir(), '.claude', 'agents');
+  const target = path.join(baseDir, 'Explore.md');
+  const existed = fs.existsSync(target);
+  if (existed && !opts.overwrite) {
+    return { installed: false, path: target, reason: 'exists' };
+  }
+  fs.mkdirSync(baseDir, { recursive: true });
+  fs.writeFileSync(target, CLAUDE_EXPLORE_OVERRIDE_MD, 'utf8');
+  return { installed: true, path: target, reason: existed ? 'overwritten' : 'created' };
+}
+
 // ---------- 진단 리포트 포맷 ----------
 
 export function formatCheckReport(report: EnvironmentReport): string {
@@ -1485,6 +1527,16 @@ export function formatCheckReport(report: EnvironmentReport): string {
     L.push(`  ${mark(h.hooksJson, true)} .agents/hooks.json ${h.hooksJson ? '설치됨' : '미설치'}`);
     L.push(`  ${mark(h.hookSymlink, true)} .agents/hooks/dg-hook.ts ${h.hookSymlink ? '심볼릭 링크됨' : '미설치'}`);
     L.push(`  ${mark(h.excluded, true)} .git/info/exclude ${h.excluded ? '항목 있음' : '항목 없음'}`);
+  }
+  if (report.clis.claude.installed) {
+    const ov = report.claudeExploreOverride;
+    L.push('');
+    L.push('Claude Code 탐색 비용 절감 (Explore.md 4줄 오버라이드):');
+    L.push(
+      ov.installed
+        ? `  ✓ 설치됨 (${ov.path}) — 내장 Explore 검색이 haiku · low 로 실행됩니다`
+        : `  ○ 미설치 (${ov.path}) — 기본 내장 Explore가 Opus로 grep을 실행합니다 (setup으로 4줄 haiku 오버라이드 설치 가능)`
+    );
   }
   return L.join('\n');
 }
@@ -1756,6 +1808,20 @@ async function runWizard(report: EnvironmentReport, opts: { yes: boolean; repo: 
         const r = installSkillLinks({ onlyAgentIds: linkTargets.map((t) => t.id) });
         for (const d of r.linked) out(`  → 링크 생성: ${path.join(d, 'skills', 'dgate')}`);
         for (const s of r.skipped) out(`  → 건너뜀: ${s.dir} (${s.reason})`);
+      } else {
+        out('  → 건너뜀');
+      }
+      out('');
+    }
+
+    // Step 4-3b: Claude Code 내장 Explore 4줄 경량 오버라이드 (claude 설치 시)
+    if (report.clis.claude.installed && !report.claudeExploreOverride.installed) {
+      out('— Claude Code Explore 비용 절감 오버라이드 —');
+      out(`  대상: ${report.claudeExploreOverride.path}`);
+      out('  효과: 내장 Explore(Read/Grep/Glob)를 Opus 대신 haiku · low 로 강등해 탐색 토큰 절약');
+      if (await askYN('~/.claude/agents/Explore.md (4줄 오버라이드)를 설치할까요? [Y/n]', true)) {
+        const r = installClaudeExploreOverride();
+        out(r.installed ? `  → 생성 완료: ${r.path}` : `  → 기존 파일 보존: ${r.path}`);
       } else {
         out('  → 건너뜀');
       }
