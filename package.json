@@ -27,8 +27,8 @@
     "orchestrate:dry": "node ./scripts/herdr-quad-launch.ts --mode orchestrate --dry-run",
     "rust:build": "cargo build --release",
     "rust:test": "cargo test",
-    "gui:build": "cargo build -p dgate-gui",
-    "dgate-gui": "cargo run -p dgate-gui --"
+    "gui:build": "cargo build --release -p dgate-gui",
+    "dgate-gui": "sh -c 'if [ -x ./target/release/dgate-gui ]; then exec ./target/release/dgate-gui \"$@\"; elif [ -x ./target/debug/dgate-gui ]; then exec ./target/debug/dgate-gui \"$@\"; else exec cargo run --release -p dgate-gui -- \"$@\"; fi' --"
   },
   "engines": {
     "node": ">=22.6.0"
