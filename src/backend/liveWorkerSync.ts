@@ -990,6 +990,10 @@ export interface WrapProc {
   cli: string;
   model: string | null;
   effort: string | null;
+  /** 표시명 우선순위 1순위 `--label` 원문. */
+  label: string | null;
+  /** 원본 `--project` 경로 — 고아 wrap 스코프 판정·cwd 폴백용(표시명은 `project`). */
+  projectPath: string | null;
   project: string | null;
   route: string | null;
 }
@@ -1069,6 +1073,8 @@ export function findWrapProcesses(rows: readonly PsRow[]): WrapProc[] {
       cli,
       model,
       effort,
+      label,
+      projectPath,
       project: label ?? (projectPath ? tokenBase(projectPath.replace(/[\\/]+$/, '')) || null : null),
       route: flagValue(tokens, '--route'),
     });
@@ -1131,6 +1137,40 @@ export function wrapProcToWorker(
     activity: latestLine
       ? latestLine.slice(0, 96)
       : `dg wrap 실행 중${p.route ? ` · ${p.route}` : ''} (상위 ${parent.address})`,
+    status: 'working',
+    cli: p.cli,
+    model: p.model,
+    effort: p.effort,
+    telemetryLine: formatLiveTelemetry(p.cli, p.model, p.effort),
+    recentOutput,
+  };
+}
+
+/**
+ * 소유 hc 세션을 못 찾은 고아 `dg wrap` 워커 변환 — `nohup dg wrap … &`처럼 상위 셸이
+ * 죽어 PPID=1로 재부여되면 조상 체인이 끊겨 `wrapProcToWorker`의 소유 매핑이 불가능하다.
+ * 버리면 TUI에서 워커가 사라지는 관측 공백이 생기므로 미소속 카드로라도 표시한다.
+ * cwd·repoTag는 `--project` 경로가 있을 때만 채우고, 없으면 '미소속'으로 표시한다.
+ */
+export function wrapProcToUnownedWorker(
+  p: WrapProc,
+  logDir = defaultWrapLogDir()
+): LiveWorkerInfo {
+  const shortModel = formatRoleBadge(p.model ? { cli: p.cli, model: p.model } : { cli: p.cli });
+  const recentOutput = readWrapOutputTail(p.wrapPid, logDir, 12);
+  const latestLine = recentOutput.length > 0 ? recentOutput[recentOutput.length - 1]! : null;
+  return {
+    slot: 'coder',
+    badge: `${shortModel} (실행 중)`,
+    shortModel,
+    modelName: p.model ?? p.cli,
+    address: `pid:${p.wrapPid}`,
+    name: p.project ?? `wrap-${p.wrapPid}`,
+    cwd: p.projectPath,
+    repoTag: p.projectPath ? extractRepoTag(p.projectPath) : '미소속',
+    activity: latestLine
+      ? latestLine.slice(0, 96)
+      : `dg wrap 실행 중${p.route ? ` · ${p.route}` : ''} · 소유 세션 없음`,
     status: 'working',
     cli: p.cli,
     model: p.model,
@@ -1645,7 +1685,13 @@ export function createLiveRosterSyncer(opts: LiveRosterSyncerOptions): LiveRoste
                 }
                 for (const p of procs) {
                   const owner = p.ancestors.map((a) => pidOwner.get(a)).find((t) => t !== undefined);
-                  if (!owner) continue;
+                  if (!owner) {
+                    // 고아 wrap(nohup & 등으로 PPID=1)도 미소속 카드로 표시 —
+                    // --project 있을 때만 레포 스코프 필터를 적용한다.
+                    if (p.projectPath && !matchesRepoScope(p.projectPath, repoFilterDir)) continue;
+                    foundWrap.push(wrapProcToUnownedWorker(p));
+                    continue;
+                  }
                   if (!matchesRepoScope(owner.cwd, repoFilterDir) || !matchesSessionScope(owner, sessionId)) {
                     continue;
                   }

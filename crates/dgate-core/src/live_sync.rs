@@ -1493,6 +1493,10 @@ pub struct WrapProc {
     pub cli: String,
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// 표시명 우선순위 1순위 `--label` 원문.
+    pub label: Option<String>,
+    /// 원본 `--project` 경로 — 고아 wrap 스코프 판정·cwd 폴백용(표시명은 `project`).
+    pub project_path: Option<String>,
     pub project: Option<String>,
     pub route: Option<String>,
 }
@@ -1604,8 +1608,10 @@ pub fn find_wrap_processes(rows: &[PsRow]) -> Vec<WrapProc> {
         if row.ppid > 1 && !ancestors.contains(&row.ppid) {
             ancestors.insert(0, row.ppid);
         }
-        let project = flag_value(&tokens, "--label").or_else(|| {
-            flag_value(&tokens, "--project").and_then(|p| {
+        let label = flag_value(&tokens, "--label");
+        let project_path = flag_value(&tokens, "--project");
+        let project = label.clone().or_else(|| {
+            project_path.as_deref().and_then(|p| {
                 let trimmed = p.trim_end_matches(['/', '\\']).to_string();
                 let base = token_base(&trimmed);
                 if base.is_empty() {
@@ -1621,6 +1627,8 @@ pub fn find_wrap_processes(rows: &[PsRow]) -> Vec<WrapProc> {
             cli,
             model,
             effort,
+            label,
+            project_path,
             project,
             route: flag_value(&tokens, "--route"),
         });
@@ -1725,6 +1733,58 @@ pub fn wrap_proc_to_worker_with_log_dir(
             .unwrap_or_else(|| format!("wrap-{}", p.wrap_pid)),
         cwd: parent.cwd.clone(),
         repo_tag: extract_repo_tag(parent.cwd.as_deref()),
+        activity,
+        status: Some("working".to_string()),
+        turn: None,
+        cli: p.cli.clone(),
+        model: p.model.clone(),
+        effort: p.effort.clone(),
+        subagent_warning: None,
+        recent_io: Vec::new(),
+        recent_output,
+    }
+}
+
+/// 소유 hc 세션을 못 찾은 고아 `dg wrap` 워커 변환 — `nohup … &`로 상위 셸이 죽어
+/// PPID=1이 된 경우. 관측 공백 방지를 위해 미소속 카드로라도 Workers에 올린다.
+pub fn wrap_proc_to_unowned_worker(p: &WrapProc) -> LiveWorkerInfo {
+    wrap_proc_to_unowned_worker_with_log_dir(p, None)
+}
+
+/// 테스트·커스텀 경로용 고아 wrap 프로세스 → LiveWorkerInfo 변환.
+pub fn wrap_proc_to_unowned_worker_with_log_dir(
+    p: &WrapProc,
+    log_dir: Option<&Path>,
+) -> LiveWorkerInfo {
+    let short_model = format_role_badge(&p.cli, p.model.as_deref());
+    let recent_output = read_wrap_output_tail(p.wrap_pid, log_dir, 12);
+    let activity = if let Some(last) = recent_output.last() {
+        last.chars().take(96).collect()
+    } else {
+        format!(
+            "dg wrap 실행 중{} · 소유 세션 없음",
+            p.route
+                .as_deref()
+                .map(|r| format!(" · {}", r))
+                .unwrap_or_default()
+        )
+    };
+    LiveWorkerInfo {
+        slot: RoleSlot::Coder,
+        badge: format!("{} (실행 중)", short_model),
+        model_name: p.model.clone().unwrap_or_else(|| p.cli.clone()),
+        short_model,
+        address: format!("pid:{}", p.wrap_pid),
+        name: p
+            .project
+            .clone()
+            .unwrap_or_else(|| format!("wrap-{}", p.wrap_pid)),
+        cwd: p.project_path.clone(),
+        repo_tag: p
+            .project_path
+            .as_deref()
+            .map(|pp| extract_repo_tag(Some(pp)))
+            .unwrap_or_else(|| "미소속".to_string()),
         activity,
         status: Some("working".to_string()),
         turn: None,
@@ -2309,7 +2369,20 @@ impl LiveSyncSnapshotter {
                     let repo_scope = self.repo_filter_dir.as_deref().and_then(|p| p.to_str());
                     for p in &procs {
                         let owner = p.ancestors.iter().find_map(|a| pid_owner.get(a).copied());
-                        let Some(owner) = owner else { continue };
+                        let Some(owner) = owner else {
+                            // 고아 wrap(nohup & 등으로 PPID=1)도 미소속 카드로 표시 —
+                            // --project 있을 때만 레포 스코프 필터를 적용한다.
+                            let scope_ok = p
+                                .project_path
+                                .as_deref()
+                                .map(|pp| matches_repo_scope(Some(pp), repo_scope))
+                                .unwrap_or(true);
+                            if !scope_ok {
+                                continue;
+                            }
+                            workers.push(wrap_proc_to_unowned_worker(p));
+                            continue;
+                        };
                         if !matches_repo_scope(owner.cwd.as_deref(), repo_scope) {
                             continue;
                         }
@@ -2917,6 +2990,42 @@ mod tests {
         );
         assert_eq!(p2[0].effort.as_deref(), Some("medium"));
         assert_eq!(p2[0].project.as_deref(), Some("engine-rust-phase1-explore"));
+    }
+
+    #[test]
+    fn orphan_wrap_process_shows_as_unowned_worker() {
+        // nohup dg wrap … & → 상위 셸 종료로 PPID=1(launchd) — 조상 체인이 끊겨 소유 세션 불명
+        let ps = "  500     1 /bin/zsh -l\n\
+  67954     1 /x/target/release/dg wrap --route delegate_swarm --tool-class coder --label card-escalate-gate --stall-ms 900000 -- devin -p 작업\n\
+68001 67954 devin --respect-workspace-trust false -p 작업\n";
+        let procs = find_wrap_processes(&parse_ps_rows(ps));
+        assert_eq!(procs.len(), 1);
+        assert!(
+            !procs[0].ancestors.contains(&500),
+            "고아 wrap은 세션 후보(500)와 연결 없음"
+        );
+        assert_eq!(procs[0].label.as_deref(), Some("card-escalate-gate"));
+        assert_eq!(procs[0].project_path, None);
+        let w = wrap_proc_to_unowned_worker(&procs[0]);
+        assert_eq!(w.address, "pid:67954");
+        assert_eq!(w.name, "card-escalate-gate");
+        assert_eq!(w.repo_tag, "미소속");
+        assert_eq!(w.cwd, None);
+        assert_eq!(w.cli, "devin");
+        assert_eq!(w.status.as_deref(), Some("working"));
+        assert!(w.activity.contains("소유 세션 없음"));
+
+        // --project가 있으면 cwd·repoTag를 그 경로에서 채운다
+        let ps2 = "70000 1 dg wrap --project /w/.worktrees/rust-s9-port -- devin -p x\n70001 70000 devin -p x\n";
+        let p2 = find_wrap_processes(&parse_ps_rows(ps2));
+        assert_eq!(p2.len(), 1);
+        assert_eq!(
+            p2[0].project_path.as_deref(),
+            Some("/w/.worktrees/rust-s9-port")
+        );
+        let w2 = wrap_proc_to_unowned_worker(&p2[0]);
+        assert_eq!(w2.cwd.as_deref(), Some("/w/.worktrees/rust-s9-port"));
+        assert_ne!(w2.repo_tag, "미소속");
     }
 
     #[test]

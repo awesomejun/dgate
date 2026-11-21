@@ -1999,6 +1999,85 @@ test('dg wrap 백그라운드 워커 — hc 터미널이 아니어도 상위 세
   }
 });
 
+test('dg wrap 고아 워커 — nohup 등으로 소유 세션 체인이 끊겨도 미소속 카드로 Workers에 잡힌다', async () => {
+  const ps = [
+    '  500     1 /bin/zsh -l',
+    '67954     1 /x/target/release/dg wrap --route delegate_swarm --tool-class coder --label card-escalate-gate --stall-ms 900000 -- devin -p 작업',
+    '68001 67954 devin --respect-workspace-trust false -p 작업',
+  ].join('\n');
+  const procs = findWrapProcesses(parsePsRows(ps));
+  assert.equal(procs.length, 1);
+  assert.equal(procs[0]?.label, 'card-escalate-gate');
+  assert.equal(procs[0]?.projectPath, null);
+  assert.ok(!procs[0]?.ancestors.includes(500), '고아 wrap은 소유 세션 후보(500)와 연결 없음');
+
+  const syncerWorkers: LiveWorkerInfo[] = [];
+  const syncer = createLiveRosterSyncer({
+    repoDir: REPO_ROOT,
+    onUpdate: (m) => {
+      syncerWorkers.splice(0, syncerWorkers.length, ...m.workers);
+    },
+    intervalMs: 3_600_000,
+    psRunner: async () => ps,
+    execRunner: async (_file, args) => {
+      if (args[0] === 'ls') {
+        return JSON.stringify({
+          terminals: [
+            { address: 't155', agent: 'zsh', state: 'live', status: 'working', cwd: '/tmp/paperwork-operations' },
+          ],
+        });
+      }
+      if (args[0] === 'get') {
+        return JSON.stringify({ address: args[1], agent: 'zsh', state: 'live', pid: 900, foreground: { pid: 500, argv: ['zsh'] } });
+      }
+      return '';
+    },
+  });
+  try {
+    await waitFor(() => syncerWorkers.some((w) => w.address === 'pid:67954'));
+    const orphan = syncerWorkers.find((w) => w.address === 'pid:67954');
+    assert.ok(orphan, '고아 wrap 워커 카드 생성');
+    assert.equal(orphan?.slot, 'coder');
+    assert.equal(orphan?.name, 'card-escalate-gate');
+    assert.equal(orphan?.repoTag, '미소속');
+    assert.equal(orphan?.cwd, null);
+    assert.equal(orphan?.status, 'working');
+    assert.ok(orphan?.activity.includes('소유 세션 없음'));
+  } finally {
+    syncer.stop();
+  }
+
+  // --project가 있으면 레포 스코프 필터를 그대로 적용(범위 밖 고아는 숨김), 없으면 미소속으로 표시
+  const scopedPs = [
+    '  500     1 /bin/zsh -l',
+    '70000     1 dg wrap --project /tmp/scope-b -- devin -p 작업',
+    '70001 70000 devin -p 작업',
+    '71000     1 dg wrap --label no-project-orphan -- devin -p 작업',
+    '71001 71000 devin -p 작업',
+  ].join('\n');
+  const scopedWorkers: LiveWorkerInfo[] = [];
+  const scoped = createLiveRosterSyncer({
+    repoDir: REPO_ROOT,
+    repoFilterDir: '/tmp/scope-a',
+    onUpdate: (m) => {
+      scopedWorkers.splice(0, scopedWorkers.length, ...m.workers);
+    },
+    intervalMs: 3_600_000,
+    psRunner: async () => scopedPs,
+    execRunner: async (_file, args) => {
+      if (args[0] === 'ls') return JSON.stringify({ terminals: [] });
+      return '';
+    },
+  });
+  try {
+    await waitFor(() => scopedWorkers.some((w) => w.address === 'pid:71000'));
+    assert.ok(!scopedWorkers.some((w) => w.address === 'pid:70000'), '스코프 밖 --project 고아는 미표시');
+    assert.equal(scopedWorkers.find((w) => w.address === 'pid:71000')?.repoTag, '미소속');
+  } finally {
+    scoped.stop();
+  }
+});
+
 test('watch 역할 카드 하단 — Lead/Verifier/Advisor/Workers 모두 실측 cli · model · effort 표시', () => {
   const st = createInitialState('watch');
   st.phase = '대기 중';
