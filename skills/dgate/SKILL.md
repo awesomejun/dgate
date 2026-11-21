@@ -29,6 +29,7 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
 
 1. **환경·로스터 무음 점검** — `node $DGATE_ROOT/scripts/setup.ts --check --json`을 조용히 실행한다. 전역 `roster.json`이 없으면 감지된 CLI·모델을 바탕으로 쉬운 한국어 질문 1~2개만 물어보고 저장까지 대행한다 — 원시 설정 방법·파일 경로·JSON 예시를 그대로 나열하지 않는다.
    - **버전 점검**: `git -C $DGATE_ROOT fetch -q` 후 `git -C $DGATE_ROOT rev-list --count HEAD..origin/main`이 0보다 크면 "dgate 업데이트 있음 — `git pull` + `npm run rust:build` 권장"을 한 줄 보고한다(pull은 사용자 승인 후).
+   - **자동 수집(판단 루프)**: pi 세션(리드·워커 구분 없이)의 도구 사용은 전역 확장(`~/.pi/agent/extensions/dg-collect.ts`, 원본 `scripts/pi-extensions/`)이 `dg hook --collect`로 자동 기록한다(source=hook·멱등) — 별도 조치 없이 file_select/tool_select 통계가 쌓인다. agy 등 타 CLI 리드는 아직 미연결(훅 또는 트랜스크립트 경로 필요).
 2. **안전장치 자동 연결 (무음)** — 대상 저장소에 `.agents/hooks.json`이 없으면 `scripts/setup.ts`의 `installRepoHooks`를 자동 호출해 연결한다 (`.git/info/exclude`까지 처리해 `git status`가 깨끗하게 유지된다). 사용자에게 설치 여부를 묻거나 "hook"이라는 단어 자체를 꺼내지 않는다.
 3. **상황에 맞춘 분기** —
    - 사용자가 구체 작업을 함께 줬다면(예: *"결제 버그 고쳐줘"*) → 아래 **5번(실행 전 배차안·모니터 여부 승인)**을 먼저 거친 뒤 라우팅 → 워커 실행 → 독립 교차 검증까지 진행하고 결과를 쉬운 한국어로 보고한다.
