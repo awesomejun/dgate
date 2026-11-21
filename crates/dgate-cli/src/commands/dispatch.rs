@@ -377,6 +377,18 @@ fn plan_dispatch_inner(input: &PlanInput, api: Option<&ApiOverride>) -> Dispatch
                 }
                 Some(m)
             };
+            // 집행 장치 근거 — dispatch 발급 표식(strict 모드에서 wrap이 검증)
+            let metadata = match metadata {
+                Some(mut m) => {
+                    m.insert("dispatch".into(), json!(true));
+                    Some(m)
+                }
+                None => {
+                    let mut m = Map::new();
+                    m.insert("dispatch".into(), json!(true));
+                    Some(m)
+                }
+            };
             let issue = engine::issue_fork(
                 db,
                 &engine::IssueForkInput {

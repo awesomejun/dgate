@@ -79,12 +79,22 @@ pub fn cmd_route(args: &ParsedArgs, json: bool) -> CmdResult {
             audit = api.audit;
         }
 
-        // metadata: decision_api audit가 있을 때만 병합
-        let metadata_value = audit.as_ref().map(|a| {
+        // metadata: decision_api audit 병합 + dispatch 발급 표식(strict 모드 wrap 검증용)
+        let mut metadata_value = audit.as_ref().map(|a| {
             let mut m = Map::new();
             m.insert("decision_api".into(), audit_to_value(a));
             m
         });
+        match &mut metadata_value {
+            Some(m) => {
+                m.insert("dispatch".into(), serde_json::json!(true));
+            }
+            None => {
+                let mut m = Map::new();
+                m.insert("dispatch".into(), serde_json::json!(true));
+                metadata_value = Some(m);
+            }
+        }
         let fork_id = engine::issue_fork(
             &db,
             &IssueForkInput {

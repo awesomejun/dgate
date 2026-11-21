@@ -51,6 +51,9 @@ import {
   isForkLiveStatus,
   isRouteId,
   issueFork,
+  forkHasDispatchProvenance,
+  readDispatchMode,
+  writeDispatchMode,
   markForkWaitingHuman,
   recordForkIntervalStart,
   recordToolOutcome,
@@ -379,7 +382,10 @@ async function cmdRoute(args: ParsedArgs, json: boolean): Promise<void> {
       forcedSplit: forced.forcedSplit,
       ttlMs: TTL_EXPLORE_MS,
       title,
-      metadata: audit !== null ? { decision_api: audit } : undefined,
+      metadata: {
+        ...(audit !== null ? { decision_api: audit } : {}),
+        dispatch: true,
+      },
     });
     emit(
       json,
@@ -1103,6 +1109,17 @@ async function cmdWrap(args: ParsedArgs, json: boolean): Promise<number> {
     forkId = forkId ?? fallbackForkId();
   }
 
+  // 집행 장치(하드 모드): strict에서 delegate_swarm은 게이트 발급 fork로만 허용(fail-closed)
+  if (
+    route === 'delegate_swarm' &&
+    readDispatchMode() === 'strict' &&
+    (forkId === null || db === null || !forkHasDispatchProvenance(db, forkId))
+  ) {
+    throw new UsageError(
+      'strict dispatch 모드: delegate_swarm 워커는 dg dispatch가 발급한 --fork로만 실행할 수 있다 — dg dispatch --task-kind <종류> 먼저 (해제: dg dispatch-mode off)'
+    );
+  }
+
   const isFallbackFork = forkId === null || forkId.startsWith('fk_fallback_');
   const onHeartbeat = (): void => {
     if (db === null || isFallbackFork || forkId === null) return;
@@ -1591,7 +1608,7 @@ async function main(): Promise<void> {
     process.exit(argv.length === 0 ? 2 : 0);
   }
   const cmd = argv[0]!;
-  if (!['route', 'gate', 'close', 'touch', 'record', 'backprop', 'attempt', 'retro', 'settle-orphans', 'wrap', 'compact', 'stats', 'checkpoint', 'worktree', 'report'].includes(cmd)) {
+  if (!['route', 'gate', 'close', 'touch', 'record', 'backprop', 'attempt', 'retro', 'settle-orphans', 'wrap', 'compact', 'stats', 'checkpoint', 'worktree', 'report', 'dispatch-mode'].includes(cmd)) {
     process.stderr.write(`unknown command: ${cmd}\n\n${HELP}\n`);
     process.exit(2);
   }
@@ -1632,6 +1649,16 @@ async function main(): Promise<void> {
       case 'settle-orphans':
         cmdSettleOrphans(args, json);
         break;
+      case 'dispatch-mode': {
+        const set = optionalFlag(args, 'set');
+        if (set === undefined || set === '') {
+          emit(json, () => `[dispatch-mode] ${readDispatchMode()}`, { dispatch_mode: readDispatchMode() });
+        } else {
+          writeDispatchMode(set);
+          emit(json, () => `[dispatch-mode] set → ${readDispatchMode()}`, { dispatch_mode: readDispatchMode() });
+        }
+        break;
+      }
       case 'wrap': {
         // 비동기 래핑 — 자식 감시 루프 완료 후 promise 핸들러가 exit 수행
         cmdWrap(args, json).then(

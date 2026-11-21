@@ -15,7 +15,60 @@
  * - 모든 갱신은 `BEGIN IMMEDIATE ... COMMIT` 단일 트랜잭션으로 실행한다(§3.2).
  */
 import { randomBytes } from 'node:crypto';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
+
+// ---------- strict dispatch 모드(집행 장치) ----------
+
+/** 전역 strict dispatch 상태 파일 경로 — wrap-logs와 같은 상태 디렉터리. */
+export function dispatchModePath(): string {
+  const stateHome = process.env['XDG_STATE_HOME']?.trim() || path.join(os.homedir(), '.local', 'state');
+  return path.join(stateHome, 'dgate', 'dispatch-mode');
+}
+
+/** 상태 파일 원문 읽기(부재·오류 → 빈 문자열 = off 취급). 테스트용 경로 주입 변형. */
+export function readDispatchModeAt(p: string): string {
+  try {
+    return fs.readFileSync(p, 'utf8').trim().toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+/** 현재 모드 — `strict` 아니면 전부 `off`(기본값, 백워드 호환). */
+export function readDispatchMode(): 'off' | 'strict' {
+  return readDispatchModeAt(dispatchModePath()) === 'strict' ? 'strict' : 'off';
+}
+
+/** 모드 기록 — `off`|`strict` 외 거부(파일 무변경). 경로 주입 변형은 테스트용. */
+export function writeDispatchModeAt(p: string, mode: string): void {
+  const m = mode.trim().toLowerCase();
+  if (m !== 'off' && m !== 'strict') {
+    throw new Error(`invalid dispatch mode: ${mode} (off|strict)`);
+  }
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, `${m}\n`);
+}
+
+export function writeDispatchMode(mode: string): void {
+  writeDispatchModeAt(dispatchModePath(), mode);
+}
+
+/** fork metadata_json에 dispatch 발급 표식(dispatch:true)이 있는지 —
+ *  strict 모드에서 wrap이 delegate_swarm 실행 전 검증한다. */
+export function forkHasDispatchProvenance(db: DatabaseSync, forkId: string): boolean {
+  try {
+    const row = db
+      .prepare('SELECT metadata_json AS m FROM forks WHERE fork_id = ?')
+      .get(forkId) as { m: string | null } | undefined;
+    if (!row?.m) return false;
+    return (JSON.parse(row.m) as Record<string, unknown>)['dispatch'] === true;
+  } catch {
+    return false;
+  }
+}
 import { GLOBAL_PROJECT_ID, hasColumn, hasTable } from './db.ts';
 import { redactSecrets } from './redact.ts';
 import type { VerdictValidationResult } from './verdict.ts';

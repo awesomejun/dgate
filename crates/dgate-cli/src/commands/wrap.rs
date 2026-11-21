@@ -498,6 +498,26 @@ pub fn cmd_wrap(args: &ParsedArgs, json: bool) -> CmdResult {
             }
             _ => {}
         }
+        // 집행 장치(하드 모드): strict에서 delegate_swarm은 dispatch 발급 fork로만 허용.
+        // 검증 불가(fallback fork·DB 부재)도 거부 — fail-closed.
+        if matches!(route, engine::RouteId::DelegateSwarm)
+            && engine::read_dispatch_mode() == "strict"
+        {
+            let proven = fork_id.as_deref().is_some_and(|fk| {
+                db_holder
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().map(|db| engine::fork_has_dispatch_provenance(db, fk)))
+                    .unwrap_or(false)
+            });
+            if !proven {
+                return Err(DgError::Usage(crate::args::UsageError(
+                    "strict dispatch 모드: delegate_swarm 워커는 dg dispatch가 발급한 --fork로만 실행할 수 있다 \
+                     — dg dispatch --task-kind <종류> 먼저 (해제: dg dispatch-mode off)"
+                        .to_string(),
+                )));
+            }
+        }
     }
 
     let effective_fork = fork_id.clone().unwrap_or_else(fallback_fork_id_hex);

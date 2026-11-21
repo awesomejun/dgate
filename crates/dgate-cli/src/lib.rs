@@ -23,10 +23,10 @@ use args::ParsedArgs;
 use util::{eprint_line, CmdResult, DgError};
 
 /// 인식 가능한 명령 15종 + v2 신규 3종.
-pub const COMMANDS: [&str; 18] = [
+pub const COMMANDS: [&str; 19] = [
     "route", "gate", "close", "touch", "record", "backprop", "attempt", "retro",
     "settle-orphans", "wrap", "compact", "stats", "checkpoint", "worktree", "report",
-    "hook", "setup", "dispatch",
+    "hook", "setup", "dispatch", "dispatch-mode",
 ];
 
 const HELP: &str = "dg — decision gate CLI (plan-r2.1 §4.7, v2 native Rust)
@@ -53,6 +53,7 @@ const HELP: &str = "dg — decision gate CLI (plan-r2.1 §4.7, v2 native Rust)
   dg hook --guard | --collect        (stdin JSON → guard deny/allow | collect {})
   dg setup [--check] [--json] [--repo <dir>]
   dg dispatch --task-kind <k> [--risk low|medium|high] [--repo <dir>] [--roster <path>] [--db <path>] [--run-id <id>] [--task-file <path>] [--idx <n>] [--active-explore <n>] [--active-coding <n>] [--dry-run] [--context <text>] [--decision-api <off|shadow|on>] [--api-eval] [--json]
+  dg dispatch-mode [--set off|strict]   (strict: delegate_swarm wrap은 dispatch 발급 --fork만 허용)
 
 라우트 r: file_select|tool_select|retry_or_abort|delegate_swarm
 공용: --db <path>는 DGATE_DB_PATH·DECISION_ORCHESTRATOR_DB_PATH·GEMINI_TRICK_DB_PATH보다 우선. --roster <path>/--profile <name> 명시 시
@@ -118,6 +119,7 @@ where
         "hook" => commands::hook::cmd_hook(&parsed, json),
         "setup" => commands::setup::cmd_setup(&parsed, json),
         "dispatch" => commands::dispatch::cmd_dispatch(&parsed, json),
+        "dispatch-mode" => commands::dispatch_mode::cmd_dispatch_mode(&parsed, json),
         _ => unreachable!("command list checked above"),
     };
 

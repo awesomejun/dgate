@@ -1485,6 +1485,111 @@ pub struct IssueForkInput<'a> {
     pub now_ms: Option<i64>,
 }
 
+// ---------- strict dispatch 모드(집행 장치) ----------
+
+/// 전역 strict dispatch 상태 파일 경로 — wrap-logs와 같은 상태 디렉터리.
+pub fn dispatch_mode_path() -> std::path::PathBuf {
+    let state_home = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME").unwrap_or_default();
+            std::path::PathBuf::from(home)
+                .join(".local")
+                .join("state")
+        });
+    state_home.join("dgate").join("dispatch-mode")
+}
+
+/// 상태 파일 원문 읽기(부재·오류 → 빈 문자열 = off 취급). 테스트용 경로 주입 변형.
+pub fn read_dispatch_mode_at(path: &std::path::Path) -> String {
+    std::fs::read_to_string(path)
+        .map(|s| s.trim().to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+/// 현재 모드 — `strict` 아니면 전부 `off`(기본값, 백워드 호환).
+pub fn read_dispatch_mode() -> String {
+    if read_dispatch_mode_at(&dispatch_mode_path()) == "strict" {
+        "strict".to_string()
+    } else {
+        "off".to_string()
+    }
+}
+
+/// 모드 기록 — `off`|`strict` 외 거부(파일 무변경).
+pub fn write_dispatch_mode(mode: &str) -> Result<(), String> {
+    let m = mode.trim().to_ascii_lowercase();
+    if m != "off" && m != "strict" {
+        return Err(format!("invalid dispatch mode: {mode} (off|strict)"));
+    }
+    let p = dispatch_mode_path();
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&p, format!("{m}\n")).map_err(|e| e.to_string())
+}
+
+/// fork metadata_json에 dispatch 발급 표식(dispatch:true)이 있는지 —
+/// strict 모드에서 wrap이 delegate_swarm 실행 전 검증한다.
+pub fn fork_has_dispatch_provenance(db: &Connection, fork_id: &str) -> bool {
+    let Ok(meta) = db.query_row(
+        "SELECT metadata_json FROM forks WHERE fork_id = ?1",
+        [fork_id],
+        |r| r.get::<_, Option<String>>(0),
+    ) else {
+        return false;
+    };
+    let Some(meta) = meta else { return false };
+    let Ok(v) = serde_json::from_str::<Value>(&meta) else {
+        return false;
+    };
+    v.get("dispatch").and_then(Value::as_bool).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod dispatch_mode_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    #[test]
+    fn mode_file_roundtrip_and_default_off() {
+        let dir = std::env::temp_dir().join(format!("dg-dm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("dispatch-mode");
+        assert_eq!(read_dispatch_mode_at(&p), ""); // 부재 → off 취급
+        std::fs::write(&p, "strict\n").unwrap();
+        assert_eq!(read_dispatch_mode_at(&p), "strict");
+        std::fs::write(&p, "OFF\n").unwrap(); // 대소문자 정규화
+        assert_eq!(read_dispatch_mode_at(&p), "off");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_mode_validates_before_touching_file() {
+        assert!(write_dispatch_mode("bogus").is_err());
+    }
+
+    #[test]
+    fn provenance_reads_dispatch_stamp_only() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute(
+            "CREATE TABLE forks (fork_id TEXT PRIMARY KEY, metadata_json TEXT)",
+            [],
+        )
+        .unwrap();
+        db.execute("INSERT INTO forks VALUES ('fk_a', ?1)", ["{\"dispatch\":true}"])
+            .unwrap();
+        db.execute("INSERT INTO forks VALUES ('fk_b', ?1)", ["{\"title\":\"x\"}"])
+            .unwrap();
+        db.execute("INSERT INTO forks VALUES ('fk_c', NULL)", []).unwrap();
+        assert!(fork_has_dispatch_provenance(&db, "fk_a"));
+        assert!(!fork_has_dispatch_provenance(&db, "fk_b"));
+        assert!(!fork_has_dispatch_provenance(&db, "fk_c"));
+        assert!(!fork_has_dispatch_provenance(&db, "fk_missing"));
+    }
+}
+
 fn random_fork_suffix() -> String {
     use rand::RngCore;
     let mut buf = [0u8; 6];

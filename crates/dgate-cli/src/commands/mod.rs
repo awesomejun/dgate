@@ -5,6 +5,7 @@ pub mod checkpoint;
 pub mod close;
 pub mod compact;
 pub mod dispatch;
+pub mod dispatch_mode;
 pub mod gate;
 pub mod hook;
 pub mod record;

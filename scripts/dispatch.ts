@@ -405,6 +405,7 @@ function planDispatchInner(input: PlanDispatchInput, api: ApiOverride | null): D
                       lease_until_ms: Date.now() + TTL_EXPLORE_MS,
                     }),
                 ...(api?.audit ? { decision_api: api.audit } : {}),
+                dispatch: true,
               },
       });
     } catch {
