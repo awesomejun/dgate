@@ -77,6 +77,8 @@ where
         eprint_line(&format!("unknown command: {cmd}\n\n{HELP}"));
         return 2;
     }
+    // 스테일 바이너리 경고 — pull/커밋 후 미빌드 감지(stderr 1줄, 판정 불가 시 조용)
+    util::warn_if_stale_binary();
     // checkpoint/worktree는 2단 서브커맨드 — 동사를 먼저 떼고 나머지를 플래그로 파싱
     let (sub, flag_args): (Option<String>, Vec<String>) = if cmd == "checkpoint" || cmd == "worktree"
     {

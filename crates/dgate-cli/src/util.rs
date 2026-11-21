@@ -3,7 +3,8 @@
 //! TS `dg.ts`의 `emit`/`fallbackJson`/`openWriter`/`openReader`/`resolveIdentity`/
 //! `resolveSharpTheta`/`parseDecisionApiFlags` 대응물이다.
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use rusqlite::Connection;
 use serde_json::{json, Map, Value};
@@ -303,6 +304,97 @@ pub fn adapter_input<'a>(
         consecutive_errors,
         title,
         context,
+    }
+}
+
+// ---------- 스테일 바이너리 경고 ----------
+
+/// 바이너리가 Rust 소스보다 오래됐을 때의 stderr 경고 문구.
+pub const STALE_BINARY_WARNING: &str =
+    "[dg] 바이너리가 Rust 소스보다 오래됨 — `npm run rust:build` 갱신 권장 (pull 후 미빌드)";
+
+/// (바이너리 mtime, 최신 소스 mtime) → 스테일이면 경고 문구. 동시각은 스테일 아님.
+pub fn stale_binary_msg(exe_mtime: SystemTime, src_mtime: SystemTime) -> Option<&'static str> {
+    if src_mtime > exe_mtime {
+        Some(STALE_BINARY_WARNING)
+    } else {
+        None
+    }
+}
+
+/// 저장소 Rust 소스(crates/ 전체 + 루트 Cargo.toml)의 최신 mtime — 스테일 판정 기준.
+/// 문서·스킬·지침 커밋은 이 값에 영향을 주지 않는다(코드 변경 풀에만 경고).
+/// crates/도 Cargo.toml도 없으면 None(판정 불가 — 조용 스킵).
+pub fn newest_rust_source_mtime(repo: &Path) -> Option<SystemTime> {
+    let mut newest: Option<SystemTime> = None;
+    let mut consider = |p: &Path| {
+        if let Ok(m) = std::fs::metadata(p).and_then(|md| md.modified()) {
+            if newest.map(|n| m > n).unwrap_or(true) {
+                newest = Some(m);
+            }
+        }
+    };
+    consider(&repo.join("Cargo.toml"));
+    let mut stack = vec![repo.join("crates")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                consider(&p);
+            }
+        }
+    }
+    newest
+}
+
+/// 실행 중 바이너리(<repo>/target/{debug,release}/dg)에서 저장소를 찾아 스테일 검사.
+/// 경고는 stderr 1줄. 저장소 밖 복제 바이너리·소스 부재 시 조용히 스킵한다.
+pub fn warn_if_stale_binary() {
+    let Ok(exe) = std::env::current_exe() else { return };
+    let Some(repo) = exe.ancestors().nth(3) else { return };
+    let exe_mtime = std::fs::metadata(&exe).and_then(|m| m.modified());
+    let (Ok(e), Some(s)) = (exe_mtime, newest_rust_source_mtime(repo)) else {
+        return;
+    };
+    if let Some(msg) = stale_binary_msg(e, s) {
+        eprintln!("{msg}");
+    }
+}
+
+#[cfg(test)]
+mod stale_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn stale_only_when_head_newer_than_binary() {
+        let bin = SystemTime::UNIX_EPOCH;
+        let head = bin + Duration::from_secs(10);
+        assert!(stale_binary_msg(bin, head).is_some());
+        assert!(stale_binary_msg(head, bin).is_none());
+        assert!(stale_binary_msg(bin, bin).is_none());
+    }
+
+    #[test]
+    fn newest_source_mtime_scans_crates_only() {
+        let dir = std::env::temp_dir().join(format!("dg-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // 소스 전무 → None(판정 불가 — 조용 스킵)
+        assert!(newest_rust_source_mtime(&dir).is_none());
+        std::fs::create_dir_all(dir.join("crates/dgate-cli/src")).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::write(dir.join("crates/dgate-cli/src/main.rs"), "fn main(){}\n").unwrap();
+        assert!(newest_rust_source_mtime(&dir).is_some());
+        // crates/ 밖 파일(문서·스킬)은 기준에서 제외 — docs가 더 새도 결과 불변
+        let before = newest_rust_source_mtime(&dir).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs/README.md"), "docs\n").unwrap();
+        assert_eq!(newest_rust_source_mtime(&dir), Some(before));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
 
