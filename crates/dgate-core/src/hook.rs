@@ -464,7 +464,9 @@ fn collect_inner(stdin_json: &str, env: &HookEnv) -> Result<(), String> {
                 .unwrap_or_else(|_| ".".to_string())
         });
     let identity = resolve_project_identity(Path::new(&cwd));
-    let (route, tool_class) = classify_tool(tool_name, false);
+    // 재시도 표식 — 호출자(확장·훅)가 직전 실패 후 재호출로 판정하면 retry_or_abort 계약으로 정규화
+    let is_retry = input.get("isRetry").and_then(Value::as_bool);
+    let (route, tool_class) = classify_tool(tool_name, is_retry.unwrap_or(false));
 
     // ok: error 필드 부재·null·false → 성공. 문자열·객체는 리댁션 후 400자 스니펫.
     let error_v = input.get("error");
@@ -506,7 +508,7 @@ fn collect_inner(stdin_json: &str, env: &HookEnv) -> Result<(), String> {
             tool_name,
             ok,
             weight: Some(1.0),
-            is_retry: None,
+            is_retry,
             conversation_id: conv_id,
             step,
             target_hash: None,

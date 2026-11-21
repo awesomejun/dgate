@@ -199,6 +199,7 @@ interface HookInput {
   cwd?: string;
   transcriptPath?: string;
   error?: unknown;
+  isRetry?: boolean;
 }
 
 function readStdinJson(): HookInput {
@@ -301,7 +302,7 @@ function runCollect(): void {
     const dedupeKey = `hook:${String(convId)}:${String(toolCall.id)}`;
     const cwd = typeof input.cwd === 'string' && input.cwd ? input.cwd : process.cwd();
     const identity = resolveProjectIdentity(cwd);
-    const { route, toolClass } = classifyTool(toolName, args);
+    const { route, toolClass } = classifyTool(toolName, args, input.isRetry === true);
     const ok = input.error === undefined || input.error === null || input.error === false;
     const errorSnippet =
       input.error === undefined || input.error === null || input.error === false
