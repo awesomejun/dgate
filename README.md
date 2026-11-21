@@ -77,6 +77,8 @@ dgate-tui                # 실시간 관제 TUI 시작 — 또는 dgate-gui(GPUI
 
 세션 관제·런치는 `hc`(Herdr 터미널 CLI) 위에서 동작한다. 모든 통계는 `~/.local/state/dgate/decision.db`(SQLite)에 SSOT로 축적된다.
 
+**워커 실행 계약** — 모든 외부 워커는 `dg wrap`(측정·stall 감시 — herdr 무관, 어디서든 단독 동작)으로 감싼 뒤 `hc run --bg`(TUI 가시성·소유 매핑·제어)로 띄운다. `nohup`/`disown` 분리 금지, wrap 없는 직접 `hc run` 금지(텔레메트리 누락), 대기는 `hc wait`(sleep·폴링 금지), 완료 보고는 워커 지시문에 `hc send $HC_TERMINAL_ID` 명시. 장기 무인 실행은 [docs/autonomous-run-contract.md](docs/autonomous-run-contract.md) 계약을 따른다.
+
 ---
 
 ## 2. 요구사항 & 빠른 시작
