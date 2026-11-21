@@ -9,7 +9,7 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
 
 ## 0. 단독 실행 원칙 (Zero External Dependency)
 
-- **네이티브 `dg`/`dgate` 바이너리 상호 호환**: Rust v2 네이티브 바이너리(`target/release/dg`·`dgate`, 또는 PATH에 설치된 경우)가 있으면 `node $DGATE_ROOT/src/decision/dg.ts` 대신 그대로 사용할 수 있다 — 동일 SQLite DB·roster.json SSOT를 공유하고 기동 ~3ms(Node 대비 약 24배 빠름)다. 문서의 `node $DGATE_ROOT/src/decision/dg.ts <cmd>`는 네이티브 `dg <cmd>`로 1:1 치환 가능하다.
+- **네이티브 `dg` 실행 원칙**: 워커 실행·배차·통계 명령은 Rust v2 네이티브 바이너리(`dg`, PATH 설치 또는 `target/release/dg`)로 실행한다 — 동일 SQLite DB·roster.json SSOT 공유, 기동 ~3ms. 바이너리가 없을 때만 `node $DGATE_ROOT/src/decision/dg.ts <cmd>` 폴백. **git pull 후에는 `npm run rust:build`로 바이너리를 갱신한다**(스테일 바이너리 방지).
 - **데스크톱 모니터(GPUI 앱)**: 사용자가 *"데스크톱 모니터 열어줘"*, *"GPUI 앱 열어줘"*라고 하면 `cargo run -p dgate-gui -- [--repo <dir>]`로 기동한다(빌드돼 있으면 `target/debug/dgate-gui` 또는 `target/release/dgate-gui`를 직접 실행). 편의 스크립트: `npm run dgate-gui -- --repo <dir>`.
 
 - **필수 요구사항은 `Node.js >= 22.6` + 이 저장소뿐이다.** npm 의존성 0개 — `npm install` 없이 `node` 하나로 `dg` 전 기능이 동작한다.
@@ -94,7 +94,7 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
      --mode orchestrate --repo <TARGET_REPO> --dry-run
 
    # 실제 디스패치 계획 + fork 발급 (shadow 옵션)
-   node $DGATE_ROOT/scripts/dispatch.ts \
+   dg dispatch \
      --task-kind <explore_read|code_search|single_edit|multi_edit|test_or_deploy> \
      --repo <TARGET_REPO> [--decision-api shadow] [--context "<작업 요약>"] --json
    ```
@@ -103,7 +103,7 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
    - **하드 가드 불변**: `requires_write=true`, `forced_split=true`, `--risk medium|high`는 API 응답으로 절대 우회할 수 없다.
 3. **워커 감시 실행 (`dg wrap`)** — 워커 명령을 `dg wrap`으로 감싸 멈춤(`--stall-ms`)·하트비트·산출물·통계를 자동 기록:
    ```bash
-   node $DGATE_ROOT/src/decision/dg.ts wrap \
+   dg wrap \
      --route <file_select|tool_select|retry_or_abort|delegate_swarm> \
      --tool-class <file_read|code_search|file_edit|shell_exec|swarm_dispatch> \
      --fork <FORK_ID> --project <TARGET_REPO> --require-stdout-nonempty -- <CMD...>
@@ -134,11 +134,11 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
   - 직접 실행: `node $DGATE_ROOT/src/cli.ts --watch-db ~/.local/state/dgate/decision.db --watch`
 - **비용·타이밍 통계 (읽기전용)**:
   ```bash
-  node $DGATE_ROOT/src/decision/dg.ts stats --cost --timing [--project <TARGET_REPO>]
+  dg stats --cost --timing [--project <TARGET_REPO>]
   ```
 - **규칙 후보 + Decision API Shadow 비교 리포트 (읽기전용)**:
   ```bash
-  node $DGATE_ROOT/src/decision/dg.ts report [--project <TARGET_REPO>]
+  dg report [--project <TARGET_REPO>]
   ```
 - **실행 중 워커 목록** *(선택 — `hc` 설치 시)*: `hc ls`
 
