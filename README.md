@@ -75,7 +75,7 @@ dgate-tui                # 실시간 관제 TUI 시작 — 또는 dgate-gui(GPUI
 - **Layer 3 (독립 검증자)** — 리드와 이종 모델·읽기전용 권한으로 검증한다. 판정 SSOT는 구조화 verdict JSON(`.herdr/verify/<fork_id>-verdict.json`)이고, 리드가 `dg backprop --verdict-file`로 pass/rework/fail/human을 원본 fork에 fail-closed 반영한다(§5).
 - **Layer 4 (자문 3관문)** — 계획·오류·완료 시점에만 온디맨드로 기동하는 자문 세션이다. 관문 통과 후 즉시 `hc kill; hc rm`으로 정리된다.
 
-세션 관제·런치는 `hc`(Herdr 터미널 CLI) 위에서 동작한다. 모든 통계는 `~/.local/state/dgate/decision.db`(SQLite)에 SSOT로 축적된다.
+**역할 분리** — 판정·측정(`dg route`·게이트·`dg wrap` 텔레메트리 → `~/.local/state/dgate/decision.db`(SQLite) SSOT)은 herdr 없이 단독 동작하고, 실행·제어(`hc run/wait/send/kill`)와 가시성(TUI — `hc ls` + ps 스캔)은 `hc`(Herdr 터미널 CLI) 위에서 동작한다.
 
 **워커 실행 계약** — 모든 외부 워커는 `dg wrap`(측정·stall 감시 — herdr 무관, 어디서든 단독 동작)으로 감싼 뒤 `hc run --bg`(TUI 가시성·소유 매핑·제어)로 띄운다. `nohup`/`disown` 분리 금지, wrap 없는 직접 `hc run` 금지(텔레메트리 누락), 대기는 `hc wait`(sleep·폴링 금지), 완료 보고는 워커 지시문에 `hc send $HC_TERMINAL_ID` 명시. 장기 무인 실행은 [docs/autonomous-run-contract.md](docs/autonomous-run-contract.md) 계약을 따른다.
 
