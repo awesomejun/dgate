@@ -24,6 +24,7 @@
  * - DB 기록은 `HERDR_DB_WRITE === '1'` AND `DECISION_READONLY !== '1'`일 때만 수행.
  */
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { openDbSafe, resolveProjectIdentity } from '../../src/decision/db.ts';
 import { classifyTool, isSelfInvocation, recordToolOutcome } from '../../src/decision/engine.ts';
@@ -54,6 +55,42 @@ const READONLY_DENY_TOOL_ALIASES = new Set([
 ]);
 /** 셸 실행 계열 도구명 — `run_command`와 동일한 읽기전용 명령 검증을 거친다 (N-b) */
 const SHELL_EXEC_TOOL_NAMES = new Set(['run_command', 'bash', 'shell', 'exec', 'powershell']);
+
+// ---------- 머지 게이트(자문 완료 관문 집행) ----------
+
+/** advisor pass 유효 창 — pass 1건으로 이어지는 즉시 머지만 허용(30분). */
+const ADVISOR_PASS_TTL_MS = 30 * 60 * 1000;
+
+/** 병합·발행 명령 패턴 — `gh pr merge` 전체 변형 + main/master 직접 push. */
+function isMergePublishCommand(raw: string): boolean {
+  if (raw.includes('gh pr merge')) return true;
+  if (raw.includes('git push')) {
+    return [' main', ':main', '/main', ' master', ':master', '/master'].some((p) => raw.includes(p));
+  }
+  return false;
+}
+
+/** cwd(및 상위 3단계)의 `.herdr/verify/advisor-pass*` 중 최신 것이 TTL 창 안이면 true. */
+function hasFreshAdvisorPass(cwd: string | undefined): boolean {
+  if (!cwd) return false;
+  let dir: string = cwd;
+  for (let i = 0; i < 4; i++) {
+    const verify = path.join(dir, '.herdr', 'verify');
+    try {
+      const names = fs.readdirSync(verify).filter((n) => n.startsWith('advisor-pass') && !n.endsWith('.used'));
+      const now = Date.now();
+      for (const n of names) {
+        if (now - fs.statSync(path.join(verify, n)).mtimeMs <= ADVISOR_PASS_TTL_MS) return true;
+      }
+    } catch {
+      /* 없음 — 상위 계속 탐색 */
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return false;
+}
 
 /** 읽기전용 `run_command` 화이트리스트 (§6.2 — 안전 인자 포함 접두사 매칭) */
 const READONLY_CMD_PREFIXES = [
@@ -257,6 +294,15 @@ function runGuard(): void {
       }
       emit(allow());
       return;
+    }
+    // 머지 게이트(완료 관문 집행): advisor pass 없는 병합·발행 명령 차단
+    if (process.env.HERDR_MERGE_GATE === '1' && typeof name === 'string' && SHELL_EXEC_TOOL_NAMES.has(name)) {
+      const args = toolCall?.args ?? {};
+      const raw = args.CommandLine ?? args.command ?? args.cmd;
+      if (typeof raw === 'string' && isMergePublishCommand(String(raw)) && !hasFreshAdvisorPass(input.cwd)) {
+        emit(deny('merge gate: 최근 advisor pass 없음 — 완료 관문 자문(advisor-g3) 판정 후 재시도 (해제: HERDR_MERGE_GATE 미설정)'));
+        return;
+      }
     }
     emit(allow());
   } catch {

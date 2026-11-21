@@ -349,3 +349,46 @@ test('collect: malformed stdin/기타 환경 → fail-open {}', () => {
     fs.rmSync(base, { recursive: true, force: true });
   }
 });
+
+// ---------- 머지 게이트(자문 완료 관문 집행) ----------
+
+test('머지 게이트 — advisor pass 없는 gh pr merge 차단, 게이트 미설정 시 통과', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dg-mg-'));
+  const stdin = JSON.stringify({
+    toolCall: { name: 'run_command', args: { CommandLine: 'gh pr merge 837 --squash' } },
+    cwd: tmp,
+  });
+  const blocked = runHook('guard', stdin, { HERDR_MERGE_GATE: '1' });
+  assert.equal(blocked.status, 0);
+  assert.equal(blocked.parsed?.['decision'], 'deny');
+  assert.match(String(blocked.parsed?.['reason']), /advisor pass/);
+  const off = runHook('guard', stdin, { HERDR_MERGE_GATE: undefined });
+  assert.equal(off.parsed?.['decision'], 'allow');
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('머지 게이트 — 신선한 pass로 머지 통과, feature push는 pass 없이 통과', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dg-mg2-'));
+  const verify = path.join(tmp, '.herdr', 'verify');
+  fs.mkdirSync(verify, { recursive: true });
+  const feat = runHook(
+    'guard',
+    JSON.stringify({
+      toolCall: { name: 'run_command', args: { CommandLine: 'git push origin feature/rust-port' } },
+      cwd: tmp,
+    }),
+    { HERDR_MERGE_GATE: '1' }
+  );
+  assert.equal(feat.parsed?.['decision'], 'allow');
+  fs.writeFileSync(path.join(verify, 'advisor-pass.json2'), '{}');
+  const ok = runHook(
+    'guard',
+    JSON.stringify({
+      toolCall: { name: 'run_command', args: { CommandLine: 'gh pr merge 838 --squash' } },
+      cwd: tmp,
+    }),
+    { HERDR_MERGE_GATE: '1' }
+  );
+  assert.equal(ok.parsed?.['decision'], 'allow');
+  fs.rmSync(tmp, { recursive: true, force: true });
+});

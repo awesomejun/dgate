@@ -65,6 +65,110 @@ const READONLY_DENY_TOOL_ALIASES: [&str; 5] = [
 /// 셸 실행 계열 도구명 — `run_command`와 동일한 읽기전용 명령 검증을 거친다 (N-b)
 const SHELL_EXEC_TOOL_NAMES: [&str; 5] = ["run_command", "bash", "shell", "exec", "powershell"];
 
+// ---------- 머지 게이트(자문 완료 관문 집행) ----------
+
+/// advisor pass 유효 창 — pass 1건으로 이어지는 즉시 머지만 허용(30분).
+pub const ADVISOR_PASS_TTL_MS: u64 = 30 * 60 * 1000;
+
+/// 병합·발행 명령 패턴 — `gh pr merge` 전체 변형 + main/master 직접 push.
+pub fn is_merge_publish_command(raw: &str) -> bool {
+    if raw.contains("gh pr merge") {
+        return true;
+    }
+    if raw.contains("git push") {
+        const REF_HIT: [&str; 6] = [" main", ":main", "/main", " master", ":master", "/master"];
+        return REF_HIT.iter().any(|p| raw.contains(p));
+    }
+    false
+}
+
+/// cwd(및 상위 3단계)의 `.herdr/verify/advisor-pass*` 중 최신 것이 TTL 창 안이면 true.
+pub fn has_fresh_advisor_pass(cwd: Option<&str>) -> bool {
+    let Some(cwd) = cwd.filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    let mut dir = std::path::PathBuf::from(cwd);
+    for _ in 0..4 {
+        let verify = dir.join(".herdr").join("verify");
+        if let Ok(entries) = std::fs::read_dir(&verify) {
+            let now = now_ms();
+            for e in entries.flatten() {
+                let fname = e.file_name().to_string_lossy().into_owned();
+                if !fname.starts_with("advisor-pass") || fname.ends_with(".used") {
+                    continue;
+                }
+                if let Ok(m) = e.metadata().and_then(|md| md.modified()) {
+                    let ms = m
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0);
+                    if now.saturating_sub(ms) <= ADVISOR_PASS_TTL_MS as i64 {
+                        return true;
+                    }
+                }
+            }
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod merge_gate_tests {
+    use super::*;
+
+    fn gate_env() -> HookEnv {
+        let mut e = HookEnv::isolated();
+        e.set("HERDR_MERGE_GATE", "1");
+        e
+    }
+
+    fn cmd_json_with_cwd(cmd: &str, cwd: &str) -> String {
+        serde_json::json!({
+            "toolCall": {"name": "run_command", "args": {"CommandLine": cmd}},
+            "cwd": cwd
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn merge_gate_blocks_pr_merge_and_main_push_without_pass() {
+        let env = gate_env();
+        let tmp = std::env::temp_dir().join(format!("dg-mg-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let out = run_hook_mode("--guard", &cmd_json_with_cwd("gh pr merge 837 --squash", tmp.to_str().unwrap()), &env);
+        assert!(out.contains("advisor pass"), "pr merge 차단: {out}");
+        let out2 = run_hook_mode("--guard", &cmd_json_with_cwd("git push origin main", tmp.to_str().unwrap()), &env);
+        assert!(out2.contains("advisor pass"), "main push 차단: {out2}");
+        // 게이트 미설정이면 통과(백워드 호환)
+        let off = HookEnv::isolated();
+        let out3 = run_hook_mode("--guard", &cmd_json_with_cwd("gh pr merge 837 --squash", tmp.to_str().unwrap()), &off);
+        assert_eq!(out3, r#"{"decision":"allow"}"#);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn merge_gate_allows_feature_push_and_fresh_pass() {
+        let env = gate_env();
+        let tmp = std::env::temp_dir().join(format!("dg-mg2-{}", std::process::id()));
+        let verify = tmp.join(".herdr").join("verify");
+        std::fs::create_dir_all(&verify).unwrap();
+        // pass 없이 feature push → 통과
+        let out = run_hook_mode("--guard", &cmd_json_with_cwd("git push origin feature/rust-port", tmp.to_str().unwrap()), &env);
+        assert_eq!(out, r#"{"decision":"allow"}"#);
+        // pass 생성 직후 머지 → 통과 / .used·만료 pass는 무시
+        std::fs::write(verify.join("advisor-pass.json2"), "{}").unwrap();
+        let out2 = run_hook_mode("--guard", &cmd_json_with_cwd("gh pr merge 838 --squash", tmp.to_str().unwrap()), &env);
+        assert_eq!(out2, r#"{"decision":"allow"}"#);
+        std::fs::rename(verify.join("advisor-pass.json2"), verify.join("advisor-pass.json2.used")).unwrap();
+        let out3 = run_hook_mode("--guard", &cmd_json_with_cwd("gh pr merge 839 --squash", tmp.to_str().unwrap()), &env);
+        assert!(out3.contains("advisor pass"), ".used pass 무시: {out3}");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+}
+
 /// 읽기전용 `run_command` 화이트리스트 (§6.2 — 안전 인자 포함 접두사 매칭)
 const READONLY_CMD_PREFIXES: [&str; 10] = [
     "git status",
@@ -324,6 +428,7 @@ fn truncate_chars(s: &str, max: usize) -> String {
 pub fn run_guard(stdin_json: &str, env: &HookEnv) -> GuardDecision {
     let delegate_hc = env.equals("HERDR_DELEGATE_MODE", "hc");
     let readonly_mode = env.equals("HERDR_READONLY", "1");
+    let merge_gate = env.equals("HERDR_MERGE_GATE", "1");
 
     let parsed: Option<Value> = serde_json::from_str(stdin_json).ok();
     let input = match parsed {
@@ -338,7 +443,7 @@ pub fn run_guard(stdin_json: &str, env: &HookEnv) -> GuardDecision {
         }
     };
 
-    let result = guard_logic(&input, delegate_hc, readonly_mode);
+    let result = guard_logic(&input, delegate_hc, readonly_mode, merge_gate);
     match result {
         Some(decision) => decision,
         None => {
@@ -352,7 +457,12 @@ pub fn run_guard(stdin_json: &str, env: &HookEnv) -> GuardDecision {
 }
 
 /// 내부 판정 본체 — `None`은 "내부 예외 상당"(fail-closed/허용 분기로 위임).
-fn guard_logic(input: &Value, delegate_hc: bool, readonly_mode: bool) -> Option<GuardDecision> {
+fn guard_logic(
+    input: &Value,
+    delegate_hc: bool,
+    readonly_mode: bool,
+    merge_gate: bool,
+) -> Option<GuardDecision> {
     let tool_call = input.get("toolCall").filter(|v| v.is_object());
     let name = tool_call.and_then(|tc| tc.get("name")).and_then(Value::as_str);
 
@@ -393,6 +503,32 @@ fn guard_logic(input: &Value, delegate_hc: bool, readonly_mode: bool) -> Option<
             });
         }
         return Some(GuardDecision::allow());
+    }
+
+    // 머지 게이트(완료 관문 집행): advisor pass 없는 병합·발행 명령 차단.
+    if merge_gate {
+        if let (Some(n), Some(tc)) = (name, tool_call) {
+            if SHELL_EXEC_TOOL_NAMES.contains(&n) {
+                let raw = tc
+                    .get("args")
+                    .and_then(Value::as_object)
+                    .and_then(|a| first_non_null(a, &["CommandLine", "command", "cmd"]))
+                    .and_then(Value::as_str);
+                if let Some(raw_str) = raw {
+                    if is_merge_publish_command(raw_str) {
+                        let cwd = input
+                            .get("cwd")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty());
+                        if !has_fresh_advisor_pass(cwd) {
+                            return Some(GuardDecision::deny(
+                                "merge gate: 최근 advisor pass 없음 — 완료 관문 자문(advisor-g3) 판정 후 재시도 (해제: HERDR_MERGE_GATE 미설정)",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     Some(GuardDecision::allow())
