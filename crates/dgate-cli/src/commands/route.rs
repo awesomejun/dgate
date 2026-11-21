@@ -139,8 +139,12 @@ pub fn cmd_route(args: &ParsedArgs, json: bool) -> CmdResult {
         if let Some(a) = &audit {
             data["decision_api"] = audit_to_value(a);
         }
+        // 노력 권고(CAO effort.route 흡수) — 자문 필드, 판정 무관
+        let (effort_hint, effort_basis) = engine::effort_hint_from_posterior(ev.post.p, ev.post.samples);
+        data["effort_hint"] = json!(effort_hint);
+        data["effort_basis"] = json!(effort_basis);
         let human = format!(
-            "[route] {} → {} ({}/{}) p={:.3} ({}, n={}) fork={}{}",
+            "[route] {} → {} ({}/{}) p={:.3} ({}, n={}) fork={}{} · effort≈{}({})",
             spec.task_kind.as_str(),
             decision.to_uppercase(),
             spec.route.as_str(),
@@ -150,6 +154,8 @@ pub fn cmd_route(args: &ParsedArgs, json: bool) -> CmdResult {
             ev.post.samples,
             fork_id,
             api_suffix(audit.as_ref()),
+            effort_hint,
+            effort_basis,
         );
         emit(json, human, &data);
         Ok(0)

@@ -69,6 +69,20 @@ export function forkHasDispatchProvenance(db: DatabaseSync, forkId: string): boo
     return false;
   }
 }
+
+// ---------- 노력(effort) 권고 — CAO effort.route 흡수(자문 필드, 판정 무관) ----------
+
+export const EFFORT_HINT_MIN_SAMPLES = 5;
+
+export function effortHintFromPosterior(
+  p: number,
+  samples: number
+): { effort: 'low' | 'medium' | 'high'; basis: 'prior' | 'measured' } {
+  if (samples < EFFORT_HINT_MIN_SAMPLES) return { effort: 'medium', basis: 'prior' };
+  if (p >= 0.85) return { effort: 'low', basis: 'measured' };
+  if (p >= 0.6) return { effort: 'medium', basis: 'measured' };
+  return { effort: 'high', basis: 'measured' };
+}
 import { GLOBAL_PROJECT_ID, hasColumn, hasTable } from './db.ts';
 import { redactSecrets } from './redact.ts';
 import type { VerdictValidationResult } from './verdict.ts';

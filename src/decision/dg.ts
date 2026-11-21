@@ -52,6 +52,7 @@ import {
   isRouteId,
   issueFork,
   forkHasDispatchProvenance,
+  effortHintFromPosterior,
   readDispatchMode,
   writeDispatchMode,
   markForkWaitingHuman,
@@ -387,12 +388,15 @@ async function cmdRoute(args: ParsedArgs, json: boolean): Promise<void> {
         dispatch: true,
       },
     });
+    const effortHint = effortHintFromPosterior(finalP, post.samples);
     emit(
       json,
       () =>
-        `[route] ${spec.taskKind} → ${decision.toUpperCase()} (${spec.route}/${spec.toolClass}) p=${finalP.toFixed(3)} (${post.basis}, n=${post.samples}) fork=${forkId}${apiSuffix(audit)}`,
+        `[route] ${spec.taskKind} → ${decision.toUpperCase()} (${spec.route}/${spec.toolClass}) p=${finalP.toFixed(3)} (${post.basis}, n=${post.samples}) fork=${forkId}${apiSuffix(audit)} · effort≈${effortHint.effort}(${effortHint.basis})`,
       {
         fork_id: forkId,
+        effort_hint: effortHint.effort,
+        effort_basis: effortHint.basis,
         task_kind: spec.taskKind,
         route: spec.route,
         tool_class: spec.toolClass,

@@ -854,6 +854,23 @@ fn read_stats_row(db: &Connection, project_id: &str, route: RouteId, tool_class:
     Ok(row)
 }
 
+/// 노력(effort) 권고 — 실측 성공률 기반 그림자 추천(CAO effort.route 흡수).
+/// 표본 부족은 prior, 판정·집행에 영향 없는 자문 필드다(권고만 출력).
+pub const EFFORT_HINT_MIN_SAMPLES: i64 = 5;
+
+pub fn effort_hint_from_posterior(p: f64, samples: i64) -> (&'static str, &'static str) {
+    if samples < EFFORT_HINT_MIN_SAMPLES {
+        return ("medium", "prior");
+    }
+    if p >= 0.85 {
+        ("low", "measured")
+    } else if p >= 0.6 {
+        ("medium", "measured")
+    } else {
+        ("high", "measured")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PosteriorResult {
     pub p: f64,
@@ -4616,5 +4633,18 @@ mod tests {
         assert!(is_route_id("delegate_swarm"));
         assert!(!is_route_id("x"));
         assert!(is_event_source("ttl_orphan"));
+    }
+}
+
+#[cfg(test)]
+mod effort_hint_tests {
+    use super::*;
+
+    #[test]
+    fn effort_hint_thresholds() {
+        assert_eq!(effort_hint_from_posterior(0.99, 1), ("medium", "prior"));
+        assert_eq!(effort_hint_from_posterior(0.9, 10), ("low", "measured"));
+        assert_eq!(effort_hint_from_posterior(0.7, 10), ("medium", "measured"));
+        assert_eq!(effort_hint_from_posterior(0.3, 10), ("high", "measured"));
     }
 }
