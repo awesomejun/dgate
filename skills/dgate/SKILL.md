@@ -87,7 +87,7 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
    ```bash
    mistology search -b "<대상 파일·심볼·작업 의도>"
    ```
-2. **작업 라우팅·배차 (`dispatch.ts` / `dg route`)** — 기본은 로컬 통계(`DECISION_API=off`, 0원). 비교 검증 시에만 `--decision-api shadow` 사용:
+2. **작업 라우팅·배차 (`dispatch.ts` / `dg route`)** — 기본은 로컬 통계(`DECISION_API=off`, 0원). 비교 검증 시에만 `--decision-api shadow` 사용. 전송 범위·멱등·전환 평가 양식은 `docs/decision-gate-references.md` 계약을 따른다:
    ```bash
    # 리허설 (DB 미오염, 모델·API 호출 0회)
    node $DGATE_ROOT/scripts/herdr-quad-launch.ts \
