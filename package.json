@@ -20,7 +20,7 @@
     "herdr:quad": "node ./scripts/herdr-quad-launch.ts",
     "herdr:quad:live": "node ./scripts/herdr-quad-launch.ts --live",
     "herdr:quad:watch": "node ./scripts/herdr-quad-launch.ts --watch",
-    "test": "node --test tests/",
+    "test": "node --test tests/*.test.ts",
     "setup": "node ./scripts/setup.ts",
     "setup:check": "node ./scripts/setup.ts --check",
     "install:global": "node ./scripts/install-global.ts",
