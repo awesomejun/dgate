@@ -449,6 +449,115 @@ test('7. touch 이후 미정산 (B1): TTL 기준 last_touch_ms / 무touch 경과
   }
 });
 
+test('7c. wrap 생존 리스: 무출력 자식도 heartbeat 주기마다 last_touch 갱신 → TTL 정산 면역', async () => {
+  const e = makeEnv();
+  try {
+    const r = dgOk(e, ['route', '--task-kind', 'code_search', '--project', e.projDir]);
+    const fk = r.fork_id as string;
+    // 조용한 자식(sleep 4) — stdout/stderr 0바이트. stall/timeout 감시는 끄고
+    // (스톨 판정과 리스 갱신은 별개다) heartbeat-ms 300 < 틱 1000 → 매 틱마다
+    // 생존 touch가 걸려야 한다. 무출력 구간의 리스 갱신이 없으면 939초 워커가
+    // abandoned/ttl로 묻히는 것과 동일한 결함이 재현된다.
+    const child = spawn(process.execPath, [
+      DG_PATH, 'wrap', '--fork', fk,
+      '--route', 'tool_select', '--tool-class', 'code_search',
+      '--heartbeat-ms', '300', '--stall-ms', '0', '--max-ms', '0', '--json',
+      '--', 'sleep', '4',
+    ], { env: e.env });
+
+    // 기준선: wrap 기동 직후 1회 touch는 허용 — 이후 갱신(생존 리스)을 관측한다
+    await sleep(800);
+    const base = dgStat(e, `SELECT last_touch_ms AS lt FROM forks WHERE fork_id = ?`, fk) as { lt: number };
+    let advanced = false;
+    const deadline = Date.now() + 8_000;
+    while (Date.now() < deadline) {
+      await sleep(200);
+      if (child.exitCode !== null && advanced) break;
+      let row: { lt: number } | undefined;
+      try {
+        row = dgStat(e, `SELECT last_touch_ms AS lt FROM forks WHERE fork_id = ?`, fk) as { lt: number } | undefined;
+      } catch {
+        continue; // reader-writer 경합으로 잠깐 못 읽으면 재시도
+      }
+      if (row && row.lt > base.lt) {
+        advanced = true;
+        break;
+      }
+      if (child.exitCode !== null) break;
+    }
+    const code: number | null = await new Promise((res) => {
+      if (child.exitCode !== null) res(child.exitCode);
+      else child.on('close', (c) => res(c));
+    });
+    assert.ok(advanced, '무출력 실행 중에도 last_touch가 갱신돼야 한다(생존=리스)');
+    assert.equal(code, 0, `wrap exit=${code}`);
+    const fin = dgStat(e, `SELECT status, closed_by FROM forks WHERE fork_id = ?`, fk) as { status: string; closed_by: string };
+    assert.equal(fin.status, 'ok');
+    assert.equal(fin.closed_by, 'worker');
+  } finally {
+    cleanupEnv(e);
+  }
+});
+
+test('7d. 엔진: 주기 생존 touch 시뮬레이션 — TTL 초과 수명의 fork도 정산 면역 (a/b/c)', () => {
+  const e = makeEnv();
+  try {
+    const T0 = 1_000_000;
+    // settleOrphans는 DB 전체를 대상으로 쿼리하므로 케이스별 DB를 분리한다
+    const mk = (dbName: string, ttlMs: number): string => {
+      const db = openDb(`${e.base}/${dbName}.db`);
+      try {
+        return engine.issueFork(db, {
+          projectId: 'pT', projectLabel: 'pT', route: 'tool_select', toolClass: 'code_search',
+          decision: 'split', pAtGate: 0.5, basisAtGate: 'prior', forcedSplit: false, ttlMs, nowMs: T0,
+        });
+      } finally {
+        db.close();
+      }
+    };
+
+    // (a) 생성 직후 last_touch가 최근 → 방치 (기존 동작 회귀)
+    const fkFresh = mk('a', 60_000);
+    const aDb = openDb(`${e.base}/a.db`);
+    assert.equal(engine.settleOrphans(aDb, T0 + 30_000).settled, 0,
+      '최근 touch(생성 직후) fork는 정산 금지');
+    assert.equal(engine.getFork(aDb, fkFresh)!.status, 'open');
+    aDb.close();
+
+    // (b) TTL 60초 fork가 940초(기본 TTL 600초 초과 — 939초 조용한 워커 사고
+    //     재현 수명) 동안 60초마다 생존 touch → 전 구간 정산 면역, open 유지.
+    //     wrap 루프의 무조건 touch(생존 리스)가 의존하는 엔진 불변식이다.
+    const bDb = openDb(`${e.base}/b.db`);
+    const fkLive = mk('b', 60_000);
+    let now = T0;
+    while (now < T0 + 940_000) {
+      now += 60_000;
+      engine.touchFork(bDb, fkLive, undefined, now);
+      assert.equal(engine.settleOrphans(bDb, now + 59_000).settled, 0,
+        `주기 생존 touch 중인 fork는 TTL 이내로 정산 금지 (now=${now})`);
+    }
+    assert.equal(engine.getFork(bDb, fkLive)!.status, 'open', '주기 touch만으로 TTL 대비 15배 수명도 생존');
+    bDb.close();
+
+    // (c) touch 없는 쌍둥이는 동일 시점에 정산 — abandoned/ttl 유지(정산 회귀 없음)
+    const cDb = openDb(`${e.base}/c.db`);
+    const fkDead = mk('c', 60_000);
+    const fkAlive = mk('c', 60_000);
+    engine.touchFork(cDb, fkAlive, undefined, now);
+    // 무touch fork(생성 T0)는 경과 ~999초 > 60초, touch 쌍둥이는 59초 < 60초
+    const res = engine.settleOrphans(cDb, now + 59_000);
+    assert.equal(res.settled, 1);
+    assert.ok(res.forkIds.includes(fkDead), `정산 대상은 touch 없는 fork만: ${JSON.stringify(res.forkIds)}`);
+    const dead = engine.getFork(cDb, fkDead)!;
+    assert.equal(dead.status, 'abandoned');
+    assert.equal(dead.closed_by, 'ttl');
+    assert.equal(engine.getFork(cDb, fkAlive)!.status, 'open');
+    cDb.close();
+  } finally {
+    cleanupEnv(e);
+  }
+});
+
 test('8. Neon backprop: ok fork → backprop_fail 전환 + p 하락', () => {
   const e = makeEnv();
   try {

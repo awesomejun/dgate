@@ -1,10 +1,10 @@
-//! `dg wrap` — 자식 프로세스 래핑 + 진행 게이트 하트비트 + 스톨/타임아웃 워치독
+//! `dg wrap` — 자식 프로세스 래핑 + 생존 리스 하트비트 + 스톨/타임아웃 워치독
 //! (dg.ts cmdWrap 대응).
 //!
 //! - 자식을 `setsid()`로 자체 프로세스 그룹 리더로 띄워 stall/timeout 킬이
 //!   자식의 자식까지 프로세스 그룹 전체(`kill(-pgid)`)를 한 번에 끝낸다.
-//! - SIGTERM → grace → SIGKILL 2단 킬, 진행 게이트 하트비트(stdout/stderr 진행
-//!   시에만 `touch_fork`), redact된 마지막 20줄 테일 캡처, 첫 비공백 stdout 줄
+//! - SIGTERM → grace → SIGKILL 2단 킬, 생존 리스 하트비트(자식이 살아 있으면
+//!   출력 유무와 무관하게 heartbeat_ms마다 `touch_fork`), redact된 마지막 20줄 테일 캡처, 첫 비공백 stdout 줄
 //!   `"rerouted"` 검출, AND 게이트 산출물 검사, `commit_wrap_outcome` 단일 Tx 커밋.
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -78,7 +78,6 @@ struct CaptureState {
     first_non_blank: Mutex<Option<String>>,
     stdout_non_empty: AtomicBool,
     last_output_ms: AtomicI64,
-    has_new_progress: AtomicBool,
     stalled: AtomicBool,
     timed_out: AtomicBool,
     kill_sent: AtomicBool,
@@ -216,8 +215,6 @@ fn run_wrapped_child(
                         let text = String::from_utf8_lossy(&buf[..n]).into_owned();
                         st.last_output_ms
                             .store(crate::util::now_ms(), std::sync::atomic::Ordering::SeqCst);
-                        st.has_new_progress
-                            .store(true, std::sync::atomic::Ordering::SeqCst);
                         if is_stdout {
                             let mut so = std::io::stdout().lock();
                             let _ = so.write_all(text.as_bytes());
@@ -256,7 +253,7 @@ fn run_wrapped_child(
     let t_out = spawn_reader(stdout, true, Arc::clone(&state));
     let t_err = spawn_reader(stderr, false, Arc::clone(&state));
 
-    // 워치독 스레드 — stall/timeout 킬 + 진행 게이트 하트비트
+    // 워치독 스레드 — stall/timeout 킬 + 생존 리스 하트비트
     let tick_ms = if stall_ms > 0 {
         (stall_ms / 4).clamp(10, 1000)
     } else {
@@ -307,8 +304,12 @@ fn run_wrapped_child(
                 kill_process_tree_hard(child_pid);
                 continue;
             }
-            let has_progress = wd_state.has_new_progress.load(std::sync::atomic::Ordering::SeqCst);
-            if has_progress && heartbeat_ms > 0 && now - last_touch_ms >= heartbeat_ms {
+            // 생존 리스(B1): 출력 유무와 무관하게 자식이 살아 있는 동안(위의
+            // settled/kill_sent 게이트 통과 = 생존) heartbeat_ms 주기마다 무조건
+            // touch_fork한다. 조용한 장기 실행(예: 939초)이 TTL 정산(settle_orphans
+            // → abandoned/ttl)에 묻히는 것을 막는다. 스톨 판정은 위의
+            // last_output_ms(progress 게이트) 기반으로 별개 유지.
+            if heartbeat_ms > 0 && now - last_touch_ms >= heartbeat_ms {
                 if let (Some(dbm), Some(fk)) = (&wd_db, &wd_fork) {
                     if let Ok(mut guard) = dbm.lock() {
                         if let Some(conn) = guard.as_mut() {
@@ -316,9 +317,6 @@ fn run_wrapped_child(
                         }
                     }
                 }
-                wd_state
-                    .has_new_progress
-                    .store(false, std::sync::atomic::Ordering::SeqCst);
                 last_touch_ms = now;
             }
             std::thread::sleep(std::time::Duration::from_millis(tick_ms));

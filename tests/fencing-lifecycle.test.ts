@@ -275,13 +275,16 @@ test('⑤ 무출력 워치독: --stall-ms 250 자식 킬 + stall 분류 + 하트
     assert.notEqual(res.status, 0, '스톨된 자식은 비정상 종료 코드');
     const fork = dgStat(
       e,
-      `SELECT status, last_touch_ms, created_at_ms, metadata_json FROM forks WHERE fork_id = ?`,
+      `SELECT status, last_touch_ms, created_at_ms, closed_at_ms, metadata_json FROM forks WHERE fork_id = ?`,
       forkId
     ) as { status: string; last_touch_ms: number; created_at_ms: number; metadata_json: string };
     assert.equal(fork.status, 'fail');
     assert.equal(JSON.parse(fork.metadata_json).cause, 'stall');
-    // 하트비트 정지: 스톨 킬 이후 touch가 더 발생하지 않는다(무출력 → 진행 없음 → touch 0회)
-    assert.equal(fork.last_touch_ms, fork.created_at_ms, '무진행 자식에 touch가 발생함');
+    // 생존 리스(B1): 무출력 자식도 킬 전 생존 중에는 touch된다(생존=리스).
+    // 킬 이후 하트비트 정지는 “종료(closed_at_ms) 이후 touch 없음”으로 검증 —
+    // 무출력 갱신 자체는 decision-engine 7c가 결정적으로 담당한다.
+    assert.ok(fork.last_touch_ms >= fork.created_at_ms, 'last_touch 선행 불변 위반');
+    assert.ok(fork.last_touch_ms < fork.closed_at_ms, '종료 후 touch 발생 — 킬 후 하트비트 정지 위반');
   } finally {
     cleanupEnv(e);
   }

@@ -4251,6 +4251,54 @@ mod tests {
         assert!(res3.fork_ids.contains(&fk3));
     }
 
+    #[test]
+    fn settle_orphans_liveness_touch_lease_trio() {
+        // wrap 생존 리스(B1) 규칙의 엔진 불변식 검증 — wrap.rs/dg.ts의
+        // “자식 생존 중 heartbeat마다 무조건 touch”가 의존하는 정산 규칙.
+        // settle_orphans는 DB 전체를 대상으로 쿼리하므로 케이스별 DB를 분리한다.
+        let T0: i64 = 1_000_000;
+        let mk = |conn: &Connection, ttl: i64| issue_fork(conn, &IssueForkInput {
+            project_id: PID, project_label: "T", route: RouteId::ToolSelect, tool_class: "code_search",
+            decision: "split", p_at_gate: 0.5, basis_at_gate: DecisionBasis::Prior, forced_split: false,
+            conversation_id: None, ttl_ms: Some(ttl), title: None, metadata: None, now_ms: Some(T0),
+        })
+        .unwrap();
+
+        // (a) 생성 직후 last_touch가 최근 → 방치 (기존 동작 회귀)
+        let ca = mem();
+        let fk_fresh = mk(&ca, 60_000);
+        assert_eq!(settle_orphans(&ca, T0 + 30_000).unwrap().settled, 0,
+            "최근 touch(생성 직후) fork는 정산 금지");
+
+        // (b) TTL 60초 fork가 940초(기본 TTL 600초 초과 — 939초 조용한 워커 사고
+        //     재현 수명) 동안 60초마다 생존 touch → 전 구간 정산 면역, open 유지
+        let cb = mem();
+        let fk_live = mk(&cb, 60_000);
+        let mut now = T0;
+        while now < T0 + 940_000 {
+            now += 60_000;
+            touch_fork(&cb, &fk_live, None, now).unwrap();
+            let res = settle_orphans(&cb, now + 59_000).unwrap();
+            assert_eq!(res.settled, 0, "주기 생존 touch 중인 fork는 TTL 이내로 정산 금지 (now={now})");
+        }
+        assert_eq!(get_fork(&cb, &fk_live).unwrap().unwrap().status, "open",
+            "주기 touch만으로 TTL 대비 15배 수명도 생존");
+
+        // (c) touch 없는 쌍둥이는 동일 시점에 정산 — abandoned/ttl 유지(정산 회귀 없음)
+        let cc = mem();
+        let fk_dead = mk(&cc, 60_000);
+        let fk_alive = mk(&cc, 60_000);
+        touch_fork(&cc, &fk_alive, None, now).unwrap();
+        // 무touch fork(생성 T0)는 경과 ~999초 > 60초, touch 쌍둥이는 59초 < 60초
+        let res = settle_orphans(&cc, now + 59_000).unwrap();
+        assert_eq!(res.settled, 1);
+        assert!(res.fork_ids.contains(&fk_dead), "정산 대상은 touch 없는 fork만: {:?}", res.fork_ids);
+        let d = get_fork(&cc, &fk_dead).unwrap().unwrap();
+        assert_eq!(d.status, "abandoned");
+        assert_eq!(d.closed_by.as_deref(), Some("ttl"));
+        assert_eq!(get_fork(&cc, &fk_alive).unwrap().unwrap().status, "open");
+    }
+
     // ---------- wrap 커밋 ----------
 
     #[test]

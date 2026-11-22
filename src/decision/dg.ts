@@ -840,8 +840,9 @@ function stripAnsiForLog(s: string): string {
 
 /**
  * 단일 자식 실행 + 진행 감시 루프(§2.5): stdout/stderr를 패스스루 캡처하고
- * `hasNewProgress` 게이트의 하트비트(onHeartbeat)와 stall/timeout 워치독을 돌린다.
- * `detached:true`로 자식을 자체 프로세스 그룹 리더로 띄워 `killProcessGroup`이
+ * 생존 리스 하트비트(onHeartbeat — 자식이 살아 있으면 무조건 touch)와
+ * stall/timeout 워치독을 돌린다.
+ * detached:true로 자식을 자체 프로세스 그룹 리더로 띄워 killProcessGroup이
  * 자식의 자식까지 한 번에 끝내도록 한다.
  */
 function runWrappedChild(opts: {
@@ -859,7 +860,6 @@ function runWrappedChild(opts: {
     const startedAt = Date.now();
     let lastOutputAt = startedAt;
     let lastTouchAt = startedAt;
-    let hasNewProgress = false;
     let settled = false;
     let killSent = false;
     let stalled = false;
@@ -940,7 +940,6 @@ function runWrappedChild(opts: {
     child.stdout?.on('data', (chunk: Buffer) => {
       const text = chunk.toString();
       lastOutputAt = Date.now();
-      hasNewProgress = true;
       process.stdout.write(text);
       if (!stdoutNonEmpty && /\S/.test(text)) stdoutNonEmpty = true;
       if (firstNonBlankLine === null) {
@@ -957,7 +956,6 @@ function runWrappedChild(opts: {
     child.stderr?.on('data', (chunk: Buffer) => {
       const text = chunk.toString();
       lastOutputAt = Date.now();
-      hasNewProgress = true;
       process.stderr.write(text);
       ingest(text);
     });
@@ -1023,13 +1021,16 @@ function runWrappedChild(opts: {
         beginKill('timeout');
         return;
       }
-      if (hasNewProgress && opts.heartbeatMs > 0 && now - lastTouchAt >= opts.heartbeatMs) {
+      // 생존 리스(B1): 출력 유무와 무관하게 자식이 살아 있는 동안(위의 settled/killSent
+      // 게이트 통과 = 생존) heartbeatMs 주기마다 무조건 touch한다. 조용한 장기 실행
+      // (예: 939초)이 TTL 정산(settleOrphans → abandoned/ttl)에 묻히는 것을 막는다.
+      // 스톨 판정은 위의 lastOutputAt(progress 게이트) 기반으로 별개 유지.
+      if (opts.heartbeatMs > 0 && now - lastTouchAt >= opts.heartbeatMs) {
         try {
           opts.onHeartbeat();
         } catch {
           /* fork가 이미 닫혀 있음 — 하트비트만 중단 */
         }
-        hasNewProgress = false;
         lastTouchAt = now;
       }
     }, tickMs);
