@@ -1347,6 +1347,75 @@ export function installRepoHooks(opts: {
   return res;
 }
 
+// ---------- dgate 계약 블록 설치 (AGENTS.md 관리 블록) ----------
+
+/** `installContractsBlock` 결과 — changed=false면 쓰기가 없었다. */
+export interface ContractsBlockResult {
+  repoDir: string;
+  changed: boolean;
+  reason?:
+    | 'created' // AGENTS.md 없음 → 블록만 넣어 생성
+    | 'appended' // 마커 없는 기존 파일 → 끝에 추가
+    | 'updated' // 기존 관리 블록을 소스 블록으로 교체
+    | 'already-current' // 이미 동일 — 쓰기 없음
+    | 'repo-dir-missing'
+    | 'block-source-missing'
+    | 'write-failed';
+}
+
+/** AGENTS.md에서 dgate 관리 블록 범위 — begin 마커부터 첫 end 마커까지(비탐욕). */
+const CONTRACTS_BLOCK_RE = /<!-- dgate:begin[\s\S]*?<!-- dgate:end -->/;
+
+/** AGENTS.md 내용에 계약 블록을 적용한다 — 변화 없으면 null. */
+function applyContractsBlock(prev: string, block: string): string | null {
+  if (CONTRACTS_BLOCK_RE.test(prev)) {
+    // 함수형 치환자 — 블록 내 `$`(예: `$HC_TERMINAL_ID`)가 특수 패턴으로 해석되지 않게 한다.
+    const next = prev.replace(CONTRACTS_BLOCK_RE, () => block);
+    return next === prev ? null : next;
+  }
+  // 마커 없음 — 끝 개행을 정규화해 빈 줄 하나 두고 추가한다(빈 파일이면 블록만).
+  const base = prev.replace(/\n+$/, '');
+  return base === '' ? block : `${base}\n\n${block}`;
+}
+
+/**
+ * 대상 레포 AGENTS.md에 dgate 계약 블록(`skills/dgate/AGENTS-BLOCK.md`)을 멱등 설치·갱신한다.
+ * 파일이 없으면 블록만 넣어 생성하고, 관리 마커가 있으면 해당 범위를 교체, 없으면 끝에 추가한다.
+ * 이미 동일하면 changed=false(쓰기 없음). 소스·대상 부재는 조용히 스킵한다.
+ */
+export function installContractsBlock(opts: {
+  repoDir: string;
+  orchestratorRoot?: string;
+}): ContractsBlockResult {
+  const repoDir = opts.repoDir;
+  const orch = opts.orchestratorRoot ?? REPO_ROOT;
+  if (!fs.existsSync(repoDir)) {
+    return { repoDir, changed: false, reason: 'repo-dir-missing' };
+  }
+  let block: string;
+  try {
+    block = fs
+      .readFileSync(path.join(orch, 'skills', 'dgate', 'AGENTS-BLOCK.md'), 'utf8')
+      .replace(/\n+$/, '');
+  } catch {
+    return { repoDir, changed: false, reason: 'block-source-missing' };
+  }
+  const agentsMd = path.join(repoDir, 'AGENTS.md');
+  const prev = fs.existsSync(agentsMd) ? fs.readFileSync(agentsMd, 'utf8') : null;
+  const next = prev === null ? `${block}\n` : applyContractsBlock(prev, block);
+  if (next === null || next === prev) {
+    return { repoDir, changed: false, reason: 'already-current' };
+  }
+  try {
+    fs.writeFileSync(agentsMd, next);
+  } catch {
+    return { repoDir, changed: false, reason: 'write-failed' };
+  }
+  const reason: ContractsBlockResult['reason'] =
+    prev === null ? 'created' : CONTRACTS_BLOCK_RE.test(prev) ? 'updated' : 'appended';
+  return { repoDir, changed: true, reason };
+}
+
 // ---------- GitHub 스타 (opt-in 전용) ----------
 
 export interface StarRepoResult {
@@ -1901,6 +1970,10 @@ async function runWizard(report: EnvironmentReport, opts: { yes: boolean; repo: 
       const r = installRepoHooks({ repoDir: path.resolve(repoTarget) });
       for (const w of r.written) out(`  → 설치: ${w}`);
       for (const s of r.skipped) out(`  → 건너뜀: ${s.path} (${s.reason})`);
+      // 계약 블록 — 훅 설치 결과와 무관하게 항상 시도(멱등, 실패는 조용 스킵)
+      const c = installContractsBlock({ repoDir: path.resolve(repoTarget) });
+      const label = c.reason === 'updated' ? '갱신' : c.changed ? '설치' : '변경 없음';
+      out(`  → 계약 블록: ${label}`);
     } else {
       out('  → 건너뜀');
     }

@@ -224,6 +224,16 @@ fn run_wizard(rep: &setup::EnvironmentReport, yes: bool, repo: Option<&str>) {
             for s in &res.skipped {
                 let _ = writeln!(out, "[setup] 훅 건너뜀({}): {}", s.path, s.reason);
             }
+            // 계약 블록 — 훅 설치 결과와 무관하게 시도(소스 부재 등 실패는 조용 스킵)
+            match setup::install_contracts_block(std::path::Path::new(repo_dir)) {
+                Ok(true) => {
+                    let _ = writeln!(out, "[setup] 계약 블록 → 설치/갱신: {repo_dir}/AGENTS.md");
+                }
+                Ok(false) => {
+                    let _ = writeln!(out, "[setup] 계약 블록 → 변경 없음");
+                }
+                Err(_) => {}
+            }
         }
     }
 }

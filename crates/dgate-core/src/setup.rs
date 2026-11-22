@@ -1820,6 +1820,66 @@ pub fn install_repo_hooks(repo_dir: &Path, orchestrator_root: Option<&Path>) -> 
 }
 
 // ---------------------------------------------------------------------------
+// dgate 계약 블록 설치 (AGENTS.md 관리 블록)
+// ---------------------------------------------------------------------------
+
+/// AGENTS.md 관리 블록 마커 — begin부터 첫 end까지(둘 다 포함)를 소스 블록으로 교체한다.
+const CONTRACTS_BEGIN: &str = "<!-- dgate:begin";
+const CONTRACTS_END: &str = "<!-- dgate:end -->";
+
+/// AGENTS.md 내용에 계약 블록을 적용한다 — 변화 없으면 None.
+/// 마커가 있으면 해당 범위를 교체, 없으면 끝 개행을 정규화해 빈 줄 하나 두고 추가한다.
+fn replace_managed_block(agents_md: &str, block: &str) -> Option<String> {
+    if let Some(start) = agents_md.find(CONTRACTS_BEGIN) {
+        if let Some(rel) = agents_md[start..].find(CONTRACTS_END) {
+            let end = start + rel + CONTRACTS_END.len();
+            let mut next = String::with_capacity(agents_md.len());
+            next.push_str(&agents_md[..start]);
+            next.push_str(block);
+            next.push_str(&agents_md[end..]);
+            return if next == agents_md { None } else { Some(next) };
+        }
+    }
+    // 마커 없음 — 빈 파일이면 블록만, 아니면 빈 줄 하나 두고 추가
+    let base = agents_md.trim_end_matches('\n');
+    Some(if base.is_empty() {
+        block.to_string()
+    } else {
+        format!("{base}\n\n{block}")
+    })
+}
+
+/// 대상 레포 AGENTS.md에 dgate 계약 블록(`skills/dgate/AGENTS-BLOCK.md`)을 멱등 설치·갱신한다.
+/// 파일이 없으면 블록만 넣어 생성하고, 관리 마커가 있으면 교체, 없으면 끝에 추가한다.
+/// 블록 소스는 실행 바이너리 기준 저장소 루트(3단계 상위)에서 찾는다 — 실패는 Err(조용 스킵용).
+/// 반환값: Ok(true) 설치·갱신 / Ok(false) 변경 없음 / Err 원인.
+pub fn install_contracts_block(repo: &std::path::Path) -> Result<bool, String> {
+    let root = std::env::current_exe()
+        .map_err(|e| format!("current_exe 실패: {e}"))?
+        .ancestors()
+        .nth(3)
+        .ok_or_else(|| "실행 경로에서 저장소 루트를 찾을 수 없음".to_string())?
+        .to_path_buf();
+    let src = root.join("skills").join("dgate").join("AGENTS-BLOCK.md");
+    let block = std::fs::read_to_string(&src)
+        .map_err(|e| format!("블록 소스 읽기 실패({}): {e}", src.display()))?
+        .trim_end_matches('\n')
+        .to_string();
+    let agents_md = repo.join("AGENTS.md");
+    let next = match std::fs::read_to_string(&agents_md) {
+        // 파일 없음 — 블록만 넣어 생성
+        Err(_) => format!("{block}\n"),
+        Ok(prev) => match replace_managed_block(&prev, &block) {
+            None => return Ok(false),
+            Some(n) => n,
+        },
+    };
+    std::fs::write(&agents_md, next)
+        .map_err(|e| format!("AGENTS.md 쓰기 실패({}): {e}", agents_md.display()))?;
+    Ok(true)
+}
+
+// ---------------------------------------------------------------------------
 // GitHub 스타 (opt-in 전용)
 // ---------------------------------------------------------------------------
 
@@ -2954,6 +3014,34 @@ mod tests {
         let st = inspect_repo_hooks(&nongit, &orch);
         assert!(st.hooks_json && st.hook_symlink && !st.excluded);
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // ---------- replace_managed_block (계약 블록) ----------
+
+    #[test]
+    fn contracts_block_first_apply_and_idempotent() {
+        let block = "<!-- dgate:begin v=2026-11-22 — 관리 블록 -->\n계약 내용\n<!-- dgate:end -->";
+        // (a) 마커 없는 기존 문서 — 끝 개행 정규화 후 빈 줄 하나 두고 추가
+        let agents = "# 가이드\n\n본문.\n";
+        let next = replace_managed_block(agents, block).expect("마커 없으면 변화 있음");
+        assert_eq!(next, format!("# 가이드\n\n본문.\n\n{block}"));
+        // (b) 재실행 — 동일 블록이면 변화 없음(None)
+        assert!(replace_managed_block(&next, block).is_none(), "동일하면 None");
+    }
+
+    #[test]
+    fn contracts_block_replaces_different_version_only() {
+        let old = "<!-- dgate:begin v=2026-11-01 — 옛 버전 -->\n옛 계약 내용\n<!-- dgate:end -->";
+        let block = "<!-- dgate:begin v=2026-11-22 — 관리 블록 -->\n새 계약 내용\n<!-- dgate:end -->";
+        // (c) 다른 마커 버전 — 관리 블록만 교체, 주변 문서 보존
+        let agents = format!("앞 문서\n\n{old}\n\n뒷 문서\n");
+        let next = replace_managed_block(&agents, block).expect("버전이 다르면 변화 있음");
+        assert!(next.contains(block), "새 블록 포함");
+        assert!(!next.contains("옛 계약 내용"), "옛 본문 제거");
+        assert!(!next.contains("v=2026-11-01"), "옛 마커 제거");
+        assert!(next.starts_with("앞 문서\n\n"), "앞 문서 보존");
+        assert!(next.ends_with("뒷 문서\n"), "뒷 문서 보존");
+        assert_eq!(next, format!("앞 문서\n\n{block}\n\n뒷 문서\n"));
     }
 
     // ---------- star_github_repo ----------
