@@ -1116,7 +1116,17 @@ export function readWrapOutputTail(wrapPid: number, logDir = defaultWrapLogDir()
   }
 }
 
-/** wrap 프로세스를 상위 hc 세션(parent) 카드 정보로 변환 — slot=coder, 실행 중. */
+/** wrap 워커 슬롯 추론 — label(--label) 우선, 없으면 route 근사. 역할 카드 매핑의 근거. */
+function inferWrapSlot(p: WrapProc): LiveWorkerSlot {
+  const label = (p.project ?? '').toLowerCase();
+  if (/(verify|검증)/.test(label)) return 'verifier';
+  if (/(research|explore|조사|탐색)/.test(label)) return 'explore';
+  if (/(advisor|자문)/.test(label)) return 'advisor';
+  if (!p.project && p.route === 'file_select') return 'explore';
+  return 'coder';
+}
+
+/** wrap 프로세스를 상위 hc 세션(parent) 카드 정보로 변환 — 실행 중. */
 export function wrapProcToWorker(
   p: WrapProc,
   parent: HcTerminalSummary,
@@ -1126,7 +1136,7 @@ export function wrapProcToWorker(
   const recentOutput = readWrapOutputTail(p.wrapPid, logDir, 12);
   const latestLine = recentOutput.length > 0 ? recentOutput[recentOutput.length - 1]! : null;
   return {
-    slot: 'coder',
+    slot: inferWrapSlot(p),
     badge: `${shortModel} (실행 중)`,
     shortModel,
     modelName: p.model ?? p.cli,
@@ -1160,7 +1170,7 @@ export function wrapProcToUnownedWorker(
   const recentOutput = readWrapOutputTail(p.wrapPid, logDir, 12);
   const latestLine = recentOutput.length > 0 ? recentOutput[recentOutput.length - 1]! : null;
   return {
-    slot: 'coder',
+    slot: inferWrapSlot(p),
     badge: `${shortModel} (실행 중)`,
     shortModel,
     modelName: p.model ?? p.cli,

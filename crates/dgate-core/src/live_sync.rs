@@ -1701,6 +1701,24 @@ pub fn wrap_proc_to_worker(p: &WrapProc, parent: &HcTerminalSummary) -> LiveWork
     wrap_proc_to_worker_with_log_dir(p, parent, None)
 }
 
+/// wrap 워커 슬롯 추론 — label(--label) 우선, 없으면 route 근사. 역할 카드 매핑의 근거.
+fn infer_wrap_slot(p: &WrapProc) -> RoleSlot {
+    let label = p.project.as_deref().unwrap_or("").to_lowercase();
+    if label.contains("verify") || label.contains("검증") {
+        return RoleSlot::Verifier;
+    }
+    if label.contains("research") || label.contains("explore") || label.contains("조사") || label.contains("탐색") {
+        return RoleSlot::Explore;
+    }
+    if label.contains("advisor") || label.contains("자문") {
+        return RoleSlot::Advisor;
+    }
+    if p.project.is_none() && p.route.as_deref() == Some("file_select") {
+        return RoleSlot::Explore;
+    }
+    RoleSlot::Coder
+}
+
 /// 테스트·커스텀 경로용 wrap 프로세스 → LiveWorkerInfo 변환.
 pub fn wrap_proc_to_worker_with_log_dir(
     p: &WrapProc,
