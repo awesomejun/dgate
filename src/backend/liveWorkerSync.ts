@@ -843,6 +843,35 @@ function stripDgWrapPrefix(tokens: readonly string[]): string[] {
   return dashIdx >= 0 ? tokens.slice(dashIdx + 1) : (tokens as string[]);
 }
 
+/** 셸 `-c`/`-lc` 단일 문자열 안 `dg wrap` 코맨드 세그먼트 — `…; dg wrap …` 형태. */
+const DG_WRAP_IN_SHELL_RE = /(?:^|[;&\n][;&\s]*)dg(?:\.ts)?\s+wrap\b/;
+
+/**
+ * argv가 `dg wrap` 실행을 호스팅하는지 — 이중 카드 방지 판정.
+ * ① dg/dg.ts 토큰 바로 뒤가 'wrap'(env 접두는 먼저 벗긴다)
+ * ② `env X=1 bash -lc '…; dg wrap …'`처럼 셸 -c/-lc 단일 문자열 안 코맨드로 감싼 형태.
+ * 이런 터미널은 §3.5 ps wrap 탐지가 같은 워커를 cli·model·effort까지 정확히
+ * 잡아주므로 hc 터미널 카드를 만들지 않는다. 일반 bash/기타 실행은 해당 없음.
+ */
+function isDgWrapHostArgv(tokens: readonly string[]): boolean {
+  const stripped = stripEnvPrefix(tokens);
+  for (let i = 0; i + 1 < stripped.length; i++) {
+    const base = tokenBase(stripped[i] ?? '');
+    if ((base === 'dg' || base === 'dg.ts') && stripped[i + 1] === 'wrap') return true;
+  }
+  for (let i = 0; i + 1 < stripped.length; i++) {
+    const base = tokenBase(stripped[i] ?? '');
+    if (
+      (base === 'bash' || base === 'zsh' || base === 'sh') &&
+      (stripped[i + 1] === '-lc' || stripped[i + 1] === '-c') &&
+      DG_WRAP_IN_SHELL_RE.test(stripped.slice(i + 2).join(' '))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** argv(+agent 폴백)에서 실제 워커 CLI 이름과 `--model` 값을 찾는다. */
 function parseWorkerCliAndModel(
   argv: readonly string[],
@@ -1021,7 +1050,7 @@ export function findWrapProcesses(rows: readonly PsRow[]): WrapProc[] {
   }
   const out: WrapProc[] = [];
   for (const row of rows) {
-    const tokens = row.command.split(/\s+/).filter((t) => t.length > 0);
+    const tokens = stripEnvPrefix(row.command.split(/\s+/).filter((t) => t.length > 0));
     if (tokens.length < 3 || !WRAP_LAUNCHERS.has(tokenBase(tokens[0]!))) continue;
     const dgIdx = tokens.findIndex((t) => t === 'dg' || tokenBase(t) === 'dg.ts' || tokenBase(t) === 'dg');
     if (dgIdx < 0 || tokens[dgIdx + 1] !== 'wrap') continue;
@@ -1035,7 +1064,8 @@ export function findWrapProcesses(rows: readonly PsRow[]): WrapProc[] {
     const queue: number[] = [row.pid];
     for (let qi = 0; qi < queue.length && qi < 64 && !childTokens; qi++) {
       for (const child of children.get(queue[qi]!) ?? []) {
-        const ct = child.command.split(/\s+/).filter((t) => t.length > 0);
+        // `env VAR=… pi …` 자식도 감지 — env 접두를 벗기고 실제 CLI 헤드를 본다.
+        const ct = stripEnvPrefix(child.command.split(/\s+/).filter((t) => t.length > 0));
         const head = tokenBase(ct[0] ?? '');
         const second = tokenBase(ct[1] ?? '');
         if (WORKER_CLI_SET.has(head) || (head === 'node' && WORKER_CLI_SET.has(second))) {
@@ -1564,6 +1594,16 @@ export function createLiveRosterSyncer(opts: LiveRosterSyncerOptions): LiveRoste
             cwd: summary.cwd ?? detail.cwd,
           };
           detailCache.set(summary.address, detail);
+
+          // 이중 카드 방지 — 터미널(포그라운드·런치 argv)이 `dg wrap`을 호스팅하면
+          // §3.5 ps wrap 탐지가 같은 워커를 cli·model·effort까지 정확히 표시하므로
+          // hc 터미널 카드는 만들지 않는다. wrap이 아닌 일반 bash/기타 실행은 유지.
+          if (
+            isDgWrapHostArgv(detail.foregroundArgv ?? []) ||
+            isDgWrapHostArgv(detail.argv ?? [])
+          ) {
+            continue;
+          }
 
           let screen: string | undefined;
           if (readCount < MAX_ACTIVITY_READS_PER_TICK) {

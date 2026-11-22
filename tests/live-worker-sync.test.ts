@@ -2190,3 +2190,129 @@ test('리드 transcript 최근 입출력 추출 — USER_INPUT / PLANNER_RESPONS
   assert.equal(isActiveTopLevelSession({ address: 'tO', agent: 'opencode', state: 'live', status: 'working' }), true);
   assert.equal(isActiveTopLevelSession({ address: 'tH', agent: 'hermes', state: 'live', status: 'working' }), true);
 });
+
+// ---------- 이중 카드 방지(dg wrap 호스팅 터미널) + env 접두어 파싱 ----------
+
+test('hc 터미널 이중 카드 방지 — 포그라운드가 dg wrap이면 hc 카드 미생성, 일반 bash는 유지', async () => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'lws-wrapskip-')));
+  const env = isolateRosterEnv(tmp);
+  process.env.HERDR_ROSTER_PATH = path.join(tmp, 'roster.json');
+  writeTempRoster(path.join(tmp, 'roster.json'), 't-wrap-prof', 'claude', 'claude-sonnet-4-6');
+  const repoDir = path.join(tmp, 'my-repo');
+  fs.mkdirSync(repoDir, { recursive: true });
+
+  const lsJson = JSON.stringify({
+    terminals: [
+      // ① 직접 실행 — foreground가 `dg wrap`(dg/dg.ts 토큰 뒤 'wrap')
+      { address: 'tDg', agent: 'dg', name: 'coder-direct', parent: 't0', state: 'live', status: 'working', cwd: repoDir },
+      // ② env + bash -lc 단일 문자열 안 `…; dg wrap …` (실측 t1md 형태)
+      { address: 'tEnv', agent: 'env', name: 'coder-envwrap', parent: 't0', state: 'live', status: 'working', cwd: repoDir },
+      // ③ 일반 bash 실행 터미널 — 카드 유지 대상(워커 터미널의 fg가 일반 bash 스텝)
+      { address: 'tSh', agent: 'pi', name: 'coder-shelljob', parent: 't0', state: 'live', status: 'working', cwd: repoDir },
+    ],
+  });
+  const getJson = (addr: string): string => {
+    if (addr === 'tDg') {
+      return JSON.stringify({
+        address: 'tDg',
+        agent: 'dg',
+        name: 'coder-direct',
+        state: 'live',
+        cwd: repoDir,
+        status: 'working',
+        argv: ['dg', 'wrap', '--label', 'direct', '--', 'pi', '--model', 'm-dg'],
+        foreground: { pid: 900, argv: ['/x/target/release/dg', 'wrap', '--label', 'direct', '--', 'pi', '--model', 'm-dg'] },
+      });
+    }
+    if (addr === 'tEnv') {
+      return JSON.stringify({
+        address: 'tEnv',
+        agent: 'env',
+        name: 'coder-envwrap',
+        state: 'live',
+        cwd: repoDir,
+        status: 'working',
+        argv: [
+          'env',
+          'HERDR_MERGE_GATE=1',
+          'bash',
+          '-lc',
+          'cd /w/repo; dg wrap --label envwrap -- devin -p 작업',
+        ],
+        foreground: { pid: 901, argv: ['bash', '-lc', 'cd /w/repo; dg wrap --label envwrap -- devin -p 작업'] },
+      });
+    }
+    return JSON.stringify({
+      address: 'tSh',
+      agent: 'pi',
+      name: 'coder-shelljob',
+      state: 'live',
+      cwd: repoDir,
+      status: 'working',
+      argv: ['/b/pi', '--model', 'm-sh'],
+      foreground: { pid: 902, argv: ['/bin/bash', 'build.sh'] },
+    });
+  };
+
+  const updates: MergedLiveRoster[] = [];
+  const syncer = createLiveRosterSyncer({
+    repoDir: tmp,
+    repoFilterDir: tmp,
+    getWatchedLead: () => null,
+    onUpdate: (m) => updates.push(m),
+    intervalMs: 25,
+    execRunner: async (_file, args) => {
+      if (args[0] === 'ls') return lsJson;
+      if (args[0] === 'get') return getJson(args[1]!);
+      return '';
+    },
+  });
+  try {
+    await waitFor(() => updates.some((m) => m.workers.length >= 1));
+    const merged = updates.find((m) => m.workers.length >= 1)!;
+    const addrs = merged.workers.map((w) => w.address).sort();
+    // ①② dg wrap 호스팅 터미널 카드 소멸(§3.5 ps wrap 카드가 같은 워커를 대신 표시),
+    // ③ 일반 bash 실행 카드는 유지
+    assert.deepEqual(addrs, ['tSh']);
+    assert.equal(merged.workers[0]?.name, 'coder-shelljob');
+  } finally {
+    syncer.stop();
+    env.restore();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('findWrapProcesses env 접두어 — 런처/dash 토큰/BFS 자식 모두 env를 건너뛰고 실제 CLI를 본다', () => {
+  // (1) 런처 env — `env VAR=1 dg wrap …` 라인 감지 자체가 env 때문에 놓치던 경우
+  const ps1 = [
+    '  500     1 /bin/zsh -l',
+    '  900   500 env DGATE_PROBE=1 dg wrap --label env-launch -- pi --model probe-m',
+    '  901   900 pi --model probe-m',
+  ].join('\n');
+  const procs1 = findWrapProcesses(parsePsRows(ps1));
+  assert.equal(procs1.length, 1, 'env 접두 dg wrap 라인 감지');
+  assert.equal(procs1[0]?.cli, 'pi');
+  assert.equal(procs1[0]?.model, 'probe-m');
+  assert.equal(procs1[0]?.label, 'env-launch');
+
+  // (2) dash 토큰 env — `-- env VAR=1 pi …` → env 무시 후 pi·--model 파싱
+  const ps2 = [
+    '  500     1 /bin/zsh -l',
+    '  910   500 node /x/src/decision/dg.ts wrap --label env-dash -- env PI_API=secret pi --model glm-5.3',
+  ].join('\n');
+  const procs2 = findWrapProcesses(parsePsRows(ps2));
+  assert.equal(procs2.length, 1);
+  assert.equal(procs2[0]?.cli, 'pi');
+  assert.equal(procs2[0]?.model, 'glm-5.3');
+
+  // (3) BFS 자식 env — 자식 프로세스가 `env VAR=1 pi …`여도 헤드 매칭·파싱
+  const ps3 = [
+    '  500     1 /bin/zsh -l',
+    '  920   500 dg wrap --label env-child',
+    '  921   920 env PI_TOOL=1 pi --model child-m',
+  ].join('\n');
+  const procs3 = findWrapProcesses(parsePsRows(ps3));
+  assert.equal(procs3.length, 1);
+  assert.equal(procs3[0]?.cli, 'pi');
+  assert.equal(procs3[0]?.model, 'child-m');
+});

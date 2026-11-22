@@ -19,6 +19,7 @@ import {
   type MergedLiveRoster,
 } from './backend/liveWorkerSync.ts';
 import { readRepoTaskProgress } from './backend/taskProgress.ts';
+import { syncRoutesFromSsot } from './backend/agyStreamMapper.ts';
 import { parseKeyEvents, TerminalScreen, type KeyEvent } from './core/terminal.ts';
 import {
   applyDemoTime,
@@ -1066,6 +1067,10 @@ function main(): void {
     state.rosterLabels = merged.labels;
     // 라이브 로스터 폴 틱마다 마크다운 체크박스 진행률 갱신(읽기 전용, 빠름)
     state.taskProgress = readRepoTaskProgress(repoFilterDir ?? process.cwd());
+    // Decision Gate(routes)도 매 폴 틱 SSOT 실측으로 갱신 — 트랜스크립트 이벤트에만
+    // 물리면 대화 없는 구간에서 수치가 멈춰 있게 된다(DB 읽기 1회, demo 모드는
+    // syncRoutesFromSsot 내부 가드로 기존 동작 유지).
+    syncRoutesFromSsot(state);
     state.liveSessionCounts = computeLiveSessionCounts(merged.workers);
     state.neonModelName = merged.verifierModelName;
     state.neonModelFlag = merged.verifierModelFlag;

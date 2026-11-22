@@ -1223,6 +1223,43 @@ fn strip_dg_wrap_prefix(tokens: &[String]) -> &[String] {
     }
 }
 
+/// 셸 `-c`/`-lc` 단일 문자열 안 `dg wrap` 코맨드 세그먼트 — `…; dg wrap …` 형태.
+fn re_dg_wrap_in_shell() -> &'static regex::Regex {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"(?:^|[;&\n][;&\s]*)dg(?:\.ts)?\s+wrap\b").unwrap()
+    })
+}
+
+/// argv가 `dg wrap` 실행을 호스팅하는지 — 이중 카드 방지 판정.
+/// ① dg/dg.ts 토큰 바로 뒤가 'wrap'(env 접두는 먼저 벗긴다)
+/// ② `env X=1 bash -lc '…; dg wrap …'`처럼 셸 -c/-lc 단일 문자열 안 코맨드로 감싼 형태.
+/// 이런 터미널은 §3.5 ps wrap 탐지가 같은 워커를 정확히 표시하므로 hc 카드를 만들지 않는다.
+fn is_dg_wrap_host_argv(tokens: &[String]) -> bool {
+    let stripped = strip_env_prefix(tokens);
+    // ① 정확한 인접 — dg/dg.ts 바로 뒤 'wrap'
+    for i in 0..stripped.len().saturating_sub(1) {
+        let base = token_base(&stripped[i]);
+        if (base == "dg" || base == "dg.ts") && stripped[i + 1] == "wrap" {
+            return true;
+        }
+    }
+    // ② 셸 -c/-lc 단일 문자열 안 코맨드 세그먼트
+    for i in 0..stripped.len().saturating_sub(1) {
+        let base = token_base(&stripped[i]);
+        if (base == "bash" || base == "zsh" || base == "sh")
+            && (stripped[i + 1] == "-lc" || stripped[i + 1] == "-c")
+        {
+            let joined = stripped[i + 2..].join(" ");
+            if re_dg_wrap_in_shell().is_match(&joined) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// argv(+agent 폴백)에서 실제 워커 CLI 이름과 `--model` 값을 찾는다.
 fn parse_worker_cli_and_model(
     argv: &[String],
@@ -1524,7 +1561,9 @@ pub fn find_wrap_processes(rows: &[PsRow]) -> Vec<WrapProc> {
     let launchers = ["node", "bun", "deno", "tsx", "dg", "dg.ts"];
     let mut out = Vec::new();
     for row in rows {
-        let tokens = split_tokens(&row.command);
+        // `env VAR=… dg wrap …` 런처도 감지 — env 접두를 벗기고 dg/wrap을 본다.
+        let tokens: Vec<String> =
+            strip_env_prefix(&split_tokens(&row.command)).to_vec();
         if tokens.len() < 3 || !launchers.contains(&token_base(&tokens[0]).as_str()) {
             continue;
         }
@@ -1557,13 +1596,15 @@ pub fn find_wrap_processes(rows: &[PsRow]) -> Vec<WrapProc> {
             qi += 1;
             if let Some(kids) = children.get(&cur) {
                 for child in kids {
-                    let ct = split_tokens(&child.command);
+                    // `env VAR=… pi …` 자식도 감지 — env 접두를 벗기고 실제 CLI 헤드를 본다.
+                    let ct_raw = split_tokens(&child.command);
+                    let ct = strip_env_prefix(&ct_raw);
                     let head = ct.first().map(|t| token_base(t)).unwrap_or_default();
                     let second = ct.get(1).map(|t| token_base(t)).unwrap_or_default();
                     if WORKER_CLI_SET.contains(&head.as_str())
                         || (head == "node" && WORKER_CLI_SET.contains(&second.as_str()))
                     {
-                        child_tokens = Some(ct);
+                        child_tokens = Some(ct.to_vec());
                         break;
                     }
                     queue.push(child.pid);
@@ -2254,6 +2295,18 @@ impl LiveSyncSnapshotter {
                 detail.cwd = summary.cwd.clone().or(detail.cwd);
                 self.detail_cache
                     .insert(summary.address.clone(), detail.clone());
+
+                // 이중 카드 방지 — 터미널(포그라운드·런치 argv)이 `dg wrap`을 호스팅하면
+                // §3.5 ps wrap 탐지가 같은 워커를 정확히 표시하므로 hc 카드는 만들지
+                // 않는다. wrap이 아닌 일반 bash/기타 실행은 유지.
+                if detail
+                    .foreground_argv
+                    .as_deref()
+                    .is_some_and(is_dg_wrap_host_argv)
+                    || detail.argv.as_deref().is_some_and(is_dg_wrap_host_argv)
+                {
+                    continue;
+                }
 
                 let mut screen: Option<String> = None;
                 if read_count < MAX_ACTIVITY_READS_PER_TICK {
@@ -3891,5 +3944,98 @@ mod tests {
         let expect =
             roster_labels_from_profile("quota-saver", "builtin", &cfg.profiles["quota-saver"]);
         assert_eq!(labels, expect);
+    }
+
+    // ---------- 이중 카드 방지(dg wrap 호스팅 터미널) + env 접두어 파싱 ----------
+
+    #[test]
+    fn find_wrap_processes_env_prefix_launcher_dash_and_child() {
+        // (1) 런처 env — `env VAR=1 dg wrap …` 라인 감지 자체가 env 때문에 놓치던 경우
+        let ps1 = "  500     1 /bin/zsh -l\n\
+  900   500 env DGATE_PROBE=1 dg wrap --label env-launch -- pi --model probe-m\n\
+  901   900 pi --model probe-m\n";
+        let procs1 = find_wrap_processes(&parse_ps_rows(ps1));
+        assert_eq!(procs1.len(), 1, "env 접두 dg wrap 라인 감지");
+        assert_eq!(procs1[0].cli, "pi");
+        assert_eq!(procs1[0].model.as_deref(), Some("probe-m"));
+        assert_eq!(procs1[0].label.as_deref(), Some("env-launch"));
+
+        // (2) dash 토큰 env — `-- env VAR=1 pi …` → env 무시 후 pi·--model 파싱
+        let ps2 = "  500     1 /bin/zsh -l\n\
+  910   500 node /x/src/decision/dg.ts wrap --label env-dash -- env PI_API=secret pi --model glm-5.3\n";
+        let procs2 = find_wrap_processes(&parse_ps_rows(ps2));
+        assert_eq!(procs2.len(), 1);
+        assert_eq!(procs2[0].cli, "pi");
+        assert_eq!(procs2[0].model.as_deref(), Some("glm-5.3"));
+
+        // (3) BFS 자식 env — 자식이 `env VAR=1 pi …`여도 헤드 매칭·파싱
+        let ps3 = "  500     1 /bin/zsh -l\n\
+  920   500 dg wrap --label env-child\n\
+  921   920 env PI_TOOL=1 pi --model child-m\n";
+        let procs3 = find_wrap_processes(&parse_ps_rows(ps3));
+        assert_eq!(procs3.len(), 1);
+        assert_eq!(procs3[0].cli, "pi");
+        assert_eq!(procs3[0].model.as_deref(), Some("child-m"));
+    }
+
+    #[test]
+    fn snapshotter_skips_dg_wrap_hosting_terminal_cards() {
+        let _g: MutexGuard<'_, ()> = env_lock();
+        let tmp = temp_dir("live-wrapskip");
+        std::fs::create_dir_all(&tmp).unwrap();
+        isolate_env(&tmp);
+        // ① 직접 실행(foreground가 dg wrap) ② env+bash -lc 안 `; dg wrap`(실측 t1md 형태)
+        // ③ 일반 bash 실행 워커 터미널 — 유지 대상
+        let ls = serde_json::json!({
+            "terminals": [
+                { "address": "tDg", "agent": "dg", "name": "coder-direct", "parent": "t0", "state": "live", "status": "working", "cwd": "/tmp/repo-a" },
+                { "address": "tEnv", "agent": "env", "name": "coder-envwrap", "parent": "t0", "state": "live", "status": "working", "cwd": "/tmp/repo-a" },
+                { "address": "tSh", "agent": "pi", "name": "coder-shelljob", "parent": "t0", "state": "live", "status": "working", "cwd": "/tmp/repo-a" }
+            ]
+        })
+        .to_string();
+        let details = HashMap::from([
+            (
+                "tDg".to_string(),
+                serde_json::json!({
+                    "address": "tDg", "agent": "dg", "name": "coder-direct", "state": "live",
+                    "status": "working", "cwd": "/tmp/repo-a",
+                    "argv": ["dg", "wrap", "--label", "direct", "--", "pi", "--model", "m-dg"],
+                    "foreground": { "pid": 900, "argv": ["/x/target/release/dg", "wrap", "--label", "direct", "--", "pi", "--model", "m-dg"] }
+                })
+                .to_string(),
+            ),
+            (
+                "tEnv".to_string(),
+                serde_json::json!({
+                    "address": "tEnv", "agent": "env", "name": "coder-envwrap", "state": "live",
+                    "status": "working", "cwd": "/tmp/repo-a",
+                    "argv": ["env", "HERDR_MERGE_GATE=1", "bash", "-lc",
+                             "cd /w/repo; dg wrap --label envwrap -- devin -p 작업"],
+                    "foreground": { "pid": 901, "argv": ["bash", "-lc",
+                             "cd /w/repo; dg wrap --label envwrap -- devin -p 작업"] }
+                })
+                .to_string(),
+            ),
+            (
+                "tSh".to_string(),
+                serde_json::json!({
+                    "address": "tSh", "agent": "pi", "name": "coder-shelljob", "state": "live",
+                    "status": "working", "cwd": "/tmp/repo-a",
+                    "argv": ["/b/pi", "--model", "m-sh"],
+                    "foreground": { "pid": 902, "argv": ["/bin/bash", "build.sh"] }
+                })
+                .to_string(),
+            ),
+        ]);
+        let mock = Arc::new(MockHc::new(vec![ls], details, HashMap::new()));
+        let mut snap = snapshot_with_mock(mock, &tmp);
+        let merged = snap.tick_now();
+        let mut addrs: Vec<&str> = merged.workers.iter().map(|w| w.address.as_str()).collect();
+        addrs.sort();
+        // ①② dg wrap 호스팅 터미널 카드 소멸(§3.5 ps wrap 카드가 대신 표시), ③ bash 실행 카드 유지
+        assert_eq!(addrs, vec!["tSh"]);
+        assert_eq!(merged.workers[0].name, "coder-shelljob");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
