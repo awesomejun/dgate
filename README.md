@@ -277,7 +277,7 @@ node ./src/decision/dg.ts <command> [flags]
 
 - **산출물·출력 계약** — `--require-artifact <path>`(파일 존재), `--require-nonempty`(크기 >0), `--require-stdout-nonempty`(비공백 stdout)를 clean exit(0) 시 AND 게이트로 검사한다. stdout 첫 비공백 줄이 `rerouted`면 워커의 리드 승격 신호 — 표본·실패 없이 `rerouted`로만 닫힌다.
 - **워치독** — `--stall-ms`(기본 120s) 무출력 스톨 시 프로세스 그룹 전체 SIGTERM→SIGKILL kill + 리덕션된 20줄 tail 보존, `--max-ms`(기본 20분) 총 시간 상한. 출력 진전이 있을 때만 `dg touch` 하트비트(`--heartbeat-ms`, 기본 60s)로 fork TTL을 갱신한다.
-- **`FailureCause` 11종** — `ok_pass`·`transient_network`·`tool_error`·`max_turns`·`no_result`·`artifact_missing`·`gate_fail`·`stall`·`timeout`·`config_error`·`interrupted`. 신호·종료코드 우선 분류라 문자열 휴리스틱 오탐을 막는다. `config_error`·`interrupted`는 EWMA·연속오류 카운터에서 격리돼 감사 로그만 남고, `ttl_orphan` 고아 정산은 w=1.0 실패 표본을 강제해 생존편향을 차단한다.
+- **`FailureCause` 11종** — `ok_pass`·`transient_network`·`tool_error`·`max_turns`·`no_result`·`artifact_missing`·`gate_fail`·`stall`·`timeout`·`config_error`·`interrupted`. 신호·종료코드 우선 분류라 문자열 휴리스틱 오탐을 막는다. `config_error`·`interrupted`는 EWMA·연속오류 카운터에서 격리돼 감사 로그만 남고, 환경류 `tool_error`·`transient_network`는 통계만 격리(커서·감사 로그 유지)하며, `ttl_orphan` 고아 정산은 w=1.0 실패 표본을 강제해 생존편향을 차단한다.
 
 </details>
 

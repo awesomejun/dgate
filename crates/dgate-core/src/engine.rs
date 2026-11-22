@@ -316,6 +316,15 @@ pub fn is_audit_only_cause(cause: FailureCause) -> bool {
     matches!(cause, FailureCause::ConfigError | FailureCause::Interrupted)
 }
 
+/// 환경류 실패 원인 — 워커·확장 크래시 등 비정상 종료 폴백(`tool_error`)과 일시적
+/// 네트워크 장애(`transient_network`). 작업 품질이 아닌 실행 환경 신호라 라우트 EWMA
+/// 집계(stats_summary)에서 제외하고 감사 이벤트 행만 남긴다. 커서(재시도 판정·
+/// 세션 카운터)는 유지한다 — 스폰 실패류(127/ENOENT → `config_error`)는 기존
+/// audit-only 격리가 이미 담당한다.
+pub fn is_environment_cause(cause: FailureCause) -> bool {
+    matches!(cause, FailureCause::ToolError | FailureCause::TransientNetwork)
+}
+
 /// 재시도 허용 원인 — `transient_network`·`tool_error` 뿐 (§3.1-B 매트릭스)
 pub fn is_retryable_cause(cause: FailureCause) -> bool {
     matches!(cause, FailureCause::TransientNetwork | FailureCause::ToolError)
@@ -969,8 +978,11 @@ pub struct RecordInput<'a> {
     pub dedupe_key: Option<&'a str>,
     pub fork_id: Option<&'a str>,
     pub command_line: Option<&'a str>,
-    /// 실패 원인 분류 (§3.1-B) — config_error/interrupted는 EWMA·카운터 격리
+    /// 실패 원인 분류 (§3.1-B) — config_error/interrupted는 EWMA·카운터 격리,
+    /// tool_error/transient_network는 환경류로 EWMA 격리
     pub cause: Option<FailureCause>,
+    /// false면 EWMA 갱신 없이 감사 행만 기록 — 트랜스크립트 과거 재생 등 비실시간 표본
+    pub record_stats: Option<bool>,
     /// v2 토큰·비용 컬럼(컬럼 존재 시에만 저장 — PB-1 §3.3)
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
@@ -1191,8 +1203,11 @@ pub fn record_tool_outcome(db: &Connection, input: &RecordInput) -> Result<Recor
     } else {
         input.error_snippet.map(|s| truncate_chars(&redact_secrets(s), ERROR_SNIPPET_MAX_CHARS))
     };
-    // §3.1-B EWMA 격리: config_error/interrupted 실패는 감사 로그만 남긴다
+    // §3.1-B EWMA 격리: config_error/interrupted 실패는 감사 로그만 남긴다.
+    // 환경류(tool_error/transient_network)는 통계만 격리 — 커서(재시도 판정)는 유지.
     let audit_only = !input.ok && is_audit_only_cause(cause);
+    let env_only = !input.ok && is_environment_cause(cause);
+    let record_stats = input.record_stats != Some(false);
     let self_text = format!("{} {}", input.tool_name, input.command_line.unwrap_or(""));
     if is_self_invocation(&self_text) {
         let post = get_posterior(db, input.project_id, input.route, input.tool_class)?;
@@ -1251,7 +1266,7 @@ pub fn record_tool_outcome(db: &Connection, input: &RecordInput) -> Result<Recor
                 return Ok(Some("duplicate"));
             }
         }
-        if !audit_only {
+        if !(audit_only || env_only || !record_stats) {
             update_stats_in_tx(db, input.project_id, input.project_label, route, tool_class, input.ok, weight, input.target_hash, now_ms_value)?;
         }
         insert_event_row(
@@ -2531,8 +2546,12 @@ pub fn commit_wrap_outcome(db: &Connection, input: &CommitWrapInput) -> Result<C
                     now_ms: now_ms_value,
                 },
             )?;
-            // 표본 기록은 이벤트가 실제로 1건 삽입됐을 때만 — dedupe 충돌·비표본 결과 차단
-            let skip_stats = input.outcome == "rerouted" || is_audit_only_cause(input.cause) || !record_stats;
+            // 표본 기록은 이벤트가 실제로 1건 삽입됐을 때만 — dedupe 충돌·비표본 결과 차단.
+            // 환경류 cause(tool_error/transient_network)는 작업 실패와 신호가 다르므로 EWMA 미반영.
+            let skip_stats = input.outcome == "rerouted"
+                || is_audit_only_cause(input.cause)
+                || is_environment_cause(input.cause)
+                || !record_stats;
             if ev_changes == 1 && !skip_stats {
                 update_stats_in_tx(
                     db,
@@ -3349,6 +3368,91 @@ mod tests {
         assert!(is_retryable_cause(FailureCause::ToolError));
         assert!(!is_retryable_cause(FailureCause::Timeout));
         assert!(!is_retryable_cause(FailureCause::ConfigError));
+    }
+
+    #[test]
+    fn environment_causes_set_definition() {
+        assert!(is_environment_cause(FailureCause::ToolError));
+        assert!(is_environment_cause(FailureCause::TransientNetwork));
+        for c in [
+            FailureCause::OkPass,
+            FailureCause::MaxTurns,
+            FailureCause::NoResult,
+            FailureCause::ArtifactMissing,
+            FailureCause::GateFail,
+            FailureCause::Stall,
+            FailureCause::Timeout,
+            FailureCause::ConfigError,
+            FailureCause::Interrupted,
+        ] {
+            assert!(!is_environment_cause(c), "{:?}은 환경류가 아니다", c);
+        }
+    }
+
+    #[test]
+    fn environment_failure_isolated_from_ewma_but_audited() {
+        let conn = mem();
+        rec(&conn, RouteId::ToolSelect, "shell_exec", "run_command", true);
+        let before = stats_opt(&conn, PID).unwrap();
+
+        let mut input = ri(RouteId::ToolSelect, "shell_exec", "run_command", false);
+        input.cause = Some(FailureCause::ToolError);
+        input.conversation_id = Some("conv-env");
+        input.step = Some(5);
+        input.error_snippet = Some("extension crashed");
+        let res = record_tool_outcome(&conn, &input).unwrap();
+        assert!(res.recorded, "감사 행은 기록된다");
+        assert_eq!(stats_opt(&conn, PID).unwrap(), before, "환경류 tool_error는 EWMA·카운터 불변");
+        assert_eq!(event_count(&conn), 2, "감사 이벤트 행은 기록");
+        assert_eq!(res.session_consec_err, 1, "커서(세션 연속 실패)는 유지 — 재시도 판정용");
+
+        let mut input2 = ri(RouteId::ToolSelect, "shell_exec", "run_command", false);
+        input2.cause = Some(FailureCause::TransientNetwork);
+        input2.error_snippet = Some("ECONNRESET");
+        let res2 = record_tool_outcome(&conn, &input2).unwrap();
+        assert!(res2.recorded);
+        assert_eq!(stats_opt(&conn, PID).unwrap(), before, "transient_network도 동일 규칙");
+        assert_eq!(event_count(&conn), 3);
+    }
+
+    #[test]
+    fn record_stats_false_skips_ewma_but_records_row() {
+        let conn = mem();
+        rec(&conn, RouteId::ToolSelect, "shell_exec", "run_command", true);
+        let before = stats_opt(&conn, PID).unwrap();
+        let mut input = ri(RouteId::ToolSelect, "shell_exec", "run_command", false);
+        input.cause = Some(FailureCause::GateFail);
+        input.conversation_id = Some("conv-old");
+        input.step = Some(3);
+        input.record_stats = Some(false);
+        let res = record_tool_outcome(&conn, &input).unwrap();
+        assert!(res.recorded, "행은 기록");
+        assert_eq!(stats_opt(&conn, PID).unwrap(), before, "record_stats=false는 EWMA 미갱신");
+        assert_eq!(event_count(&conn), 2);
+        assert_eq!(res.session_consec_err, 1, "커서는 통계 게이트와 무관하게 갱신");
+    }
+
+    #[test]
+    fn commit_wrap_environment_cause_isolated() {
+        let conn = mem();
+        for cause in [FailureCause::ToolError, FailureCause::TransientNetwork] {
+            let fk = issue(&conn, RouteId::ToolSelect, "shell_exec", 1000);
+            let res = commit_wrap_outcome(
+                &conn,
+                &CommitWrapInput {
+                    fork_id: &fk,
+                    ok: false,
+                    outcome: "fail",
+                    cause,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(res.committed, "{:?} 커밋은 성공", cause);
+            assert!(!res.recorded, "{:?} 환경류 wrap은 표본 미기록", cause);
+        }
+        assert!(stats_opt(&conn, PID).is_none(), "EWMA 행 자체가 생기지 않는다");
+        assert_eq!(event_count(&conn), 2, "감사 행은 2건 기록");
     }
 
     #[test]

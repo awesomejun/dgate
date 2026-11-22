@@ -7,7 +7,7 @@ use std::process::Command as ProcCommand;
 
 use serde_json::json;
 
-use crate::args::{optional_flag, parse_int_flag, ParsedArgs};
+use crate::args::{parse_int_flag, ParsedArgs};
 use crate::util::prelude::*;
 
 const DEFAULT_IDLE_MINUTES: i64 = 30;

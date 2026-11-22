@@ -256,6 +256,19 @@ function genericErrorSnippet(step: TranscriptStep, body: string): string {
 }
 
 /**
+ * 통계가 받아들이는 트랜스크립트 이벤트의 최대 나이. 시작 시 꼬리 재생으로 들어온
+ * 과거 대화(원본 타임스탬프가 기록 시점보다 이 값 이상 과거)는 EWMA 갱신 대상에서
+ * 제외하고 감사 이벤트 행만 남긴다 — 통계는 '실시간 측정'만 먹는다.
+ */
+const TRANSCRIPT_STATS_MAX_AGE_MS = 10 * 60_000;
+
+/** 원본 타임스탬프가 통계 시한을 넘었는지 — 파싱 불가(미제공)면 실시간으로 간주해 통계 반영 */
+function isStaleForStats(step: TranscriptStep, nowMs: number): boolean {
+  const ts = Date.parse(step.created_at ?? '');
+  return Number.isFinite(ts) && nowMs - ts > TRANSCRIPT_STATS_MAX_AGE_MS;
+}
+
+/**
  * 완성 배치를 SSOT에 기록한다(source 'transcript', 멱등 키 tx:conv:plannerStepIdx:toolIdx).
  * plannerStepIdx 누락 시 멱등 키를 만들 수 없어 배치 전체 기록 생략.
  * RUNNING GENERIC은 결과 미확정이라 해당 인덱스만 기록 생략한다.
@@ -268,6 +281,7 @@ function flushTranscriptBatch(state: AppState, batch: PendingBatch): void {
   if (convId && hasHookCoverageById(dbPath, convId)) return;
   try {
     const { projectId, projectLabel } = resolveProjectIdentityCached(process.cwd());
+    const nowMs = Date.now();
     for (let k = 0; k < batch.calls.length; k++) {
       const call = batch.calls[k]!;
       const gstep = batch.results[k]!;
@@ -283,6 +297,8 @@ function flushTranscriptBatch(state: AppState, batch: PendingBatch): void {
         toolClass,
         toolName,
         ok,
+        // 과거 재생(시작 시 꼬리 재생)은 행만 남기고 EWMA 갱신에서 제외
+        recordStats: !isStaleForStats(gstep, nowMs),
         conversationId: convId,
         step: typeof gstep.step_index === 'number' ? gstep.step_index : null,
         targetHash: targetHashForArgs(argsObj ?? undefined),

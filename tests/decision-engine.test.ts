@@ -596,7 +596,8 @@ test('12. dg wrap: 종료코드 자동 기록 + fork 자동 닫힘 (exit 0 / exi
     const failSummary = JSON.parse((failRes.stderr.trim().split('\n').pop())!) as Record<string, unknown>;
     assert.equal(failSummary.ok, 0);
     assert.equal(failSummary.exit_code, 1);
-    assert.equal(failSummary.recorded, true);
+    // exit 1은 계약 위반 없이 워커가 비정상 종료된 것 — tool_error(환경류)로 EWMA 표본 미기록
+    assert.equal(failSummary.recorded, false, '환경류 tool_error는 EWMA 표본 미기록');
     assert.equal(failSummary.closed, true);
 
     const statuses = openDb(e.dbPath, { readOnly: true, busyTimeoutMs: 1000 });
@@ -611,7 +612,13 @@ test('12. dg wrap: 종료코드 자동 기록 + fork 자동 닫힘 (exit 0 / exi
       const evCount = statuses
         .prepare(`SELECT COUNT(*) AS n FROM decision_events WHERE source = 'wrap'`)
         .get() as { n: number };
-      assert.equal(evCount.n, 2, 'wrap 표본 2건 (source=wrap)');
+      assert.equal(evCount.n, 2, 'wrap 감사 행 2건 (source=wrap) — 환경류도 감사 행은 기록');
+      const okSamples = statuses
+        .prepare(
+          `SELECT SUM(raw_samples) AS total FROM stats_summary WHERE route = 'tool_select' AND tool_class = 'code_search'`
+        )
+        .get() as { total: number | null };
+      assert.equal(okSamples.total ?? 0, 2, 'EWMA 표본은 ok wrap만(프로젝트+전역풀 각 1) — exit 1 환경류 격리');
     } finally {
       statuses.close();
     }

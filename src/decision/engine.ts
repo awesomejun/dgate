@@ -172,6 +172,19 @@ export function isAuditOnlyCause(cause: FailureCause): boolean {
   return AUDIT_ONLY_CAUSES.has(cause);
 }
 
+/**
+ * 환경류 실패 원인 — 워커·확장 크래시 등 비정상 종료 폴백(`tool_error`)과 일시적
+ * 네트워크 장애(`transient_network`). 작업 품질이 아닌 실행 환경 신호라 라우트 EWMA
+ * 집계(stats_summary)에서 제외하고 감사 이벤트 행만 남긴다. 커서(재시도 판정·
+ * 세션 카운터)는 유지한다 — 스폰 실패류(127/ENOENT → `config_error`)는 기존
+ * audit-only 격리가 이미 담당한다.
+ */
+const ENVIRONMENT_CAUSES: ReadonlySet<FailureCause> = new Set(['tool_error', 'transient_network']);
+
+export function isEnvironmentCause(cause: FailureCause): boolean {
+  return ENVIRONMENT_CAUSES.has(cause);
+}
+
 /** 재시도 허용 원인 — `transient_network`·`tool_error` 뿐 (§3.1-B 매트릭스) */
 export function isRetryableCause(cause: FailureCause): boolean {
   return cause === 'transient_network' || cause === 'tool_error';
@@ -641,8 +654,10 @@ export interface RecordInput {
   dedupeKey?: string | null;
   forkId?: string | null;
   commandLine?: string | null;
-  /** 실패 원인 분류 (§3.1-B) — config_error/interrupted는 EWMA·카운터 격리 */
+  /** 실패 원인 분류 (§3.1-B) — config_error/interrupted는 EWMA·카운터 격리, tool_error/transient_network는 환경류로 EWMA 격리 */
   cause?: FailureCause;
+  /** false면 EWMA 갱신 없이 감사 행만 기록 — 트랜스크립트 과거 재생 등 비실시간 표본 */
+  recordStats?: boolean;
   /** v2 토큰·비용 컬럼(컬럼 존재 시에만 저장 — PB-1 §3.3, 기존 호출부는 전부 optional) */
   inputTokens?: number | null;
   outputTokens?: number | null;
@@ -867,8 +882,11 @@ export function recordToolOutcome(db: DatabaseSync, input: RecordInput): RecordR
     input.errorSnippet = redactSecrets(input.errorSnippet).slice(0, ERROR_SNIPPET_MAX_CHARS);
   }
   if (input.commandLine != null) input.commandLine = redactSecrets(input.commandLine);
-  // §3.1-B EWMA 격리: config_error/interrupted 실패는 감사 로그만 남긴다
+  // §3.1-B EWMA 격리: config_error/interrupted 실패는 감사 로그만 남긴다.
+  // 환경류(tool_error/transient_network)는 통계만 격리 — 커서(재시도 판정)는 유지.
   const auditOnly = !input.ok && isAuditOnlyCause(cause);
+  const envOnly = !input.ok && isEnvironmentCause(cause);
+  const recordStats = input.recordStats !== false;
   const selfText = `${input.toolName ?? ''} ${input.commandLine ?? ''}`;
   if (isSelfInvocation(selfText)) {
     const post = getPosterior(db, input.projectId, input.route, input.toolClass);
@@ -927,7 +945,7 @@ export function recordToolOutcome(db: DatabaseSync, input: RecordInput): RecordR
         };
       }
     }
-    if (!auditOnly) {
+    if (!auditOnly && !envOnly && recordStats) {
       updateStatsInTx(db, input.projectId, input.projectLabel, route, toolClass, input.ok, weight, input.targetHash ?? null, nowMs);
     }
     insertEventInTx(db, input, route, isRetry, nowMs);
@@ -1778,9 +1796,10 @@ export function commitWrapOutcome(db: DatabaseSync, input: CommitWrapInput): Com
         costStatus: input.costStatus ?? null,
         nowMs,
       });
-      // 표본 기록은 이벤트가 실제로 1건 삽입됐을 때만 — dedupe 충돌·비표본 결과 차단
+      // 표본 기록은 이벤트가 실제로 1건 삽입됐을 때만 — dedupe 충돌·비표본 결과 차단.
+      // 환경류 cause(tool_error/transient_network)는 작업 실패와 신호가 다르므로 EWMA 미반영.
       const skipStats =
-        input.outcome === 'rerouted' || isAuditOnlyCause(input.cause) || !recordStats;
+        input.outcome === 'rerouted' || isAuditOnlyCause(input.cause) || isEnvironmentCause(input.cause) || !recordStats;
       if (evChanges === 1 && !skipStats) {
         updateStatsInTx(
           db, cur.project_id, cur.project_label, cur.route, cur.tool_class,

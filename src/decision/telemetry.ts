@@ -121,6 +121,8 @@ export interface SafeRecordInput {
   ok: boolean;
   weight?: number;
   isRetry?: boolean;
+  /** false면 EWMA 갱신 없이 감사 행만 기록 — transcriptMapper 과거 재생 게이트가 사용 */
+  recordStats?: boolean;
   conversationId?: string | null;
   step?: number | null;
   targetHash?: string | null;

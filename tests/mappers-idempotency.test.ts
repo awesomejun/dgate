@@ -487,3 +487,37 @@ test('9. --demo 격리: mode=demo에서 매퍼 호출 → DB 파일 미생성/�
     e.restore();
   }
 });
+
+test('10. transcriptMapper 통계 시한: 10분 초과 과거 재생 → 행만 기록(EWMA 미반영), 최근 → 반영', () => {
+  const e = makeEnv();
+  try {
+    // ① 1시간 전 과거 대화(시작 시 꼬리 재생 시나리오) — 감사 행은 남기고 EWMA 미반영
+    const staleTs = new Date(Date.now() - 60 * 60_000).toISOString();
+    const staleFile = writeTranscript(e.base, 'conv-stale-replay', [
+      { ...userStep(0), created_at: staleTs },
+      { ...plannerStep(1, [{ name: 'run_command', args: { CommandLine: 'git status' } }]), created_at: staleTs },
+      { ...genericStep(2, 'DONE', 'Command exited with code 0.\n\nCommand output:\nok'), created_at: staleTs },
+    ]);
+    parseViaWatcher(staleFile, newState('watch'));
+    assert.equal(eventCount(e.dbPath), 1, '과거 재생도 감사 이벤트 행은 기록');
+    const staleStats = queryAll(e.dbPath, `SELECT COUNT(*) AS n FROM stats_summary`);
+    assert.equal((staleStats[0]?.['n'] as number) ?? 0, 0, '10분 초과 과거 이벤트는 EWMA 대상 아님');
+
+    // ② 30초 전 최근 이벤트 — EWMA 반영
+    const freshTs = new Date(Date.now() - 30_000).toISOString();
+    const freshFile = writeTranscript(e.base, 'conv-fresh-live', [
+      { ...userStep(0), created_at: freshTs },
+      { ...plannerStep(1, [{ name: 'run_command', args: { CommandLine: 'git log --oneline -1' } }]), created_at: freshTs },
+      { ...genericStep(2, 'DONE', 'Command exited with code 0.\n\nCommand output:\nok'), created_at: freshTs },
+    ]);
+    parseViaWatcher(freshFile, newState('watch'));
+    assert.equal(eventCount(e.dbPath), 2, '최근 이벤트도 1행 기록');
+    const freshStats = queryAll(
+      e.dbPath,
+      `SELECT SUM(raw_samples) AS total FROM stats_summary WHERE route = 'tool_select' AND tool_class = 'shell_exec'`
+    );
+    assert.equal((freshStats[0]?.['total'] as number) ?? 0, 2, '최근 이벤트는 프로젝트+전역풀 EWMA에 반영');
+  } finally {
+    e.restore();
+  }
+});

@@ -1740,7 +1740,7 @@ pub fn wrap_proc_to_worker_with_log_dir(
         )
     };
     LiveWorkerInfo {
-        slot: RoleSlot::Coder,
+        slot: infer_wrap_slot(p),
         badge: format!("{} (실행 중)", short_model),
         model_name: p.model.clone().unwrap_or_else(|| p.cli.clone()),
         short_model,
@@ -1788,7 +1788,7 @@ pub fn wrap_proc_to_unowned_worker_with_log_dir(
         )
     };
     LiveWorkerInfo {
-        slot: RoleSlot::Coder,
+        slot: infer_wrap_slot(p),
         badge: format!("{} (실행 중)", short_model),
         model_name: p.model.clone().unwrap_or_else(|| p.cli.clone()),
         short_model,

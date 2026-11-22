@@ -654,6 +654,7 @@ fn collect_inner(stdin_json: &str, env: &HookEnv) -> Result<(), String> {
             fork_id: None,
             command_line: Some(&command_line),
             cause: None,
+            record_stats: None,
             input_tokens: None,
             output_tokens: None,
             cache_read_tokens: None,
