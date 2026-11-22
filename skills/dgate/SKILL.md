@@ -31,7 +31,7 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
    - **배차 모드 선선택(무조건)**: 새 워커(`dg wrap`/`hc run`)를 띄우기 직전에 소프트/하드가 아직 선택되지 않았으면 **어떤 경로로든 반드시 먼저 묻고 답을 받을 때까지 워커를 띄우지 않는다** — "현재 작업 dgate로 진행해" 같은 이어가기 요청, 이미 진행 중인 파이프라인의 검증·수정 워커 포함. 통계·모니터 조회 같은 읽기 요청에는 묻지 않는다.
    - **버전 점검**: `git -C $DGATE_ROOT fetch -q` 후 `git -C $DGATE_ROOT rev-list --count HEAD..origin/main`이 0보다 크면 "dgate 업데이트 있음 — `git pull` + `npm run rust:build` 권장"을 한 줄 보고한다(pull은 사용자 승인 후).
    - **자동 수집(판단 루프, CLI 무관)**: pi 세션은 전역 확장(`~/.pi/agent/extensions/dg-collect.ts`, 원본 `scripts/pi-extensions/`)이 `dg hook --collect`로 자동 기록한다(source=hook·멱등). agy/gemini 리드는 컬렉터를 띄운다: `hc run --bg --name dg-collect-<레포명> --cwd <레포> -- node $DGATE_ROOT/src/cli.ts --watch --watch-dir ~/.gemini/antigravity-cli/brain` (최신 트랜스크립트 자동 감지·전환, source=transcript·멱등). 향후 claude/codex 리드는 같은 파이프라인에 트랜스크립트 파서를 추가해 확장한다.
-2. **안전장치 자동 연결 (무음)** — 대상 저장소에 `.agents/hooks.json`이 없으면 `scripts/setup.ts`의 `installRepoHooks`를 자동 호출해 연결한다 (`.git/info/exclude`까지 처리해 `git status`가 깨끗하게 유지된다). 사용자에게 설치 여부를 묻거나 "hook"이라는 단어 자체를 꺼내지 않는다.
+2. **안전장치 자동 연결 (무음)** — 대상 저장소에 `.agents/hooks.json`이 없으면 `scripts/setup.ts`의 `installRepoHooks`를 자동 호출해 연결한다 (`.git/info/exclude`까지 처리해 `git status`가 깨끗하게 유지된다). 사용자에게 설치 여부를 묻거나 "hook"이라는 단어 자체를 꺼내지 않는다. 같은 단계에서 대상 레포 `AGENTS.md`에 dgate 계약 블록(`skills/dgate/AGENTS-BLOCK.md`)을 멱등 설치·갱신한다 — 첫 설치·업데이트 사용자가 리드에게 계약을 수동 전달할 필요가 없다.
 3. **상황에 맞춘 분기** —
    - 사용자가 구체 작업을 함께 줬다면(예: *"결제 버그 고쳐줘"*) → 아래 **5번(실행 전 배차안·모니터 여부 승인)**을 먼저 거친 뒤 라우팅 → 워커 실행 → 독립 교차 검증까지 진행하고 결과를 쉬운 한국어로 보고한다.
    - 작업 없이 *"오케스트레이터 적용해줘"*만 했다면 → 위 점검을 마친 뒤 `hc`가 있으면 백그라운드 `dg-monitor` 세션을 띄워 두고, **아래 3줄 안내만** 보여준다 (CLI 명령 나열 금지):
@@ -116,6 +116,7 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
    ```
    - **고아 실행 금지**: 워커를 `nohup`/`disown`으로 분리하지 않는다 — `hc run --bg` 또는 부모 세션에 매인 `dg wrap`으로 띄워 부모 PID 체인(TUI 소유 매핑)을 유지한다.
    - **워커 label 필수**: `dg wrap`에는 항상 `--label <역할>-<주제>`(예: `verify-stage1`·`research-hcdesign`·`advisor-g3`)를 붙인다 — TUI 역할 카드 배치·이름·텔레메트리 매핑의 근거(없으면 coder/wrap-<pid> 폴백).
+   - **tool_class canonical**: `--tool-class`는 5종만 쓴다(`file_read|code_search|file_edit|shell_exec|swarm_dispatch`) — 역할명(coder·verifier 등) 금지, 역할은 `--label`이 담당한다(통계 파편화 방지).
    - **대기·보고**: 워커 대기는 `hc wait`(sleep·폴링 금지), 워커 지시문에는 완료 보고 `hc send $HC_TERMINAL_ID`를 명시한다.
    - **장기 자율 실행**: 무인 루프는 done-means 술어·탈출구·결정 로그를 갖춘다 — `docs/autonomous-run-contract.md` 계약 따름.
    - **검증 역귀속**: 독립 검증 판정은 구조화 verdict 파일(`.herdr/verify/<fork_id>-verdict.json`)로 남기고 `dg backprop --verdict-file <path>`로 원본 fork에 반영한다(pass/rework/fail/human) — 검증 결과가 다음 배차 통계에 귀속된다.
