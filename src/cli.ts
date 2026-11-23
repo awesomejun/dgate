@@ -911,6 +911,39 @@ export function filterSubordinateWorkers(workers: readonly LiveWorkerInfo[]): Li
   return workers.filter((w) => w.slot !== 'lead' && w.slot !== 'verifier' && w.slot !== 'advisor');
 }
 
+/**
+ * 라이브 로스터 폴 틱 뒤 "재렌더가 필요한가"를 가리는 상태 서명 — 내용이 같으면 그 틱은 다시 그리지 않는다.
+ * 매 틱 `syncRoutesFromSsot`가 DB에서 다시 읽는 Decision Gate 수치(routes·sharp/split 카운트)도
+ * 반드시 포함해야 한다. 빠져 있으면 리드·워커가 전부 대기 중인 화면에서는 100ms 모션 루프가
+ * 돌지 않으므로, DB만 바뀐 변경(`dg retro`·`settle-orphans`·다른 세션의 gate 기록)이 다른 상태
+ * 변화가 생길 때까지 화면에 반영되지 않는다.
+ */
+export function liveRosterStateSignatureOf(state: AppState): string {
+  return JSON.stringify([
+    state.rosterLabels,
+    state.phase,
+    state.mainSummary,
+    state.neonState,
+    state.advisorState,
+    state.modelName,
+    state.modelFlag,
+    state.neonModelName,
+    state.neonModelFlag,
+    state.leadTelemetry,
+    state.verifierTelemetry,
+    state.advisorTelemetry,
+    state.subagentWarning,
+    state.swarmActive,
+    state.liveWorkers,
+    state.workers,
+    state.logs.length,
+    state.liveSessionCounts,
+    state.routes,
+    state.sharpCount,
+    state.splitCount,
+  ]);
+}
+
 function main(): void {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.showHelp) {
@@ -1152,27 +1185,7 @@ function main(): void {
   // liveWorkers 카드와 나란히 놓인 경과 계산 기준 — 폴 사이 틱에서 초 갱신용
   const liveElapsedBasis: ({ startedAtMs: number; frozenElapsedSec: number | null } | null)[] = [];
 
-  const liveRosterStateSignature = (): string =>
-    JSON.stringify([
-      state.rosterLabels,
-      state.phase,
-      state.mainSummary,
-      state.neonState,
-      state.advisorState,
-      state.modelName,
-      state.modelFlag,
-      state.neonModelName,
-      state.neonModelFlag,
-      state.leadTelemetry,
-      state.verifierTelemetry,
-      state.advisorTelemetry,
-      state.subagentWarning,
-      state.swarmActive,
-      state.liveWorkers,
-      state.workers,
-      state.logs.length,
-      state.liveSessionCounts,
-    ]);
+  const liveRosterStateSignature = (): string => liveRosterStateSignatureOf(state);
 
   const appendLiveWorkerLog = (w: LiveWorkerInfo, suffix?: string): void => {
     const base = `[${w.repoTag}] ${w.name} (${w.shortModel})`;

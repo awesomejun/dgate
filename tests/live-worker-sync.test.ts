@@ -1682,6 +1682,25 @@ test('filterSubordinateWorkers — Workers 카드에는 explore/coder만 남는�
   assert.ok(filtered.every((w) => w.slot === 'explore' || w.slot === 'coder'));
 });
 
+test('liveRosterStateSignatureOf — Decision Gate 수치(routes·sharp/split)가 서명에 들어가 DB만 바뀐 틱도 재렌더된다', async () => {
+  const { liveRosterStateSignatureOf } = await import('../src/cli.ts');
+  const a = createInitialState('watch');
+  const b = createInitialState('watch');
+  assert.equal(liveRosterStateSignatureOf(a), liveRosterStateSignatureOf(b), '동일 상태는 같은 서명');
+
+  // 매 틱 syncRoutesFromSsot는 routes를 새 배열로 교체한다 — 내용이 같으면 서명도 같아야 한다(불필요한 재렌더 없음)
+  b.routes = b.routes.map((r) => ({ ...r }));
+  assert.equal(liveRosterStateSignatureOf(a), liveRosterStateSignatureOf(b), '내용 동일한 새 배열은 같은 서명');
+
+  // DB의 p 값만 바뀐 경우(리드·워커 전부 대기 중 → 모션 루프가 안 도는 구간) — 서명이 달라져야 재렌더된다
+  b.routes = b.routes.map((r, i) => (i === 0 ? { ...r, p: 0.42 } : r));
+  assert.notEqual(liveRosterStateSignatureOf(a), liveRosterStateSignatureOf(b), 'routes 변화는 서명 변화');
+
+  const c = createInitialState('watch');
+  c.splitCount = c.splitCount + 1;
+  c.sharpCount = c.sharpCount - 1;
+  assert.notEqual(liveRosterStateSignatureOf(a), liveRosterStateSignatureOf(c), '카운트 변화도 서명 변화');
+});
 
 // ── w-tui-truthful-ssot: 기본 watch 모드의 전역 트랜스크립트 자동 attach 금지 ──
 // 인자 없는 `--watch`는 어떤 transcript.jsonl도 자동으로 붙이지 않아야 한다
