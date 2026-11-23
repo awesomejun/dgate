@@ -1048,6 +1048,40 @@ function statSizeOrNull(p: string): number | null {
   }
 }
 
+/**
+ * `dg wrap` 자식 명령에서 워커 귀속 정보를 뽑는다 — fork 메타에 남겨 이후 모델별 성공률 집계의 근거로 쓴다.
+ * CLI는 첫 토큰의 basename(`env VAR=…` 접두·node 스크립트는 벗긴다), 모델은 `--model <v>`/`--model=<v>`.
+ * 찾지 못한 값은 넣지 않는다(추측 대신 결측).
+ */
+function wrapWorkerTelemetry(command: readonly string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  const tokens = [...command];
+  // env 접두(F=x) 와 래퍼(node path.js) 는 실제 CLI가 아니다
+  let i = 0;
+  while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]!)) i++;
+  let head = tokens[i] ?? '';
+  if ((head === 'node' || head === 'bun' || head === 'deno') && tokens[i + 1]) {
+    head = tokens[i + 1]!;
+    i++;
+  }
+  const base = head.split(/[\\/]/).pop() ?? '';
+  if (base !== '' && !base.startsWith('-')) out['cli'] = base;
+  for (let k = i; k < tokens.length; k++) {
+    const t = tokens[k]!;
+    if (t === '--model') {
+      const v = tokens[k + 1];
+      if (v && !v.startsWith('-')) out['model'] = v;
+      break;
+    }
+    if (t.startsWith('--model=')) {
+      const v = t.slice('--model='.length);
+      if (v.length > 0) out['model'] = v;
+      break;
+    }
+  }
+  return out;
+}
+
 async function cmdWrap(args: ParsedArgs, json: boolean): Promise<number> {
   const route = parseRoute(requireFlag(args, 'route'));
   const toolClass = requireFlag(args, 'tool-class');
@@ -1103,12 +1137,20 @@ async function cmdWrap(args: ParsedArgs, json: boolean): Promise<number> {
         projectLabel: identity.projectLabel,
         route,
         toolClass,
-        decision: forced.forcedSplit ? 'split' : post.p >= 0.7 ? 'sharp' : 'split',
+        // 임계치는 gate·route와 같은 resolver로 — 하드코딩 0.7이면 roster 동적 θ가 무시된다.
+        decision: forced.forcedSplit ? 'split' : post.p >= (resolveSharpTheta(args) ?? 0.7) ? 'sharp' : 'split',
         pAtGate: post.p,
         basisAtGate: post.basis,
         forcedSplit: forced.forcedSplit,
         ttlMs: TTL_EXPLORE_MS,
         title: command.join(' ').slice(0, 80),
+        // 실행 모델·CLI·역할을 fork에 남긴다 — 지금까지 DB에 귀속 정보가 없어 "어느 모델이 실패했나"를
+        // 셀 수 없었다(`forks.metadata_json`은 이미 있는 계약 필드). 역할은 --role, 모델은 자식 명령의
+        // --model에서 읽고 못 찾으면 생략(추측 금지).
+        metadata: {
+          ...(roleOpt !== undefined ? { role: roleOpt } : {}),
+          ...wrapWorkerTelemetry(command),
+        },
       });
     }
   } catch (err) {

@@ -470,7 +470,7 @@ function writeE2eVerdict(dir: string, forkId: string, overrides: Record<string, 
   return p;
 }
 
-test('CLI E2E: pass verdict + 일치 head → exit 0, fork → ok', () => {
+test('CLI E2E: pass verdict + 일치 head → exit 0, fork → ok + closed_by=verifier + neon_verdict=pass', () => {
   const e = makeCliEnv();
   try {
     const forkId = issueE2eFork(e);
@@ -480,12 +480,20 @@ test('CLI E2E: pass verdict + 일치 head → exit 0, fork → ok', () => {
       '--expected-head', E2E_HEAD, '--json',
     ]);
     assert.equal(res.status, 0, `exit ${res.status}: ${res.stderr}\n${res.stdout}`);
-    const fork = e2eStat(e, `SELECT status, closed_by FROM forks WHERE fork_id = ?`, forkId) as {
+    const fork = e2eStat(e, `SELECT status, closed_by, neon_verdict FROM forks WHERE fork_id = ?`, forkId) as {
       status: string;
       closed_by: string;
+      neon_verdict: string | null;
     };
     assert.equal(fork.status, 'ok');
     assert.equal(fork.closed_by, 'verifier');
+    // PASS도 판정 기록으로 남는다 — 비대칭 해소 전에는 NULL이라 "검증자가 몇 건 판정했나"를 셀 수 없었다.
+    assert.equal(fork.neon_verdict, 'pass', 'PASS 판정은 neon_verdict=pass로 남아야 한다');
+    // 재적용(멱등)도 값 을 유지한다
+    const again = dgRun(e, ['backprop', '--fork', forkId, '--verdict-file', vf, '--expected-head', E2E_HEAD, '--json']);
+    assert.equal(again.status, 0, `idempotent 재적용 exit ${again.status}: ${again.stderr}`);
+    const after = e2eStat(e, `SELECT neon_verdict FROM forks WHERE fork_id = ?`, forkId) as { neon_verdict: string | null };
+    assert.equal(after.neon_verdict, 'pass', '멱등 재적용 후에도 pass 유지');
   } finally {
     fs.rmSync(e.base, { recursive: true, force: true });
   }

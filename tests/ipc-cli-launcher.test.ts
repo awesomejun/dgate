@@ -38,6 +38,8 @@ interface TestEnv {
   base: string;
   dbPath: string;
   projDir: string;
+  /** 이 테스트 전용 roster — 홈의 전역 roster(`~/.config/herdr-quad/roster.json`)에 의존하지 않게 한다. */
+  rosterPath: string;
   env: NodeJS.ProcessEnv;
 }
 
@@ -46,7 +48,11 @@ function makeEnv(): TestEnv {
   const dbPath = path.join(base, 'decision.db');
   const projDir = path.join(base, 'proj');
   fs.mkdirSync(projDir, { recursive: true });
-  return { base, dbPath, projDir, env: { ...process.env, GEMINI_TRICK_DB_PATH: dbPath, DGATE_DB_PATH: undefined, DECISION_ORCHESTRATOR_DB_PATH: undefined } };
+  // 홈의 전역 roster(기본 devin-coder)를 읽으면 이 파일의 리드/자문 모델 기대치가 환경마다 깨진다.
+  // 내장 quota-saver 프로필만 지정한 고정 roster로 분리한다.
+  const rosterPath = path.join(base, 'roster.json');
+  fs.writeFileSync(rosterPath, JSON.stringify({ defaultProfile: 'quota-saver' }));
+  return { base, dbPath, projDir, rosterPath, env: { ...process.env, GEMINI_TRICK_DB_PATH: dbPath, DGATE_DB_PATH: undefined, DECISION_ORCHESTRATOR_DB_PATH: undefined } };
 }
 
 function cleanupEnv(e: TestEnv): void {
@@ -88,7 +94,7 @@ test('1. cli.ts Hub IPC prompt 핸들러 회귀 (버그 #1)', () => {
 test('2. dispatch: single_edit → split (리드 승격)', () => {
   const e = makeEnv();
   try {
-    const plan = planDispatch({ taskKind: 'single_edit', repoDir: e.projDir, dbPath: e.dbPath, runId: 'ab12cd' });
+    const plan = planDispatch({ taskKind: 'single_edit', repoDir: e.projDir, dbPath: e.dbPath, runId: 'ab12cd', rosterPath: e.rosterPath });
     assert.equal(plan.ok, true);
     assert.equal(plan.decision, 'split');
     assert.equal(plan.requiresWrite, true);
@@ -106,7 +112,7 @@ test('2. dispatch: single_edit → split (리드 승격)', () => {
 test('3. dispatch: static_check → split (sharp 자격 구조 배제)', () => {
   const e = makeEnv();
   try {
-    const plan = planDispatch({ taskKind: 'static_check', repoDir: e.projDir, dbPath: e.dbPath, runId: 'ab12cd' });
+    const plan = planDispatch({ taskKind: 'static_check', repoDir: e.projDir, dbPath: e.dbPath, runId: 'ab12cd', rosterPath: e.rosterPath });
     assert.equal(plan.decision, 'split');
   } finally {
     cleanupEnv(e);
@@ -123,6 +129,7 @@ test('4. dispatch: explore_read → sharp + dg wrap --fork + pi 읽기전용 커
       runId: 'ab12cd',
       idx: 2,
       taskFile: 'TASK.md',
+      rosterPath: e.rosterPath,
     });
     assert.equal(plan.ok, true);
     assert.equal(plan.decision, 'sharp');

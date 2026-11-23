@@ -48,4 +48,5 @@
 ## 5. 후속 결선
 
 - `[FAIL]` 또는 `rework`/`human` 판정이면 리드가 `node ./src/decision/dg.ts backprop --fork <fork_id> --verdict-file .herdr/verify/<fork_id>-verdict.json --expected-head <HEAD>`로 위 §4 JSON을 적용해 해당 fork를 재개방·파킹한다. `--expected-head`에는 위임 시점 `git rev-parse HEAD`(full sha)가 들어간다.
+- **`pass` 판정도 같은 명령으로 반드시 적용한다** — PASS를 적용하지 않으면 fork가 검증자에 의해 닫히지 않고(`closed_by='verifier'` 미기록) `neon_verdict`도 NULL로 남아, 교차검증이 실제로 일어났는지 DB로 셀 수 없다. PASS 적용 시 fork는 `ok`로 닫히고 `closed_by='verifier'`·`neon_verdict='pass'`가 기록된다(exit 0). 판정을 파일로만 남기고 적용을 생략하는 것은 계약 위반이다.
 - 너의 역할은 판정 보고까지다. 수정·재검증 요청은 수행하지 않고 보고로 답한다.

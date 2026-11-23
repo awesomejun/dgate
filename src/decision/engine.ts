@@ -1924,7 +1924,13 @@ export function applyVerdictToFork(
   }
 
   if (v.effectiveDecision === 'pass') {
+    // 검증자 PASS 판정도 fork 행에 남긴다 — backprop(FAIL) 경로만 `neon_verdict`를 쓰던 비대칭을 없앤다.
+    // 이 값이 NULL로 남으면 "검증자가 판정했다"는 사실이 DB에서 사라져 교차검증 여부를 셀 수 없다.
+    const markPass = (): void => {
+      db.prepare(`UPDATE forks SET neon_verdict = 'pass' WHERE fork_id = ?`).run(input.forkId);
+    };
     if (fork.status === 'ok') {
+      markPass();
       return { action: 'pass', exitCode: 0, committed: true, reason: 'idempotent' };
     }
     if (!isForkLiveStatus(fork.status)) {
@@ -1934,6 +1940,7 @@ export function applyVerdictToFork(
     if (!res.committed) {
       return { action: 'escalate_human', exitCode: 3, committed: false, reason: res.reason };
     }
+    markPass();
     return { action: 'pass', exitCode: 0, committed: true, pAfter: res.pAfter };
   }
 

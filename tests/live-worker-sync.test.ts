@@ -2509,7 +2509,7 @@ test('inferLiveWorkerSlot — agy 세션명 neon/argon을 HERDR_ROLE 없이 veri
   );
 });
 
-test('`dg wrap --role` — 무효값은 UsageError(exit 2)로 즉시 실패, 유효값은 그대로 실행', () => {
+test('`dg wrap --role` — 무효값은 UsageError(exit 2)로 즉시 실패, 유효값은 그대로 실행하며 fork 메타에 cli·model·role 기록', async () => {
   const dgPath = path.join(REPO_ROOT, 'src', 'decision', 'dg.ts');
   const env = {
     ...process.env,
@@ -2527,8 +2527,24 @@ test('`dg wrap --role` — 무효값은 UsageError(exit 2)로 즉시 실패, 유
 
   const ok = spawnSync(
     process.execPath,
-    [dgPath, 'wrap', '--route', 'file_select', '--tool-class', 'file_edit', '--role', 'verifier', '--label', 'verifier-t1', '--json', '--', '/bin/echo', 'hi'],
+    [dgPath, 'wrap', '--route', 'file_select', '--tool-class', 'file_edit', '--role', 'verifier', '--label', 'verifier-t1', '--json', '--', '/bin/echo', '--model', 'glm-zcode/glm-5.4', 'hi'],
     { env, encoding: 'utf8', timeout: 30_000 }
   );
   assert.equal(ok.status, 0, `유효 --role 실행 stderr=${ok.stderr}`);
+
+  // fork 메타에 워커 귀속 정보(cli·model·role)가 남아야 모델별 성공률 집계가 가능하다.
+  const { DatabaseSync: Sql } = await import('node:sqlite');
+  const db = new Sql(env.DGATE_DB_PATH as string);
+  try {
+    const row = db
+      .prepare(`SELECT metadata_json AS m FROM forks ORDER BY created_at_ms DESC LIMIT 1`)
+      .get() as { m: string } | undefined;
+    assert.ok(row, 'wrap이 fork를 발급해야 한다');
+    const meta = JSON.parse(row!.m) as Record<string, unknown>;
+    assert.equal(meta['role'], 'verifier', 'fork 메타에 역할 기록');
+    assert.equal(meta['cli'], 'echo', 'fork 메타에 CLI 기록');
+    assert.equal(meta['model'], 'glm-zcode/glm-5.4', 'fork 메타에 모델 기록');
+  } finally {
+    db.close();
+  }
 });
