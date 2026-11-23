@@ -1707,6 +1707,17 @@ test('liveRosterStateSignatureOf — Decision Gate 수치(routes·sharp/split)�
   assert.notEqual(liveRosterStateSignatureOf(a), liveRosterStateSignatureOf(d), 'totalForks 변화는 서명 변화');
 });
 
+test('resolveTelemetryScopeDir — 틱 동기화와 시작 로드가 같은 스코프: repo > watch-dir > cwd', async () => {
+  const { resolveTelemetryScopeDir } = await import('../src/cli.ts');
+  // `--repo <다른 저장소>`로 띄운 화면: 틱마다 cwd 기준으로 튀면 안 된다(과거 버그)
+  assert.equal(
+    resolveTelemetryScopeDir({ repoFilterDir: '/w/other-repo', watchDir: '/brain', cwd: '/w/here' }),
+    '/w/other-repo'
+  );
+  assert.equal(resolveTelemetryScopeDir({ repoFilterDir: null, watchDir: '/brain', cwd: '/w/here' }), '/brain');
+  assert.equal(resolveTelemetryScopeDir({ repoFilterDir: null, watchDir: null, cwd: '/w/here' }), '/w/here');
+});
+
 test('readTelemetrySnapshot.forkCount — 프로젝트 범위 fork 수를 DB에서 읽고 syncRoutesFromSsot가 totalForks를 맞춘다', async () => {
   const { DatabaseSync } = await import('node:sqlite');
   const { openDb, resolveProjectIdentity } = await import('../src/decision/db.ts');

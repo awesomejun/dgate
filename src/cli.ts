@@ -912,6 +912,20 @@ export function filterSubordinateWorkers(workers: readonly LiveWorkerInfo[]): Li
 }
 
 /**
+ * Decision Gate 텔레메트리(routes·forks 수)의 project_id 스코프를 정하는 디렉터리.
+ * 시작 1회 로드와 매 틱 동기화가 반드시 같은 값을 써야 한다(한쪽만 cwd로 두면 `--repo`로
+ * 띄운 화면의 수치가 틱마다 다른 프로젝트 기준으로 튄다). 우선순위: `--repo`/세션 스코프 >
+ * `--watch-dir` > 현재 디렉터리.
+ */
+export function resolveTelemetryScopeDir(input: {
+  repoFilterDir: string | null;
+  watchDir: string | null;
+  cwd: string;
+}): string {
+  return input.repoFilterDir ?? input.watchDir ?? input.cwd;
+}
+
+/**
  * 라이브 로스터 폴 틱 뒤 "재렌더가 필요한가"를 가리는 상태 서명 — 내용이 같으면 그 틱은 다시 그리지 않는다.
  * 매 틱 `syncRoutesFromSsot`가 DB에서 다시 읽는 Decision Gate 수치(routes·sharp/split 카운트)도
  * 반드시 포함해야 한다. 빠져 있으면 리드·워커가 전부 대기 중인 화면에서는 100ms 모션 루프가
@@ -1019,7 +1033,7 @@ function main(): void {
       // `--repo` 지정 시 해당 레포의 projectId로 스코프(경유 cwd → 내부 projectId 환산)
       const snapshot = readTelemetrySnapshot(
         decisionDbPath,
-        repoFilterDir ?? opts.watchDir ?? process.cwd()
+        resolveTelemetryScopeDir({ repoFilterDir, watchDir: opts.watchDir, cwd: process.cwd() })
       );
       state.routes = snapshot.routes;
       const splitCount = snapshot.routes.filter((r) => r.forcedSplit === true || r.p < 0.7).length;
@@ -1207,8 +1221,13 @@ function main(): void {
     state.taskProgress = readRepoTaskProgress(repoFilterDir ?? process.cwd());
     // Decision Gate(routes)도 매 폴 틱 SSOT 실측으로 갱신 — 트랜스크립트 이벤트에만
     // 물리면 대화 없는 구간에서 수치가 멈춰 있게 된다(DB 읽기 1회, demo 모드는
-    // syncRoutesFromSsot 내부 가드로 기존 동작 유지).
-    syncRoutesFromSsot(state);
+    // syncRoutesFromSsot 내부 가드로 기존 동작 유지). 스코프 디렉터리는 시작 1회 로드와
+    // 같은 식(resolveTelemetryScopeDir)이어야 한다 — 다르면 `--repo <다른 저장소>`로 띄운
+    // 화면이 시작은 그 저장소 기준, 이후 틱은 cwd 기준으로 routes·forks 수가 튄다.
+    syncRoutesFromSsot(
+      state,
+      resolveTelemetryScopeDir({ repoFilterDir, watchDir: opts.watchDir, cwd: process.cwd() })
+    );
     state.liveSessionCounts = computeLiveSessionCounts(merged.workers);
     state.neonModelName = merged.verifierModelName;
     state.neonModelFlag = merged.verifierModelFlag;
