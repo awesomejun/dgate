@@ -941,6 +941,7 @@ export function liveRosterStateSignatureOf(state: AppState): string {
     state.routes,
     state.sharpCount,
     state.splitCount,
+    state.totalForks,
   ]);
 }
 
@@ -1024,6 +1025,8 @@ function main(): void {
       const splitCount = snapshot.routes.filter((r) => r.forcedSplit === true || r.p < 0.7).length;
       state.sharpCount = snapshot.routes.length - splitCount;
       state.splitCount = splitCount;
+      // `forks N`도 같은 스냅숏에서 — 시작 직후부터 DB 기록 수를 보여준다(이벤트 관찰 전 0 방지)
+      if (snapshot.live) state.totalForks = snapshot.forkCount;
     } catch {
       // 텔레메트리 로드 실패 시 기존 라우트 유지(§3.5 안전 폴백)
     }

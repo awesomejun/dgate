@@ -1700,6 +1700,78 @@ test('liveRosterStateSignatureOf — Decision Gate 수치(routes·sharp/split)�
   c.splitCount = c.splitCount + 1;
   c.sharpCount = c.sharpCount - 1;
   assert.notEqual(liveRosterStateSignatureOf(a), liveRosterStateSignatureOf(c), '카운트 변화도 서명 변화');
+
+  // `forks N`(totalForks)도 매 틱 DB에서 다시 읽히므로 서명에 들어가야 대기 중 화면도 재렌더된다
+  const d = createInitialState('watch');
+  d.totalForks = d.totalForks + 7;
+  assert.notEqual(liveRosterStateSignatureOf(a), liveRosterStateSignatureOf(d), 'totalForks 변화는 서명 변화');
+});
+
+test('readTelemetrySnapshot.forkCount — 프로젝트 범위 fork 수를 DB에서 읽고 syncRoutesFromSsot가 totalForks를 맞춘다', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const { openDb, resolveProjectIdentity } = await import('../src/decision/db.ts');
+  const { readTelemetrySnapshot } = await import('../src/decision/telemetry.ts');
+  const { syncRoutesFromSsot } = await import('../src/backend/agyStreamMapper.ts');
+
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'lws-forks-')));
+  const dbPath = path.join(base, 'decision.db');
+  const projA = path.join(base, 'proj-a');
+  const projB = path.join(base, 'proj-b');
+  const projNone = path.join(base, 'proj-none');
+  fs.mkdirSync(projA);
+  fs.mkdirSync(projB);
+  fs.mkdirSync(projNone);
+  const prevDbEnv = process.env.DGATE_DB_PATH;
+  try {
+    openDb(dbPath).close(); // v2 스키마 생성(forks 테이블 포함)
+    const idA = resolveProjectIdentity(projA).projectId;
+    const idB = resolveProjectIdentity(projB).projectId;
+    assert.notEqual(idA, idB, '두 임시 프로젝트는 서로 다른 project_id');
+
+    const db = new DatabaseSync(dbPath);
+    try {
+      const ins = db.prepare(
+        `INSERT INTO forks (fork_id, project_id, project_label, route, tool_class, decision, p_at_gate, basis_at_gate, status, created_at_ms, last_touch_ms)
+         VALUES (?, ?, ?, 'file_select', 'file_edit', 'sharp', 0.9, 'prior', 'open', 1, 1)`
+      );
+      for (const [pid, n] of [[idA, 3], [idB, 1]] as const) {
+        for (let i = 0; i < n; i++) ins.run(`fk_${pid}_${i}`, pid, 'label');
+      }
+    } finally {
+      db.close();
+    }
+
+    // C1/C3: 각 프로젝트는 자기 fork만 센다 — 전역 합계(4)가 아니다
+    const snapA = readTelemetrySnapshot(dbPath, projA);
+    assert.equal(snapA.live, true);
+    assert.equal(snapA.forkCount, 3, 'proj-a는 3건');
+    assert.equal(readTelemetrySnapshot(dbPath, projB).forkCount, 1, 'proj-b는 1건');
+    assert.equal(readTelemetrySnapshot(dbPath, projNone).forkCount, 0, '기록 없는 프로젝트는 0');
+
+    // C5: DB 파일 없음 — 생성하지 않고 조용히 폴백(live=false, forkCount 0)
+    const missing = path.join(base, 'missing', 'decision.db');
+    const snapMissing = readTelemetrySnapshot(missing, projA);
+    assert.equal(snapMissing.live, false);
+    assert.equal(snapMissing.forkCount, 0);
+    assert.equal(fs.existsSync(missing), false, 'readOnly 스냅숏이 DB를 만들지 않는다');
+
+    // C1(화면 연결): 이벤트 관찰이 없어도 동기화 한 번에 totalForks가 DB 수와 같아진다
+    process.env.DGATE_DB_PATH = dbPath;
+    const state = createInitialState('watch');
+    assert.equal(state.totalForks, 0, '초기값은 0');
+    syncRoutesFromSsot(state, projA);
+    assert.equal(state.totalForks, 3, 'DB 기록 수로 맞춰진다');
+
+    // C5(폴백 유지): DB 미연결이면 기존 이벤트 카운터를 덮어쓰지 않는다
+    process.env.DGATE_DB_PATH = missing;
+    state.totalForks = 42;
+    syncRoutesFromSsot(state, projA);
+    assert.equal(state.totalForks, 42, 'live=false면 이벤트 카운터 유지');
+  } finally {
+    if (prevDbEnv === undefined) delete process.env.DGATE_DB_PATH;
+    else process.env.DGATE_DB_PATH = prevDbEnv;
+    fs.rmSync(base, { recursive: true, force: true });
+  }
 });
 
 // ── w-tui-truthful-ssot: 기본 watch 모드의 전역 트랜스크립트 자동 attach 금지 ──

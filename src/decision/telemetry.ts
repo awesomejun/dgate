@@ -65,6 +65,12 @@ export interface TelemetrySnapshot {
   routes: DecisionRoute[];
   dbPath: string;
   live: boolean;
+  /**
+   * 관측 프로젝트 범위의 fork 수(`forks` 행 수, routes와 같은 project_id 스코프) — TUI `forks N`
+   * 카운터의 SSOT 원천. 같은 패널의 p값과 한 틱에 읽히므로 기준이 어긋나지 않는다.
+   * DB 미연결·`forks` 테이블 부재 시 0.
+   */
+  forkCount: number;
 }
 
 /**
@@ -74,14 +80,16 @@ export interface TelemetrySnapshot {
 export function readTelemetrySnapshot(dbPathInput?: string | null, cwd = process.cwd()): TelemetrySnapshot {
   const dbPath = resolveDbPath(dbPathInput);
   const db = openDbSafe(dbPath, { readOnly: true, busyTimeoutMs: 1000 });
-  if (!db) return { routes: heuristicPriorRoutes(), dbPath, live: false };
+  if (!db) return { routes: heuristicPriorRoutes(), dbPath, live: false, forkCount: 0 };
   try {
+    const { projectId } = resolveProjectIdentity(cwd);
+    // fork 수는 stats_summary와 독립적이다 — 부분 스키마(v1)·표본 0 DB에서도 forks만 있으면 센다.
+    const forkCount = countProjectForks(db, projectId);
     // v1(v0)·v2 공통: stats_summary만 읽는다. 부분 생성·빈 DB에서는 읽기 가능
     // 상태(live)를 유지하되 표본 0의 휴리스틱 prior를 반환한다 (PB-1 §3.4)
     if (!hasTable(db, 'stats_summary')) {
-      return { routes: heuristicPriorRoutes(), dbPath, live: true };
+      return { routes: heuristicPriorRoutes(), dbPath, live: true, forkCount };
     }
-    const { projectId } = resolveProjectIdentity(cwd);
     const routes = ROUTE_IDS.map((id) => {
       // 라우트 내 최다 표본 tool_class를 대표로 선택(동률면 tool_class 이름순)
       const rows = db
@@ -102,7 +110,7 @@ export function readTelemetrySnapshot(dbPathInput?: string | null, cwd = process
         forcedSplit: post.consecutiveErrors >= 2,
       } satisfies DecisionRoute;
     });
-    return { routes, dbPath, live: true };
+    return { routes, dbPath, live: true, forkCount };
   } finally {
     try {
       db.close();
@@ -110,6 +118,13 @@ export function readTelemetrySnapshot(dbPathInput?: string | null, cwd = process
       /* 무시 */
     }
   }
+}
+
+/** 프로젝트 범위 fork 수 — `forks` 테이블이 없으면 0(부분 스키마 허용). */
+function countProjectForks(db: DatabaseSync, projectId: string): number {
+  if (!hasTable(db, 'forks')) return 0;
+  const row = db.prepare('SELECT COUNT(*) AS n FROM forks WHERE project_id = ?').get(projectId) as { n: number } | undefined;
+  return Number(row?.n ?? 0);
 }
 
 export interface SafeRecordInput {

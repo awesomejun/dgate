@@ -145,9 +145,15 @@ function eventCount(dbPath: string, where = '', params: (string | number | null)
   return (rows[0]?.['n'] as number) ?? 0;
 }
 
+/** `forks` 테이블 행 수 — TUI `forks N`(state.totalForks)의 SSOT. 엔진(`dg gate`)만 만든다. */
+function forkCount(dbPath: string): number {
+  const rows = queryAll(dbPath, 'SELECT COUNT(*) AS n FROM forks');
+  return (rows[0]?.['n'] as number) ?? 0;
+}
+
 // ---------------------------------------------------------------------------
 
-test('1. agyStreamMapper: ACTIVE+DONE(error) → totalForks +1(이중카운트 0), 로그 split, DB 1건', () => {
+test('1. agyStreamMapper: ACTIVE+DONE(error) → totalForks는 DB fork 수(SSOT)·폴백에선 +1 유지(이중카운트 0), 로그 split, DB 1건', () => {
   const e = makeEnv();
   try {
     const state = newState('live');
@@ -179,7 +185,12 @@ test('1. agyStreamMapper: ACTIVE+DONE(error) → totalForks +1(이중카운트 0
         },
       },
     });
-    assert.equal(state.totalForks, 1, 'DONE 재가산 없음 — 이중 카운트 버그 회귀');
+    // `forks N`은 DB `forks` 테이블(SSOT) 기준이다 — DONE 경로 끝의 syncRoutesFromSsot가 맞춘다.
+    // agy_stream은 decision_events(통계 표본)만 기록하고 forks 행은 엔진(gate)만 만들므로 여기선 0.
+    // 기존 기대치(1 유지)는 "화면이 관찰한 이벤트 수" 의미였고, 사용자 요구(C1/C4: p값·GUI와 같은 SSOT)로
+    // 바꿨다. 이중 카운트 회귀 검사는 DB 미연결 폴백 경로(아래)에서 그대로 보존한다.
+    assert.equal(state.totalForks, forkCount(e.dbPath), 'DONE 뒤 totalForks는 DB fork 수(SSOT)');
+    assert.equal(forkCount(e.dbPath), 0, '이 시나리오는 forks 행을 만들지 않는다');
     const logs = state.logs.map((l) => l.message).join('\n');
     assert.ok(logs.includes('split'), `로그에 split 표기 필요:\n${logs}`);
     assert.equal(eventCount(e.dbPath), 1, 'DB 표본 1건');
@@ -190,6 +201,44 @@ test('1. agyStreamMapper: ACTIVE+DONE(error) → totalForks +1(이중카운트 0
     assert.equal(row['tool_class'], 'shell_exec');
     assert.equal(row['dedupe_key'], 'agy:c-ag-1:5');
     assert.equal(row['conversation_id'], 'c-ag-1');
+
+    // 폴백(DB 미연결 + 쓰기 금지): SSOT가 없으니 관찰 카운터가 살아 있고, DONE이 재가산하지 않는다
+    // — 원래의 이중 카운트 회귀 검사를 이 경로에서 보존한다.
+    const prevReadonly = process.env.DECISION_READONLY;
+    process.env.DECISION_READONLY = '1';
+    process.env.GEMINI_TRICK_DB_PATH = path.join(e.base, 'missing', 'decision.db');
+    try {
+      const fb = newState('live');
+      applyAgyEvent(fb, { event: 'init', conversation_id: 'c-ag-2', init: { model: 'gemini-4-argon-high' } });
+      applyAgyEvent(fb, {
+        event: 'step_update',
+        step_update: {
+          conversation_id: 'c-ag-2',
+          step_index: 7,
+          state: 'ACTIVE',
+          step_type: 'tool',
+          tool_name: 'run_command',
+          tool_info: { name: 'run_command', parameters: { CommandLine: 'git status' } },
+        },
+      });
+      assert.equal(fb.totalForks, 1, '폴백: ACTIVE에서 1회 가산');
+      applyAgyEvent(fb, {
+        event: 'step_update',
+        step_update: {
+          conversation_id: 'c-ag-2',
+          step_index: 7,
+          state: 'DONE',
+          step_type: 'tool',
+          tool_name: 'run_command',
+          tool_info: { name: 'run_command', parameters: { CommandLine: 'git status', error: 'exit 128' } },
+        },
+      });
+      assert.equal(fb.totalForks, 1, '폴백: DONE 재가산 없음 — 이중 카운트 버그 회귀');
+    } finally {
+      if (prevReadonly === undefined) delete process.env.DECISION_READONLY;
+      else process.env.DECISION_READONLY = prevReadonly;
+      process.env.GEMINI_TRICK_DB_PATH = e.dbPath;
+    }
   } finally {
     e.restore();
   }

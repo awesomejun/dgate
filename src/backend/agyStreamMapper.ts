@@ -139,7 +139,7 @@ export function decisionWriteBlocked(state: AppState): boolean {
   return state.mode === 'demo' || process.env.DECISION_READONLY === '1';
 }
 
-/** state.routes·sharpCount·splitCount를 SQLite SSOT 실측으로 동기화(읽기전용 구독) */
+/** state.routes·sharpCount·splitCount·totalForks를 SQLite SSOT 실측으로 동기화(읽기전용 구독) */
 export function syncRoutesFromSsot(state: AppState, cwd = process.cwd()): void {
   if (state.mode === 'demo') return; // 데모 라우트 표시는 데모 엔진 소유
   try {
@@ -148,6 +148,8 @@ export function syncRoutesFromSsot(state: AppState, cwd = process.cwd()): void {
     const splits = snap.routes.filter((r) => r.forcedSplit === true || r.p < 0.7).length;
     state.splitCount = splits;
     state.sharpCount = snap.routes.length - splits;
+    // `forks N` 카운터 — p값과 같은 SSOT·같은 스코프. DB 미연결(live=false)이면 이벤트 카운터를 그대로 둔다.
+    if (snap.live) state.totalForks = snap.forkCount;
   } catch {
     // §3.5 안전 폴백: 텔레메트리 실패 시 기존 라우트 유지
   }

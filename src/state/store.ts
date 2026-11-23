@@ -150,6 +150,7 @@ export function syncStateFromDecisionDb(
     const split = snapshot.routes.filter((r) => r.forcedSplit === true || r.p < 0.7).length;
     state.sharpCount = snapshot.routes.length - split;
     state.splitCount = split;
+    if (snapshot.live) state.totalForks = snapshot.forkCount;
     return snapshot.live;
   } catch {
     return false;
