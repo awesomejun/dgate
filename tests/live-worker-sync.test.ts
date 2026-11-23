@@ -20,7 +20,12 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
+import {
+  inferLiveWorkerSlotFromName,
+  parseLiveWorkerSlot,
+} from '../src/types.ts';
 import {
   createLiveRosterSyncer,
   detectSubagentWarningFromTranscript,
@@ -37,6 +42,7 @@ import {
   mergeLiveRosterLabels,
   normalizeTopLevelWorker,
   parsePsRows,
+  wrapProcToWorker,
   type HcTerminalDetail,
   type LiveWorkerInfo,
   type MergedLiveRoster,
@@ -1676,6 +1682,7 @@ test('filterSubordinateWorkers — Workers 카드에는 explore/coder만 남는�
   assert.ok(filtered.every((w) => w.slot === 'explore' || w.slot === 'coder'));
 });
 
+
 // ── w-tui-truthful-ssot: 기본 watch 모드의 전역 트랜스크립트 자동 attach 금지 ──
 // 인자 없는 `--watch`는 어떤 transcript.jsonl도 자동으로 붙이지 않아야 한다
 // (다른 프로젝트의 전역 트랜스크립트가 새어 들어오는 것을 원천 차단).
@@ -2313,6 +2320,113 @@ test('findWrapProcesses env 접두어 — 런처/dash 토큰/BFS 자식 모두 e
   ].join('\n');
   const procs3 = findWrapProcesses(parsePsRows(ps3));
   assert.equal(procs3.length, 1);
-  assert.equal(procs3[0]?.cli, 'pi');
+assert.equal(procs3[0]?.cli, 'pi');
   assert.equal(procs3[0]?.model, 'child-m');
+});
+
+// ─── 역할 분류 — verifier가 Workers 카드(coder)로 새는 회귀 방지 ───────────────────
+// 배경: wrap 슬롯을 라벨 부분문자열(`verify`)로 추론했기 때문에 정식 역할명 `verifier`·agy 세션명
+// `neon`은 coder로 떨어져 Workers 카드에 뜨고, 반대로 주제에 역할어가 든 coder 라벨은
+// verifier 패널로 빨려 들어갔다. 이제 ① `--role`/`HERDR_ROLE` 명시 ② 접두 테이블 ③ coder 폴백.
+
+const wrapPs = (extra: string): string =>
+  [
+    '  500     1 /bin/zsh -l',
+    `  700   500 node /x/src/decision/dg.ts wrap --route file_select --tool-class file_edit ${extra} -- /bin/echo hi`,
+  ].join('\n');
+
+const wrapSlotOf = (extra: string): string => {
+  const proc = findWrapProcesses(parsePsRows(wrapPs(extra)))[0];
+  assert.ok(proc, `wrap 프로세스가 잡혀야 함: ${extra}`);
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'lws-slot-')));
+  return wrapProcToWorker(proc, { address: 't500', state: 'live' }, tmp).slot;
+};
+
+test('inferLiveWorkerSlotFromName — 접두로만 판정(부분문자열 금지), 한글은 구분자 없이도 인정', () => {
+  assert.equal(inferLiveWorkerSlotFromName('verifier-pr894'), 'verifier');
+  assert.equal(inferLiveWorkerSlotFromName('verify-stage1'), 'verifier');
+  assert.equal(inferLiveWorkerSlotFromName('neon-r1'), 'verifier');
+  assert.equal(inferLiveWorkerSlotFromName('검증-g1'), 'verifier');
+  assert.equal(inferLiveWorkerSlotFromName('검증g1'), 'verifier');
+  assert.equal(inferLiveWorkerSlotFromName('w-verify-x'), 'verifier');
+  assert.equal(inferLiveWorkerSlotFromName('research-hcdesign'), 'explore');
+  assert.equal(inferLiveWorkerSlotFromName('exp-3'), 'explore');
+  assert.equal(inferLiveWorkerSlotFromName('advisor-g3'), 'advisor');
+  assert.equal(inferLiveWorkerSlotFromName('carbon-gate1-r1'), 'advisor');
+  assert.equal(inferLiveWorkerSlotFromName('lead-pi-dispatch'), 'lead');
+  assert.equal(inferLiveWorkerSlotFromName('argon-r1'), 'lead');
+  // 주제에 역할어가 들어간 라벨 — 접두가 아니면 coder(null)
+  assert.equal(inferLiveWorkerSlotFromName('fix-rust-verifier-observations'), null);
+  assert.equal(inferLiveWorkerSlotFromName('pr-검증-수정'), null);
+  assert.equal(inferLiveWorkerSlotFromName('expand-feature'), null);
+  assert.equal(inferLiveWorkerSlotFromName('coder1-abc123'), null);
+  assert.equal(inferLiveWorkerSlotFromName(''), null);
+  assert.equal(inferLiveWorkerSlotFromName(null), null);
+});
+
+test('parseLiveWorkerSlot — 5종 + carbon 별칭, 대소문자 무시, 무효값은 null', () => {
+  assert.equal(parseLiveWorkerSlot('verifier'), 'verifier');
+  assert.equal(parseLiveWorkerSlot(' Carbon '), 'advisor');
+  assert.equal(parseLiveWorkerSlot('LEAD'), 'lead');
+  assert.equal(parseLiveWorkerSlot('verifer'), null); // 오타
+  assert.equal(parseLiveWorkerSlot('verify'), null); // 라벨 접두어이지 슬롯값이 아니다
+  assert.equal(parseLiveWorkerSlot(undefined), null);
+});
+
+test('wrap 슬롯 — `--role` 최우선, 라벨은 접두로만, 어긋나면 coder', () => {
+  assert.equal(wrapSlotOf('--label verifier-pr894'), 'verifier'); // 과거 버그: verify≠verifier 로 coder였음
+  assert.equal(wrapSlotOf('--label verify-stage1'), 'verifier');
+  assert.equal(wrapSlotOf('--label neon-x'), 'verifier');
+  assert.equal(wrapSlotOf('--label 검증-g1'), 'verifier');
+  assert.equal(wrapSlotOf('--label fix-rust-verifier-observations'), 'coder'); // 과거 버그: verifier 패널으로 빨려 들어감
+  assert.equal(wrapSlotOf('--label research-hcdesign'), 'explore');
+  assert.equal(wrapSlotOf('--label advisor-g3'), 'advisor');
+  assert.equal(wrapSlotOf('--label lead-x'), 'coder'); // 라벨만으로 wrap 워커가 리드가 되지는 않는다
+  assert.equal(wrapSlotOf('--label coder-s3b-claude-devin'), 'coder');
+  assert.equal(wrapSlotOf('--label whatever'), 'coder');
+  // 명시 --role이 라벨보다 우선, 무효값은 라벨 접두로 폴백
+  assert.equal(wrapSlotOf('--role explore --label verifier-x'), 'explore');
+  assert.equal(wrapSlotOf('--role carbon --label z'), 'advisor');
+  assert.equal(wrapSlotOf('--role lead --label z'), 'lead'); // 명시면 인정
+  assert.equal(wrapSlotOf('--role bogus --label verify-x'), 'verifier');
+  assert.equal(wrapSlotOf('--role bogus --label whatever'), 'coder');
+});
+
+test('inferLiveWorkerSlot — agy 세션명 neon/argon을 HERDR_ROLE 없이 verifier/lead로, 하위 lead는 coder', () => {
+  const base: HcTerminalDetail = { address: 't1', agent: 'agy', state: 'live', status: 'working' };
+  assert.equal(inferLiveWorkerSlot({ ...base, name: 'neon-r1' })?.slot, 'verifier');
+  assert.equal(inferLiveWorkerSlot({ ...base, name: 'verify-r1' })?.slot, 'verifier');
+  assert.equal(inferLiveWorkerSlot({ ...base, name: 'argon-r1' })?.slot, 'lead');
+  assert.equal(inferLiveWorkerSlot({ ...base, name: 'argon-r1', parent: 't0' })?.slot, 'coder');
+  assert.equal(inferLiveWorkerSlot({ ...base, name: 'carbon-gate1-r1' })?.slot, 'advisor');
+  assert.equal(inferLiveWorkerSlot({ ...base, name: 'fix-rust-verifier-observations' })?.slot, 'coder');
+  // HERDR_ROLE 우선순위 유지(이름보다 앞선다)
+  assert.equal(
+    inferLiveWorkerSlot({ ...base, name: 'lead-x', argv: ['env', 'HERDR_ROLE=verifier', 'pi'] })?.slot,
+    'verifier'
+  );
+});
+
+test('`dg wrap --role` — 무효값은 UsageError(exit 2)로 즉시 실패, 유효값은 그대로 실행', () => {
+  const dgPath = path.join(REPO_ROOT, 'src', 'decision', 'dg.ts');
+  const env = {
+    ...process.env,
+    DGATE_DB_PATH: path.join(os.tmpdir(), `lws-slot-unused-${process.pid}.db`),
+    DECISION_ORCHESTRATOR_DB_PATH: undefined,
+    GEMINI_TRICK_DB_PATH: undefined,
+  };
+  const bad = spawnSync(
+    process.execPath,
+    [dgPath, 'wrap', '--route', 'file_select', '--tool-class', 'file_edit', '--role', 'verifer', '--', '/bin/echo', 'hi'],
+    { env, encoding: 'utf8', timeout: 30_000 }
+  );
+  assert.notEqual(bad.status, 0, '오타 --role은 실패해야 함');
+  assert.match(bad.stderr, /invalid --role "verifer"/);
+
+  const ok = spawnSync(
+    process.execPath,
+    [dgPath, 'wrap', '--route', 'file_select', '--tool-class', 'file_edit', '--role', 'verifier', '--label', 'verifier-t1', '--json', '--', '/bin/echo', 'hi'],
+    { env, encoding: 'utf8', timeout: 30_000 }
+  );
+  assert.equal(ok.status, 0, `유효 --role 실행 stderr=${ok.stderr}`);
 });

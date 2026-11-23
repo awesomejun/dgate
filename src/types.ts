@@ -306,3 +306,69 @@ export type StreamEvent =
   | {
       type: 'reset';
     };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 라이브 워커 슬롯 — TUI 파티션(Lead/Workers/Verifier/Advisor)·`dg wrap --role`·
+// `HERDR_ROLE`·세션명/라벨 접두가 함께 쓰는 단일 어휘. 역할 이름이 곳마다 달라져
+// (`verify` vs `verifier` vs `neon`) verifier가 coder로 오분류되어 Workers 카드에
+// 뜨던 사고를 막기 위해 이 표 하나만 믿는다.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 라이브 워커 슬롯 5종. coder는 라벨로 유도하지 않는다(명시 `--role`/`HERDR_ROLE`만). */
+export const LIVE_WORKER_SLOTS = ['lead', 'explore', 'coder', 'verifier', 'advisor'] as const;
+export type LiveWorkerSlot = (typeof LIVE_WORKER_SLOTS)[number];
+
+/** 슬롯 별칭 — herdr 관문 이름 `carbon`은 advisor 슬롯. */
+const LIVE_WORKER_SLOT_ALIASES: Readonly<Record<string, LiveWorkerSlot>> = { carbon: 'advisor' };
+
+/**
+ * `--role`·`HERDR_ROLE` 값 → 슬롯. 대소문자·공백은 무시하고, 미등값은 null(
+ * 호출자가 라벨 폴백·사용자 오류 중 무엇을 할지 정한다).
+ */
+export function parseLiveWorkerSlot(value: string | null | undefined): LiveWorkerSlot | null {
+  if (!value) return null;
+  const v = value.trim().toLowerCase();
+  if ((LIVE_WORKER_SLOTS as readonly string[]).includes(v)) return v as LiveWorkerSlot;
+  return LIVE_WORKER_SLOT_ALIASES[v] ?? null;
+}
+
+/**
+ * 세션명·`dg wrap --label`의 역할 접수 어휘 — `<역할>-<주제>` 규약(`verify-stage1`·
+ * `research-hcdesign`·`advisor-g3`)과 herdr-quad-launch의 agy 세션명(`argon`/`carbon`/`neon`)을 포함한다.
+ * lead는 세션명으로만 의미가 있고(라벨 `lead-…`로 wrap 워커가 리드가 되지는 않는다) 나머지 4종을 라벨에서 유도한다.
+ */
+const SLOT_NAME_PREFIXES: Readonly<Record<LiveWorkerSlot, readonly string[]>> = {
+  lead: ['lead', 'argon'],
+  verifier: ['verifier', 'verify', 'neon', '검증'],
+  explore: ['explore', 'exp', 'research', '탐색', '조사'],
+  advisor: ['advisor', 'carbon', '자문'],
+  coder: [],
+};
+
+/**
+ * 이름(세션명·라벨)의 **접두**로 슬롯을 판정한다. 어느 역할 접두도 아니면 null.
+ * - ASCII 접두는 뒤에 `-`·`_`·숫자·끝이 와야 한다(`expandex`≠exp, `verifier`≠verify).
+ * - 한글 접두는 구분자 없이 붙여도 인정한다(`검증-g1`·`검증g1`).
+ * - `w-` 접두는 hc 세션명 규약상 벗겨고 본다.
+ * 부분 문자열 판정을 쓰지 않는다 — `fix-rust-verifier-observations`처럼 **주제에 역할어가
+ * 들어간 coder 라벨**을 verifier로 오분류하면 Workers 카드에서 사라지고 검증 패널을 오염시킨다.
+ */
+export function inferLiveWorkerSlotFromName(name: string | null | undefined): LiveWorkerSlot | null {
+  if (!name) return null;
+  const n = name.trim().toLowerCase().replace(/^w-/, '');
+  if (n.length === 0) return null;
+  for (const [slot, prefixes] of Object.entries(SLOT_NAME_PREFIXES)) {
+    for (const p of prefixes) {
+      if (isAsciiPrefix(p)) {
+        if (new RegExp(`^${p}(?:[-_\\d]|$)`).test(n)) return slot as LiveWorkerSlot;
+      } else if (n.startsWith(p)) {
+        return slot as LiveWorkerSlot;
+      }
+    }
+  }
+  return null;
+}
+
+function isAsciiPrefix(p: string): boolean {
+  return /^[a-z]+$/.test(p);
+}

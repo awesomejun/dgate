@@ -79,6 +79,7 @@ import {
   type DecisionApiMode,
 } from './adapter.ts';
 import { buildSanitizedChildEnv, redactSecrets } from './redact.ts';
+import { parseLiveWorkerSlot } from '../types.ts';
 import {
   formatReportMarkdown,
   generateRuleCandidateReport,
@@ -1055,6 +1056,14 @@ async function cmdWrap(args: ParsedArgs, json: boolean): Promise<number> {
   const identity = resolveIdentity(optionalFlag(args, 'project'));
   const command = args.rest;
   if (command.length === 0) throw new UsageError('missing child command after "--"');
+  // 역할은 TUI 카드 파티션용 메타데이터(통계 tool_class와 분리) — 오타가 라벨 추측으로 조용히
+  // 넘어가 잘못된 패널에 놓이는 것보다 여기서 바로 실패시킨다. 값 해석은 공유 어휘(types.ts)를 쓴다.
+  const roleOpt = optionalFlag(args, 'role');
+  if (roleOpt !== undefined && parseLiveWorkerSlot(roleOpt) === null) {
+    throw new UsageError(
+      `invalid --role "${roleOpt}" (allowed: lead|explore|coder|verifier|advisor)`
+    );
+  }
 
   // §2.5 출력·산출물 계약 + 감시·펜스 플래그
   const requireArtifact = optionalFlag(args, 'require-artifact');
@@ -1590,7 +1599,7 @@ const HELP = `dg — decision gate CLI (plan-r2.1 §4.7)
   dg attempt --fork <id> [--bump-gen] [--json]
   dg retro --fork <id> [--out <path>] [--json]
   dg settle-orphans [--json]
-  dg wrap --route <r> --tool-class <c> [--fork <id>] [--source wrap] [--require-artifact <path>] [--require-nonempty] [--require-stdout-nonempty] [--stall-ms 120000] [--max-ms 1200000] [--heartbeat-ms 60000] [--kill-grace-ms 1000] [--expected-gen <n>] [--expected-attempt <n>] [--sanitize-env] [--allow-env K1,K2] [--json] -- <cmd…>
+  dg wrap --route <r> --tool-class <c> [--fork <id>] [--role <lead|explore|coder|verifier|advisor>] [--label <role>-<topic>] [--source wrap] [--require-artifact <path>] [--require-nonempty] [--require-stdout-nonempty] [--stall-ms 120000] [--max-ms 1200000] [--heartbeat-ms 60000] [--kill-grace-ms 1000] [--expected-gen <n>] [--expected-attempt <n>] [--sanitize-env] [--allow-env K1,K2] [--json] -- <cmd…>
   dg compact [--max-events 50000] [--days 30] [--json]
   dg stats [--cost] [--timing] [--project <dir>] [--fork <id>] [--days 14] [--db <path>] [--json]
   dg checkpoint create --worktree <path> --run-id <id> [--repo <dir>] [--name <wtName>] [--checkpoint-root <dir>] [--json]

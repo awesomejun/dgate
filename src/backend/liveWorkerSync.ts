@@ -33,7 +33,12 @@ import {
   resolveRosterProfile,
 } from '../decision/roster.ts';
 import { formatRoleBadge, rosterLabelsFromProfile } from '../state/store.ts';
-import type { RosterDisplayLabels } from '../types.ts';
+import {
+  inferLiveWorkerSlotFromName,
+  parseLiveWorkerSlot,
+  type LiveWorkerSlot,
+  type RosterDisplayLabels,
+} from '../types.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -68,8 +73,8 @@ export interface HcTerminalDetail extends HcTerminalSummary {
   foregroundArgv?: string[];
 }
 
-/** 역할 슬롯 — roster RoleSlot과 동일한 5종. */
-export type LiveWorkerSlot = 'lead' | 'explore' | 'coder' | 'verifier' | 'advisor';
+/** 역할 슬롯 — `src/types.ts`의 공유 어휘(5종)를 재노출. TUI 파티션·`dg wrap --role`·`HERDR_ROLE`이 같은 표를 쓴다. */
+export type { LiveWorkerSlot };
 
 /** 현재 실행 중인 워커 1개의 TUI 표시 정보. */
 export interface LiveWorkerInfo {
@@ -803,7 +808,8 @@ export function extractLastActivityLine(
 
 // ---------- 슬롯·모델 추론 ----------
 
-const HERDR_ROLE_RE = /^HERDR_ROLE=(lead|explore|verifier|advisor|carbon|coder)$/i;
+/** `HERDR_ROLE=<값>` 토큰 — 값 → 슬롯 해석은 `parseLiveWorkerSlot`(공유 어휘)이 담당한다. */
+const HERDR_ROLE_RE = /^HERDR_ROLE=([^=\s]+)$/i;
 const WORKER_CLI_SET = new Set([
   'pi',
   'devin',
@@ -939,18 +945,21 @@ export function inferLiveWorkerSlot(
     if (typeof token !== 'string') continue;
     const m = token.match(HERDR_ROLE_RE);
     if (m) {
-      const role = m[1]!.toLowerCase();
-      slot = role === 'carbon' ? 'advisor' : (role as LiveWorkerSlot);
-      roleFromArgv = true;
-      break;
+      const parsed = parseLiveWorkerSlot(m[1]);
+      if (parsed) {
+        slot = parsed;
+        roleFromArgv = true;
+        break;
+      }
     }
   }
+  // 세션명 접두(verify-/verifier-/neon-/exp-/carbon-/lead-/argon-) — 공유 접두 테이블로 판정.
+  // 리드는 부모 없는 최상위 세션일 때만(하위 세션은 coder). 어느 접두도 아니면 coder.
   const name = detail.name ?? '';
   if (!roleFromArgv && name.length > 0) {
-    if (/^(?:w-)?(?:verify|verifier)(?:[-_\d]|$)/i.test(name)) slot = 'verifier';
-    else if (/^(?:w-)?(?:exp-|explore(?:[-_\d]|$))/i.test(name)) slot = 'explore';
-    else if (/^(?:w-)?(?:advisor|carbon)(?:[-_\d]|$)/i.test(name)) slot = 'advisor';
-    else if (/^lead(?:[-_\d]|$)/i.test(name) && !detail.parent) slot = 'lead';
+    const byName = inferLiveWorkerSlotFromName(name);
+    if (byName === 'lead') slot = detail.parent ? 'coder' : 'lead';
+    else if (byName) slot = byName;
     else slot = 'coder';
   }
 
@@ -1023,6 +1032,8 @@ export interface WrapProc {
   effort: string | null;
   /** 표시명 우선순위 1순위 `--label` 원문. */
   label: string | null;
+  /** 명시적 역할 `--role <slot>`(최우선) — 미지정·무효값이면 null(라벨 접두로 폴백). */
+  role: LiveWorkerSlot | null;
   /** 원본 `--project` 경로 — 고아 wrap 스코프 판정·cwd 폴백용(표시명은 `project`). */
   projectPath: string | null;
   project: string | null;
@@ -1106,6 +1117,7 @@ export function findWrapProcesses(rows: readonly PsRow[]): WrapProc[] {
       model,
       effort,
       label,
+      role: parseLiveWorkerSlot(flagValue(tokens, '--role')),
       projectPath,
       project: label ?? (projectPath ? tokenBase(projectPath.replace(/[\\/]+$/, '')) || null : null),
       route: flagValue(tokens, '--route'),
@@ -1153,11 +1165,16 @@ export function readWrapOutputTail(wrapPid: number, logDir = defaultWrapLogDir()
 }
 
 /** wrap 워커 슬롯 추론 — label(--label) 우선, 없으면 route 근사. 역할 카드 매핑의 근거. */
+/**
+ * wrap 워커 슬롯 — ① 명시 `--role`(최우선) ② 라벨/프로젝트명 **접두**(`inferLiveWorkerSlotFromName`)
+ * ③ 라벨 없는 file_select → explore ④ coder. 부분 문자열 판정은 쓰지 않는다: 주제에 역할어가
+ * 들어간 coder 라벨(`fix-rust-verifier-observations`)을 verifier로 보내면 Workers 카드에서 사라지고
+ * 검증 패널을 오염시킨다. 라벨만으로 리드가 되지는 않는다(wrap 워커는 리드가 아니다) — 명시 `--role lead`만 인정.
+ */
 function inferWrapSlot(p: WrapProc): LiveWorkerSlot {
-  const label = (p.project ?? '').toLowerCase();
-  if (/(verify|검증)/.test(label)) return 'verifier';
-  if (/(research|explore|조사|탐색)/.test(label)) return 'explore';
-  if (/(advisor|자문)/.test(label)) return 'advisor';
+  if (p.role) return p.role;
+  const byLabel = inferLiveWorkerSlotFromName(p.project);
+  if (byLabel && byLabel !== 'lead') return byLabel;
   if (!p.project && p.route === 'file_select') return 'explore';
   return 'coder';
 }

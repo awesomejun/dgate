@@ -115,8 +115,8 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
      --fork <FORK_ID> --project <TARGET_REPO> --require-stdout-nonempty -- <CMD...>
    ```
    - **고아 실행 금지**: 워커를 `nohup`/`disown`으로 분리하지 않는다 — `hc run --bg` 또는 부모 세션에 매인 `dg wrap`으로 띄워 부모 PID 체인(TUI 소유 매핑)을 유지한다.
-   - **워커 label 필수**: `dg wrap`에는 항상 `--label <역할>-<주제>`(예: `verify-stage1`·`research-hcdesign`·`advisor-g3`)를 붙인다 — TUI 역할 카드 배치·이름·텔레메트리 매핑의 근거(없으면 coder/wrap-<pid> 폴백).
-   - **tool_class canonical**: `--tool-class`는 5종만 쓴다(`file_read|code_search|file_edit|shell_exec|swarm_dispatch`) — 역할명(coder·verifier 등) 금지, 역할은 `--label`이 담당한다(통계 파편화 방지).
+   - **워커 역할·label 필수**: `dg wrap`에는 역할을 `--role <lead|explore|coder|verifier|advisor>`로 **명시**한다(오타는 즉시 실패). 표시명 `--label <역할>-<주제>`(예: `verifier-stage1`·`research-hcdesign`·`advisor-g3`)도 함께 붙인다 — TUI 역할 카드 배치·이름·텔레메트리 매핑의 근거. `--role`이 없으면 라벨 **앞부분의 접두**(`verifier`/`verify`/`neon`/`검증`, `explore`/`exp`/`research`/`탐색`/`조사`, `advisor`/`carbon`/`자문`)로 판정하므로 역할어를 주제 가운데에 쓰지 않는다(`fix-rust-verifier-observations`는 coder). 둘 다 없으면 coder/`wrap-<pid>` 폴백.
+   - **tool_class canonical**: `--tool-class`는 5종만 쓴다(`file_read|code_search|file_edit|shell_exec|swarm_dispatch`) — 역할명(coder·verifier 등) 금지, 역할은 `--role`(보조로 `--label` 접두)이 담당한다(통계 파편화 방지).
    - **대기·보고**: 워커 대기는 `hc wait`(sleep·폴링 금지), 워커 지시문에는 완료 보고 `hc send $HC_TERMINAL_ID`를 명시한다.
    - **장기 자율 실행**: 무인 루프는 done-means 술어·탈출구·결정 로그를 갖춘다 — `docs/autonomous-run-contract.md` 계약 따름.
    - **검증 역귀속**: 독립 검증 판정은 구조화 verdict 파일(`.herdr/verify/<fork_id>-verdict.json`)로 남기고 `dg backprop --verdict-file <path>`로 원본 fork에 반영한다(pass/rework/fail/human) — 검증 결과가 다음 배차 통계에 귀속된다.
