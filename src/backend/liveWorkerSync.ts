@@ -87,6 +87,8 @@ export interface LiveWorkerInfo {
   repoTag: string;
   /** `hc read`에서 뽑은 정화된 1줄 활동 (없으면 간결 폴백) */
   activity: string;
+  /** pid:N(wrap) 워커를 소유한 hc 터미널 주소 — 터미널 상세 뷰가 이 터미널을 보여준다. */
+  ownerAddress?: string;
   /** `hc` 터미널 상태('working'·'done' 등) — 카드 완료 표시·완료 로그 판정용(선택). */
   status?: string | null;
   /** `hc ls --json` 실측 턴 카운터 — 카드 텔레메트리 라인에 그대로 노출. */
@@ -1119,7 +1121,11 @@ export function defaultWrapLogDir(): string {
 }
 
 /** raw 터미널/로그 문자열에서 의미 있는 최근 출력 줄(최대 maxLines)을 추출한다. */
-export function extractRecentOutputLines(raw: string | undefined, maxLines = 12): string[] {
+export function extractRecentOutputLines(
+  raw: string | undefined,
+  maxLines = 12,
+  maxChars = 140
+): string[] {
   if (!raw) return [];
   const cleaned = stripAnsi(raw).replace(/\r/g, '');
   const out: string[] = [];
@@ -1128,7 +1134,7 @@ export function extractRecentOutputLines(raw: string | undefined, maxLines = 12)
     if (!trimmed) continue;
     if (trimmed.startsWith('[hc]')) continue;
     if (/^[\s─━═│┃┌┐└┘├┤┬┴┼╭╮╰╯·•⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]+$/.test(trimmed)) continue;
-    out.push(redactSecrets(trimmed).slice(0, 140));
+    out.push(redactSecrets(trimmed).slice(0, maxChars));
   }
   return out.length > maxLines ? out.slice(out.length - maxLines) : out;
 }
@@ -1171,6 +1177,7 @@ export function wrapProcToWorker(
     shortModel,
     modelName: p.model ?? p.cli,
     address: `pid:${p.wrapPid}`,
+    ownerAddress: parent.address,
     name: p.project ?? `wrap-${p.wrapPid}`,
     cwd: parent.cwd ?? null,
     repoTag: extractRepoTag(parent.cwd),

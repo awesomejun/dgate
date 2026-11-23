@@ -329,6 +329,11 @@ export function createInitialState(mode: RunMode = 'demo'): AppState {
     statusFlashUntil: 0,
     modal: 'none',
     compactTab: 0,
+
+    cardSelect: 0,
+    leadAddress: null,
+    terminalView: null,
+    terminalOutput: [],
   };
 }
 

@@ -14,7 +14,8 @@ export type ModalKind =
   | 'neon'
   | 'decision'
   | 'logs'
-  | 'response';
+  | 'response'
+  | 'terminal';
 
 export type CompactTab = 0 | 1 | 2 | 3; // 0: 파이프라인, 1: 스웜, 2: Advisor, 3: 세션 기록
 
@@ -66,6 +67,24 @@ export interface SwarmCard {
   address?: string;
   /** 워커의 최근 출력 줄(`dg wrap` 실시간 로그 또는 `hc read` 꼬리, 시크릿 리덕션 완료). */
   recentOutput?: string[];
+  /** pid:N(wrap) 워커를 소유한 hc 터미널 주소 — 터미널 상세 뷰가 이 터미널을 보여준다. */
+  ownerAddress?: string;
+}
+
+/** 터미널 상세 뷰 대상 — Enter로 연 역할 카드 1개의 터미널 식별 정보. */
+export interface TerminalViewTarget {
+  /** 화면 식별용 카드 이름(예: '[repo] w-pi-x · pi:glm-5.3') */
+  name: string;
+  /** hc 터미널 주소 — 일반 워커는 자기 주소, pid:N wrap 워커는 소유 hc 주소. */
+  address: string;
+  /** 원본 카드 주소(표시용 — pid:1234 등). address와 다를 수 있다. */
+  originAddress: string;
+  /** 모델·cli 요약 라인 */
+  model: string;
+  /** 카드 상태 라벨 */
+  status: string;
+  /** 출력 소스 — 'hc'면 `hc read` 라이브 폴, 'wrap-log'면 wrap 로그 파일 꼬리 폴백. */
+  source: 'hc' | 'wrap-log';
 }
 
 export interface SwarmWorker {
@@ -204,6 +223,16 @@ export interface AppState {
   statusFlashUntil: number;
   modal: ModalKind;
   compactTab: CompactTab;
+
+  // ---- 터미널 상세 뷰 (Enter: 터미널 보기) ----
+  /** Workers 카드 선택 인덱스 — swarm 포커스에서 ←/→·숫자로 이동, Enter로 상세 뷰 오픈. */
+  cardSelect: number;
+  /** 관측 중인 리드 hc 터미널 주소 — Lead 카드 Enter로 터미널 상세 뷰를 열 때 사용. */
+  leadAddress: string | null;
+  /** 터미널 상세 뷰(modal==='terminal') 대상 카드 식별 정보. */
+  terminalView: TerminalViewTarget | null;
+  /** 터미널 상세 뷰 본문 라인 — `hc read`/wrap 로그 꼬리를 ~1초 주기로 갱신. */
+  terminalOutput: string[];
 }
 
 /**

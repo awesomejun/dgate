@@ -1,8 +1,10 @@
 #!/usr/bin/env node
+import { execFile, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as tty from 'node:tty';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import {
   AgentRunner,
   type BackendPreference,
@@ -14,6 +16,9 @@ import {
 } from './backend/transcriptMapper.ts';
 import {
   createLiveRosterSyncer,
+  defaultWrapLogDir,
+  extractRecentOutputLines,
+  readWrapOutputTail,
   type LiveRosterSyncer,
   type LiveWorkerInfo,
   type MergedLiveRoster,
@@ -41,7 +46,16 @@ import {
   attachStdinStream,
   parseJsonLine,
 } from './state/streamAdapter.ts';
-import type { AppState, CompactTab, EffortLevel, ModalKind, QuadRole, RunMode } from './types.ts';
+import type {
+  AppState,
+  CompactTab,
+  EffortLevel,
+  ModalKind,
+  QuadRole,
+  RunMode,
+  SwarmCard,
+  TerminalViewTarget,
+} from './types.ts';
 import { computeLayout } from './ui/layout.ts';
 import { renderFrame } from './ui/renderApp.ts';
 import { renderQuadRoleFrame } from './ui/renderQuadRole.ts';
@@ -276,7 +290,8 @@ function parseArgs(argv: string[]): CliOptions {
           m === 'neon' ||
           m === 'decision' ||
           m === 'logs' ||
-          m === 'response'
+          m === 'response' ||
+          m === 'terminal'
         ) {
           opts.modalOverride = m;
         }
@@ -368,6 +383,47 @@ export function isQuitKey(ch: string): boolean {
   return ch === 'q' || ch === 'Q' || ch === 'ㅂ';
 }
 
+/**
+ * 역할 카드 1장에서 터미널 상세 뷰 대상을 해석한다(순수 함수).
+ * - 일반 hc 워커(address가 pid:로 시작하지 않음) → 자기 주소를 `hc read`로 폴.
+ * - pid:N(`dg wrap`) 워커 → 소유 hc 터미널(ownerAddress)을 추적해 그 터미널을 폴.
+ *   소유 세션이 없으면 wrap 로그 파일 꼬리로 폴백(attach 불가).
+ */
+export function resolveTerminalTarget(card: SwarmCard): TerminalViewTarget {
+  const cardAddr = card.address ?? '';
+  const isWrapPid = /^pid:\d+$/.test(cardAddr);
+  const owner = card.ownerAddress;
+  if (isWrapPid && owner) {
+    return {
+      name: card.name,
+      address: owner,
+      originAddress: cardAddr,
+      model: card.model,
+      status: card.status,
+      source: 'hc',
+    };
+  }
+  return {
+    name: card.name,
+    address: cardAddr || '(주소 없음)',
+    originAddress: cardAddr,
+    model: card.model,
+    status: card.status,
+    source: isWrapPid ? 'wrap-log' : 'hc',
+  };
+}
+
+/** 해석된 대상으로 터미널 상세 뷰 모달을 연다 — 카드 recentOutput을 먼저 띄운 후 라이브 폴(~1초)로 교체된다. */
+export function openTerminalView(
+  state: AppState,
+  target: TerminalViewTarget,
+  initialLines?: string[]
+): void {
+  state.terminalView = target;
+  state.terminalOutput = initialLines ?? [];
+  state.modal = 'terminal';
+}
+
 export interface KeyHandlerDeps {
   quitApp: () => void;
   executePrompt: (input: string) => void;
@@ -377,6 +433,8 @@ export interface KeyHandlerDeps {
   filterShortcut: (ch: string) => void;
   /** 데모 타임라인 동기화 등 일시정지 토글 부수효과(선택) */
   onPauseToggle?: (paused: boolean) => void;
+  /** 터미널 상세 뷰에서 'a'키 — hc attach 실행(메인 루프가 주입). 미주입 시 안내문 폴백. */
+  onTerminalAttach?: (target: TerminalViewTarget) => void;
 }
 
 /**
@@ -436,6 +494,22 @@ export function applyKeyInput(
       state.modal = 'none';
       return;
     }
+    if (state.modal === 'terminal' && state.terminalView) {
+      // a: 실제 attach — 메인 루프가 주입한 실행기가 있으면 hc attach, 없으면 안내문.
+      if (ev.kind === 'char' && (ev.value === 'a' || ev.value === 'A')) {
+        const target = state.terminalView;
+        if (target.source === 'hc' && deps.onTerminalAttach) {
+          deps.onTerminalAttach(target);
+        } else {
+          flashStatus(
+            state,
+            `attach: hc attach ${target.address} (직접 실행 바람 · 이 카드는 로그 폴백 전용)`,
+            6000
+          );
+        }
+        return;
+      }
+    }
     if (state.modal === 'logs') {
       const filteredLen = deps.filteredLogCount();
       if (ev.kind === 'arrow' && ev.dir === 'up') {
@@ -483,8 +557,17 @@ export function applyKeyInput(
         break;
       case 'main':
         if (readOnly) {
-          // 읽기전용 모드에서 Enter가 입력 모드로 빠지면 q/Tab이 모두 갇히는 버그 방지.
-          if (state.latestResponse.trim()) {
+          // 관측 중인 리드 hc 터미널이 있으면 Enter로 터미널 상세 뷰 우선 오픈.
+          if (state.leadAddress) {
+            openTerminalView(state, {
+              name: `Lead · ${state.rosterLabels.lead}`,
+              address: state.leadAddress,
+              originAddress: state.leadAddress,
+              model: state.leadTelemetry ?? state.modelName,
+              status: state.phase,
+              source: 'hc',
+            });
+          } else if (state.latestResponse.trim()) {
             state.modal = 'response';
           } else {
             flashStatus(state, '읽기전용 모드입니다 (r: 최신 응답, /: 필터)', 3000);
@@ -499,9 +582,17 @@ export function applyKeyInput(
       case 'decision':
         state.modal = 'decision';
         break;
-      case 'swarm':
-        state.modal = 'swarm';
+      case 'swarm': {
+        // 라이브 워커 카드가 있으면 선택 카드의 터미널 상세 뷰를 우선 오픈(Enter: 터미널 보기).
+        const cards = state.liveWorkers ?? [];
+        const sel = state.liveWorkers ? cards[Math.min(state.cardSelect, cards.length - 1)] : undefined;
+        if (sel) {
+          openTerminalView(state, resolveTerminalTarget(sel), sel.recentOutput);
+        } else {
+          state.modal = 'swarm';
+        }
         break;
+      }
       case 'logs':
         state.modal = 'logs';
         break;
@@ -510,6 +601,17 @@ export function applyKeyInput(
   }
 
   if (ev.kind === 'arrow') {
+    // Workers 포커스 + 라이브 카드가 있을 땐 ←/→로 카드 선택 이동(Enter로 상세 뷰 오픈).
+    // 데모 카드(state.cards)에는 주소가 없으므로 라이브 카드가 있는 경우에만 적용한다.
+    const liveCards = state.liveWorkers;
+    if (ev.dir === 'left' && state.focus === 'swarm' && liveCards && liveCards.length > 1) {
+      state.cardSelect = (state.cardSelect - 1 + liveCards.length) % liveCards.length;
+      return;
+    }
+    if (ev.dir === 'right' && state.focus === 'swarm' && liveCards && liveCards.length > 1) {
+      state.cardSelect = (state.cardSelect + 1) % liveCards.length;
+      return;
+    }
     if (ev.dir === 'up') {
       const maxOff = Math.max(0, deps.filteredLogCount() - 3);
       state.logScrollOffset = Math.min(maxOff, state.logScrollOffset + 1);
@@ -595,6 +697,23 @@ export function applyKeyInput(
     // Compact 레이아웃일 경우 1~4는 탭 전환을 겸함
     if (deps.layoutKind() === 'compact' && (ch === '1' || ch === '2' || ch === '3' || ch === '4')) {
       state.compactTab = (Number(ch) - 1) as import('./types.ts').CompactTab;
+      return;
+    }
+
+    // Workers 포커스 + 라이브 카드가 있을 땐 숫자 1~9로 카드 직접 선택(Enter: 터미널 보기).
+    // compact에선 1~4 탭 전환과 충돌하므로 ←/→로만 선택한다.
+    const liveSelCards = state.liveWorkers;
+    if (
+      state.focus === 'swarm' &&
+      liveSelCards &&
+      liveSelCards.length > 0 &&
+      ch >= '1' &&
+      ch <= '9' &&
+      Number(ch) <= liveSelCards.length &&
+      deps.layoutKind() !== 'compact'
+    ) {
+      state.cardSelect = Number(ch) - 1;
+      flashStatus(state, `워커 카드 ${Number(ch)} 선택 — Enter: 터미널 보기`);
       return;
     }
 
@@ -978,7 +1097,10 @@ function main(): void {
     process.exit(0);
   };
 
+  // attach 중(자식 프로세스가 터미널 소유)에는 렌더 금지 — 복귀 후 invalidate로 재개
+  let attachDepth = 0;
   const renderNow = () => {
+    if (attachDepth > 0) return;
     const { cols: rawCols, rows: rawRows } = screen.getSize();
     const cols = opts.colsOverride ?? rawCols;
     const rows = opts.rowsOverride ?? rawRows;
@@ -1122,6 +1244,9 @@ function main(): void {
     // GPUI 파티션 계약 — Workers 카드에는 종속(explore/coder) 워커만. Lead/Verifier/Advisor는
     // applyLiveRolePanels이 갱신하는 각 역할 패널에만 남고 카드로 새지 않는다.
     const subWorkers = filterSubordinateWorkers(merged.workers);
+    // 리드 hc 터미널 주소 추적 — Lead 카드 Enter(터미널 상세 뷰) 연결용.
+    const leadWorker = merged.workers.find((w) => w.slot === 'lead');
+    state.leadAddress = leadWorker?.address ?? null;
     state.liveWorkers = subWorkers.map((w) => {
       const basis = elapsedByAddr.get(w.address)!;
       const startedAtMs = basis.startedAtMs;
@@ -1138,6 +1263,7 @@ function main(): void {
         turn: w.turn,
         address: w.address,
         recentOutput: w.recentOutput,
+        ownerAddress: w.ownerAddress,
       };
     });
     state.swarmActive = subWorkers.filter(isActivelyRunningWorker).length;
@@ -1204,6 +1330,70 @@ function main(): void {
 
     // 실제 변경 시에만 재렌더 (매 틱 방송 중복 억제)
     if (liveRosterStateSignature() !== prevSig) renderNow();
+  };
+
+  // ---- 터미널 상세 뷰(modal==='terminal') 라이브 폴 — ~1초 주기 `hc read --lines 60` ----
+  const execFileAsync = promisify(execFile);
+  let terminalPollInFlight = false;
+  const refreshTerminalView = async (): Promise<void> => {
+    const target = state.terminalView;
+    if (state.modal !== 'terminal' || !target || terminalPollInFlight || attachDepth > 0) return;
+    terminalPollInFlight = true;
+    try {
+      let lines: string[] | null = null;
+      if (target.source === 'hc') {
+        try {
+          const { stdout } = await execFileAsync('hc', ['read', target.address, '--lines', '60'], {
+            timeout: 2000,
+            maxBuffer: 4 * 1024 * 1024,
+          });
+          lines = extractRecentOutputLines(stdout, 60, 400);
+        } catch {
+          // hc read 실패 시 직전 화면 유지 — 모달이 비지 않도록 null 유지
+        }
+      } else {
+        const m = /^pid:(\d+)$/.exec(target.originAddress ?? '');
+        if (m) {
+          lines = readWrapOutputTail(Number(m[1]), defaultWrapLogDir(), 60);
+        }
+      }
+      if (lines && lines.length > 0) {
+        state.terminalOutput = lines;
+        renderNow();
+      }
+    } finally {
+      terminalPollInFlight = false;
+    }
+  };
+  setInterval(() => {
+    void refreshTerminalView();
+  }, 1000);
+
+  // ---- 터미널 상세 뷰 'a'키 — 실제 hc attach (stdio inherit, 자식 종료/ctrl+\ 후 TUI 재개) ----
+  const runHcAttach = (target: TerminalViewTarget): void => {
+    if (attachDepth > 0) return;
+    attachDepth += 1;
+    // TUI 화면 해제 — 자식이 터미널(raw mode·alt screen)을 직접 소유한다.
+    screen.leave();
+    const child = spawn('hc', ['attach', target.address], { stdio: 'inherit' });
+    const resumeTui = () => {
+      attachDepth = Math.max(0, attachDepth - 1);
+      screen.enter(stdinIsTty);
+      screen.invalidate();
+      renderNow();
+      void refreshTerminalView();
+    };
+    child.on('error', () => {
+      // hc 부재·실행 실패 — 안내문으로 폴백(복사 가능한 명령)
+      if (attachDepth > 0) {
+        attachDepth -= 1;
+        screen.enter(stdinIsTty);
+        screen.invalidate();
+      }
+      flashStatus(state, `attach 실패: 직접 실행 바람 — hc attach ${target.address}`, 6000);
+      renderNow();
+    });
+    child.on('exit', resumeTui);
   };
 
   // 실행 중 라이브 워커의 경과 초 갱신 — 폴을 기다리지 않고 매 틱 MM:SS를 살아 있게
@@ -1421,6 +1611,7 @@ function main(): void {
       },
       seekTo,
       filterShortcut: applyFilterShortcut,
+      onTerminalAttach: runHcAttach,
       onPauseToggle: (paused) => {
         if (state.mode !== 'demo') return;
         if (paused) {

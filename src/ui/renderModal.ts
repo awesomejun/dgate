@@ -53,6 +53,9 @@ export function renderModalOverlay(buf: CellBuffer, state: AppState): void {
     case 'response':
       renderResponseModal(buf, rect, state);
       break;
+    case 'terminal':
+      renderTerminalModal(buf, rect, state);
+      break;
   }
 }
 
@@ -91,6 +94,8 @@ function renderHelpModal(buf: CellBuffer, rect: Rect): void {
   const keys: ReadonlyArray<readonly [string, string]> = [
     ['Tab / Shift+Tab', '칸 포커스 순환 (Advisor → Lead → Verifier → Decision Gate → Workers → 기록)'],
     ['Enter', '현재 포커스된 칸의 자세한 내용 모달 열기'],
+    ['Enter: 터미널 보기', 'Workers 카드·Lead 카드에서 실제 CLI 터미널 출력 라이브 보기 (a: 직접 attach)'],
+    ['←/→ · 1~9 (Workers)', '워커 카드 선택 이동/직접 선택 — Enter로 해당 터미널 상세 뷰 오픈'],
     ['r / s / n / c / d', '응답(r) · 스웜(s) · Verifier(n) · Advisor(c) · 분기(d) · 로그(l) 모달 열기'],
     ['1~5 / 0', '로그 필터 (1:Lead 2:Workers 3:Decision 4:Verifier 5:Advisor 0:전체)'],
     ['↑ / ↓', '세션 기록 / 응답 전문 스크롤 탐색'],
@@ -105,7 +110,7 @@ function renderHelpModal(buf: CellBuffer, rect: Rect): void {
       ix,
       cy++,
       [
-        { text: padRightWidth(k, 19), fg: THEME.green, bg: THEME.bgModal, bold: true },
+        { text: padRightWidth(k, 24), fg: THEME.green, bg: THEME.bgModal, bold: true },
         { text: desc, fg: THEME.fgSoft, bg: THEME.bgModal },
       ],
       iw
@@ -284,6 +289,98 @@ function renderSwarmModal(buf: CellBuffer, rect: Rect, state: AppState): void {
       }
     }
   }
+}
+
+/**
+ * 터미널 상세 뷰 모달 — 역할 카드(리드·워커) Enter로 오픈.
+ * 헤더: 주소(·원본 pid 주소) · 모델 · 상태 · 소스 배지.
+ * 본문: `hc read <addr> --lines 60`(≈1초 폴) 또는 wrap 로그 꼬리(state.terminalOutput).
+ * 하단: a(attach) 안내 — hc 소스일 때만 실제 attach 가능.
+ */
+function renderTerminalModal(buf: CellBuffer, rect: Rect, state: AppState): void {
+  const target = state.terminalView;
+  buf.drawBox(rect, {
+    style: 'double',
+    borderColor: THEME.blue,
+    fillBg: THEME.bgModal,
+    title: `터미널 · ${truncateWidth(target?.name ?? '대상 없음', 30, '…')}`,
+    titleColor: THEME.blue,
+    rightLabel: 'Esc 닫기',
+    rightLabelColor: THEME.muted,
+    boldBorder: true,
+  });
+
+  const ix = rect.x + 3;
+  const iw = rect.w - 6;
+  let cy = rect.y + 2;
+
+  if (!target) {
+    buf.writeText(ix, cy, '대상 터미널 정보가 없습니다 (이미 종료된 카드일 수 있음)', THEME.muted, THEME.bgModal, false, iw);
+    return;
+  }
+
+  const srcBadge =
+    target.source === 'hc' ? 'hc read 라이브' : 'wrap 로그 폴백';
+  buf.writeSegments(
+    ix,
+    cy++,
+    [
+      { text: '주소 ', fg: THEME.muted, bg: THEME.bgModal },
+      { text: truncateWidth(target.address, 34, '…'), fg: THEME.fg, bg: THEME.bgModal, bold: true },
+      { text: ` · ${srcBadge}`, fg: THEME.blue, bg: THEME.bgModal },
+    ],
+    iw
+  );
+  if (target.originAddress && target.originAddress !== target.address) {
+    buf.writeText(
+      ix,
+      cy++,
+      `카드 주소 ${target.originAddress} → 소유 hc 터미널 표시 중`,
+      THEME.muted,
+      THEME.bgModal,
+      false,
+      iw
+    );
+  }
+  buf.writeSegments(
+    ix,
+    cy++,
+    [
+      { text: '모델 ', fg: THEME.muted, bg: THEME.bgModal },
+      { text: truncateWidth(target.model || '-', 44, '…'), fg: THEME.fgSoft, bg: THEME.bgModal },
+      { text: '  · 상태 ', fg: THEME.muted, bg: THEME.bgModal },
+      { text: truncateWidth(target.status || '-', 20, '…'), fg: THEME.fgSoft, bg: THEME.bgModal },
+    ],
+    iw
+  );
+  cy++;
+
+  const bodyRows = rect.y + rect.h - 2 - cy;
+  const lines = state.terminalOutput ?? [];
+  if (lines.length === 0) {
+    buf.writeText(
+      ix,
+      cy,
+      target.source === 'hc' ? '출력 대기 중… (hc read 폴)' : '출력 대기 중… (wrap 로그 대기)',
+      THEME.muted,
+      THEME.bgModal,
+      false,
+      iw
+    );
+  }
+  const visible = lines.slice(Math.max(0, lines.length - bodyRows));
+  for (const line of visible) {
+    if (cy >= rect.y + rect.h - 2) break;
+    buf.writeText(ix, cy++, truncateWidth(line, iw, '…'), THEME.fgSoft, THEME.bgModal, false, iw);
+  }
+
+  // 하단 안내 — hc 소스만 실제 attach 가능(wrap 폴백은 명령문 안내)
+  const footY = rect.y + rect.h - 1;
+  const foot =
+    target.source === 'hc'
+      ? ` a: 직접 attach (hc attach ${truncateWidth(target.address, 24, '…')}) · Esc: 닫기 `
+      : ` attach 불가(wrap 폴백) — 명령: hc attach ${truncateWidth(target.address, 24, '…')} · Esc: 닫기 `;
+  buf.writeText(ix, footY, foot, THEME.muted, THEME.bgModal, false, iw);
 }
 
 function renderAdvisorModal(buf: CellBuffer, rect: Rect, state: AppState): void {

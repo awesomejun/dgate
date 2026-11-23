@@ -1009,33 +1009,43 @@ function renderSwarmSection(buf: CellBuffer, state: AppState, L: FullLayout): vo
 
   // 라이브 동기화 중이면 가변 길이 라이브 워커 카드를, 아니면 트랜스크립트 3슬롯 cards를
   const motion = liveMotionOf(state);
+  // 라이브 카드 모드에서만 ←/→·숫자 카드 선택(Enter: 터미널 보기)이 의미 있다.
+  const isLiveCards = Boolean(state.liveWorkers && state.liveWorkers.length > 0);
+  const selCardIdx = isLiveCards
+    ? Math.min(Math.max(0, state.cardSelect), workerCards.length - 1)
+    : -1;
 
   L.cards.forEach((cardRect, idx) => {
     const card = workerCards[idx];
     if (!card) return;
 
     const cardAdvisoryGlow = errAdvisory && idx === 0;
+    const cardSelected = focused && idx === selCardIdx;
     const cardBg = cardAdvisoryGlow ? THEME.bgGlowPurple : THEME.bg;
-    const baseBorder = cardAdvisoryGlow ? THEME.purple : THEME.blue;
+    const baseBorder = cardAdvisoryGlow ? THEME.purple : cardSelected ? THEME.orange : THEME.blue;
     const borderColor = focused
       ? lerpColor(baseBorder, THEME.borderFocusBoost, 0.35)
       : baseBorder;
 
     buf.drawBox(cardRect, {
-      style: focused || cardAdvisoryGlow ? 'heavy' : 'single',
+      style: focused || cardAdvisoryGlow || cardSelected ? 'heavy' : 'single',
       borderColor,
       fillBg: cardBg,
-      rightLabel: focused && idx === L.cards.length - 1 ? 'Enter:50슬롯' : undefined,
-      rightLabelColor: THEME.blue,
-      boldBorder: focused || cardAdvisoryGlow,
+      rightLabel: cardSelected
+        ? 'Enter:터미널'
+        : focused && !isLiveCards && idx === L.cards.length - 1
+          ? 'Enter:50슬롯'
+          : undefined,
+      rightLabelColor: cardSelected ? THEME.orange : THEME.blue,
+      boldBorder: focused || cardAdvisoryGlow || cardSelected,
     });
 
     const ix = cardRect.x + 2;
     const iw = cardRect.w - 4;
     let cy = cardRect.y + 1;
 
-    // 역할 이름 (상단: 역할/세션명만)
-    buf.writeCentered(ix, cy++, iw, card.name, THEME.fg, cardBg, true);
+    // 역할 이름 (상단: 역할/세션명만 — 선택 카드는 ▶ 마커)
+    buf.writeCentered(ix, cy++, iw, (cardSelected ? '▶ ' : '') + card.name, THEME.fg, cardBg, true);
 
     // 모델 태그 — demo 모드만 상단 2행 유지; watch 모드는 하단에 cli · model · effort 표시
     if (state.mode !== 'watch' && cy < cardRect.y + cardRect.h - 1 && cardRect.h >= 6) {
