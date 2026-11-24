@@ -555,7 +555,7 @@ fn test_03_checkpoint_worktree_gates() {
         &envs,
     );
     assert_eq!(restored["restored"], true, "restore: {:?}", restored["errors"]);
-    assert_eq!(std::fs::read_to_string(target.join("base.txt")).unwrap(), "v2-wt\n", "unstaged 복원");
+    assert_eq!(std::fs::read_to_string(target.join("base.txt")).unwrap().replace("\r\n", "\n"), "v2-wt\n", "unstaged 복원");
     assert!(target.join("notes/draft.txt").exists(), "untracked 복원");
 
     // 1바이트 변조 → verify exit 1

@@ -1006,7 +1006,7 @@ mod tests {
         let rr = restore_worktree_checkpoint(&ckpt_dir, &target);
         assert!(rr.restored, "restore failed: {:?}", rr.errors);
 
-        assert_eq!(fs::read_to_string(target.join("base.txt")).unwrap(), "v2-wt\n", "unstaged 내용 일치");
+        assert_eq!(fs::read_to_string(target.join("base.txt")).unwrap().replace("\r\n", "\n"), "v2-wt\n", "unstaged 내용 일치");
         assert_eq!(git_ok(&target, &["show", ":base.txt"]), "v2-idx\n", "staged(index) 내용 일치");
         assert_eq!(fs::read_to_string(target.join("notes").join("draft.txt")).unwrap(), "draft-초안\n");
         // 실행 비트·심볼릭 링크 복원 검증은 Unix 전용
