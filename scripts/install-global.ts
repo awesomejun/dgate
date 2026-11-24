@@ -23,40 +23,27 @@ function wrapperContent(name, platform) {
   return platform === 'win32' ? cmdWrapperContent(name) : shWrapperContent(name);
 }
 
-function shWrapperContent(name) {
-  const root = shQuote(REPO_ROOT);
-  const header = `#!/bin/sh\n${WRAPPER_MARK}\n`;
-  switch (name) {
-    case 'dgate-tui':
-      return `${header}if [ -x ${root}/target/release/dgate-tui ]; then exec ${root}/target/release/dgate-tui "$@"; elif [ -x ${root}/target/debug/dgate-tui ]; then exec ${root}/target/debug/dgate-tui "$@"; else exec node ${root}/src/cli.ts --watch "$@"; fi\n`;
-    case 'dgate-gui':
-      return `${header}if [ -x ${root}/target/release/dgate-gui ]; then exec ${root}/target/release/dgate-gui "$@"; elif [ -x ${root}/target/debug/dgate-gui ]; then exec ${root}/target/debug/dgate-gui "$@"; else exec cargo run --release --manifest-path ${root}/Cargo.toml -p dgate-gui -- "$@"; fi\n`;
-    case 'dg':
-      return `${header}if [ -x ${root}/target/release/dg ]; then exec ${root}/target/release/dg "$@"; else exec node ${root}/src/decision/dg.ts "$@"; fi\n`;
-    case 'dgate':
-      return `${header}if [ -x ${root}/target/release/dgate ]; then exec ${root}/target/release/dgate "$@"; else exec node ${root}/src/cli.ts "$@"; fi\n`;
-    default:
-      throw new Error(`unknown wrapper: ${name}`);
-  }
+// v2 래퍼는 Rust 네이티브 바이너리만 실행한다 — Node v1(src/*) 폴백 없음.
+// target/release/<bin> → target/debug/<bin> 순으로 찾고, 둘 다 없으면
+// 빌드 안내 메시지를 stderr로 출력하고 exit 1 한다.
+function buildHint(name) {
+  return `${name}: Rust binary not found — build first: cargo build --release --workspace`;
 }
 
-// Windows .cmd wrappers — CRLF 배치 문법. 네이티브 바이너리(.exe) 우선,
-// 실패 시 node / cargo run --release 폴백.
+function shWrapperContent(name) {
+  if (!WRAPPER_NAMES.includes(name)) throw new Error(`unknown wrapper: ${name}`);
+  const root = shQuote(REPO_ROOT);
+  const header = `#!/bin/sh\n${WRAPPER_MARK}\n`;
+  return `${header}if [ -x ${root}/target/release/${name} ]; then exec ${root}/target/release/${name} "$@"; elif [ -x ${root}/target/debug/${name} ]; then exec ${root}/target/debug/${name} "$@"; else echo ${shQuote(buildHint(name))} >&2; exit 1; fi\n`;
+}
+
+// Windows .cmd wrappers — CRLF 배치 문법. 네이티브 바이너리(.exe)만 사용,
+// 부재 시 빌드 안내 후 exit /b 1.
 function cmdWrapperContent(name) {
+  if (!WRAPPER_NAMES.includes(name)) throw new Error(`unknown wrapper: ${name}`);
   const root = REPO_ROOT.replace(/\//g, '\\');
   const header = `@echo off\r\n${WRAPPER_MARK_CMD}\r\n`;
-  switch (name) {
-    case 'dgate-tui':
-      return `${header}if exist "${root}\\target\\release\\dgate-tui.exe" (\r\n  "${root}\\target\\release\\dgate-tui.exe" %*\r\n) else if exist "${root}\\target\\debug\\dgate-tui.exe" (\r\n  "${root}\\target\\debug\\dgate-tui.exe" %*\r\n) else (\r\n  node "${root}\\src\\cli.ts" --watch %*\r\n)\r\n`;
-    case 'dgate-gui':
-      return `${header}if exist "${root}\\target\\release\\dgate-gui.exe" (\r\n  "${root}\\target\\release\\dgate-gui.exe" %*\r\n) else if exist "${root}\\target\\debug\\dgate-gui.exe" (\r\n  "${root}\\target\\debug\\dgate-gui.exe" %*\r\n) else (\r\n  cargo run --release --manifest-path "${root}\\Cargo.toml" -p dgate-gui -- %*\r\n)\r\n`;
-    case 'dg':
-      return `${header}if exist "${root}\\target\\release\\dg.exe" (\r\n  "${root}\\target\\release\\dg.exe" %*\r\n) else (\r\n  node "${root}\\src\\decision\\dg.ts" %*\r\n)\r\n`;
-    case 'dgate':
-      return `${header}if exist "${root}\\target\\release\\dgate.exe" (\r\n  "${root}\\target\\release\\dgate.exe" %*\r\n) else (\r\n  node "${root}\\src\\cli.ts" %*\r\n)\r\n`;
-    default:
-      throw new Error(`unknown wrapper: ${name}`);
-  }
+  return `${header}if exist "${root}\\target\\release\\${name}.exe" (\r\n  "${root}\\target\\release\\${name}.exe" %*\r\n) else if exist "${root}\\target\\debug\\${name}.exe" (\r\n  "${root}\\target\\debug\\${name}.exe" %*\r\n) else (\r\n  echo ${buildHint(name)} 1>&2\r\n  exit /b 1\r\n)\r\n`;
 }
 
 function wrapperNames(platform) {

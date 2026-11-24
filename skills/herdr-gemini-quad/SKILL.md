@@ -1,65 +1,18 @@
 ---
 name: herdr-gemini-quad
-description: "Herdr App 창을 4분할(2×2)로 자동 분할하여 Gemini 모델 4종(Argon, Carbon, Neon, Hydrogen)을 각 패널에 실행하고 실시간 오케스트레이션을 모니터링하는 스킬. 사용자가 Herdr 4분할, 멀티 모델 오케스트레이션, Carbon/Argon/Neon/Hydrogen 동시 관제를 요청할 때 사용한다."
+description: "(제거됨) Node v1 전용 4분할 오케스트레이터 — v2 SSOT 전환(S5)으로 기반 구현이 삭제되어 더 이상 실행할 수 없다."
 ---
 
-# Herdr Gemini Quad Orchestrator
+# Herdr Gemini Quad Orchestrator — 제거됨 (v1 전용)
 
-Herdr App의 현재 스페이스에 새 탭을 열고 창을 자동으로 **4분할(2×2 그리드)** 한 뒤, 각 패널에 Gemini 멀티 에이전트 4종을 배치해 **IPC 버스(`/tmp/herdr-gemini-quad-*.sock`)** 로 실시간 동기화·오케스트레이션하는 스킬입니다.
+이 스킬이 다루던 4분할(2×2) Gemini 쿼드 오케스트레이션은 **Node v1 전용 기능**이었다.
+`docs/v2-ssot-migration.md`의 S5 단계에서 기반 구현이 전부 제거됐다:
 
-## 4분할 패널 배치 구조
+- `scripts/herdr-quad-launch.ts` — 런처 스크립트 (삭제)
+- `src/ipc/quadBus.ts` — IPC 버스(`/tmp/herdr-gemini-quad-*.sock`) (삭제)
+- `src/cli.ts --watch` — 트랜스크립트 관제 파이프 (삭제)
+- `npm run herdr:quad*` — package.json 스크립트 (제거)
 
-```text
-┌────────────────────────────────────┬────────────────────────────────────┐
-│ ◈ [Top-Left] Argon (Lead / Hub)    │ ⬡ [Top-Right] Carbon (Advisor)     │
-│ model: gemini-4-argon-high         │ model: gemini-4-carbon-high        │
-│ - 전체 미션 계획 수립 & 빌드 제어  │ - 3대 트리거(계획/오류/완료) 감시  │
-│ - Decision 1 분기 확률 매트릭스    │ - 아키텍처·보안 전략 자문 스트림   │
-├────────────────────────────────────┼────────────────────────────────────┤
-│ ✦ [Bottom-Left] Neon (Verifier)    │ ❖ [Bottom-Right] Hydrogen (Swarm)  │
-│ model: gemini-4-neon-high          │ model: gemini-4-hydrogen-high      │
-│ - 편향 없는 독립 교차 검증 게이지  │ - 50개 워커 동시성 매트릭스 그리드 │
-│ - 회귀/계약/엣지케이스 감사 로그   │ - search/grep/audit 병렬 서브태스크│
-└────────────────────────────────────┴────────────────────────────────────┘
-```
-
-## 실행 방법
-
-> 아래 예시는 저장소 루트(이 프로젝트를 클론한 디렉터리) 기준 상대경로다. `scripts/`·`src/` 경로는 실제 클론 위치로 치환해 실행한다.
-
-### 1. 기본 4분할 오케스트레이션 실행 (동기화 데모 시나리오)
-```bash
-node ./scripts/herdr-quad-launch.ts --mode demo
-```
-
-### 2. 실제 Antigravity(`agy`) / Gemini API 라이브 오케스트레이션 실행
-```bash
-node ./scripts/herdr-quad-launch.ts --mode live --prompt "현재 저장소 구조를 분석하고 개선점을 제안해줘"
-```
-
-### 3. 현재 실행 중인 `agy` 세션 트랜스크립트 실시간 관제 연동
-```bash
-node ./scripts/herdr-quad-launch.ts --mode watch
-```
-
-### 주요 옵션
-- `--folder <path>`: 작업 디렉터리 지정 (기본: 현재 cwd)
-- `--name <title>`: 생성할 Herdr 탭 이름 지정
-- `--prompt, -p <text>`: 시작과 동시에 Argon에 전달할 초기 프롬프트 (지정 시 자동 `--live` 전환)
-- `--dry-run`: 실제 분할하지 않고 실행될 `herdr-app` 및 `hc` 명령어만 출력
-
-## 실행 후 검증
-
-런처 실행 후 아래 명령으로 4분할 상태와 화면을 확인할 수 있습니다:
-
-```bash
-herdr-app status
-herdr-app shot /tmp/herdr-gemini-quad.png
-```
-
-## 프로젝트 내 npm 스크립트
-
-이 저장소 루트 디렉터리에서 다음 명령을 바로 사용할 수 있다:
-- `npm run herdr:quad` (기본 4분할 데모 오케스트레이션)
-- `npm run herdr:quad:live` (라이브 에이전트 연동)
-- `npm run herdr:quad:watch` (실행 중인 세션 트랜스크립트 관제)
+Rust v2에는 동등한 쿼드 런처가 아직 이관되지 않았다. 현재 제공되는 관측·오케스트레이션
+경로는 `dg dispatch`/`dg wrap`(워커 배차·감시)과 `dgate-tui`/`dgate-gui`(관측 대시보드)다 —
+자세한 사용법은 `skills/dgate/SKILL.md`를 참조한다.

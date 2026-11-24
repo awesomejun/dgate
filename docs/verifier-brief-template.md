@@ -1,5 +1,5 @@
 <!--
-  검증자 브리프 템플릿(Change ①) — `dg dispatch --brief-file <path>` / `node ./scripts/dispatch.ts --brief-file <path>` 가 검증하는 표준 형식이다.
+  검증자 브리프 템플릿(Change ①) — `dg dispatch --brief-file <path>`가 검증하는 표준 형식이다.
   규칙(TS `validateBriefFileBytes`·Rust `validate_brief_bytes` 동일):
     - `## Standards`·`## Spec`·`## Merge Danger` 헤딩 3종 필수(두 축 + 합류 위험)
     - `door: one-way|two-way` 행 1개 필수

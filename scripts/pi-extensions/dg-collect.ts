@@ -7,7 +7,7 @@
  * 직전 실패한 같은 서명(도구+인자)의 재호출은 `isRetry`로 표시해
  * retry_or_abort 라우트 통계를 함께 축적한다.
  *
- * 외부 연결: dgate `.agents/hooks/dg-hook.ts`·Rust `dg hook`과 동일 stdin 계약 —
+ * 외부 연결: Rust `dg hook`(v1 `.agents/hooks/dg-hook.ts` 대응)과 동일 stdin 계약 —
  *   {"toolCall":{"id","name","args"},"conversationId","cwd","error","isRetry"}
  *
  * 주의:

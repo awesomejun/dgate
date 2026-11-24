@@ -12,8 +12,7 @@
 //! 외부 연결:
 //! - 생성 `roster.json`은 `roster` 모듈 `load_roster_config` 병합 규약을 따른다
 //!   (빈 문자열 필드는 내장 quota-saver 기본 상속을 차단하기 위한 의도적 오버라이드).
-//! - 훅 설치 = canonical `.agents/hooks.json` 복사 + `hooks/dg-hook.ts` 심볼릭 링크 +
-//!   `.git/info/exclude` 추가.
+//! - 훅 설치 = canonical `.agents/hooks.json` 복사 + `.git/info/exclude` 추가.
 //!
 //! 주의:
 //! - `GEMINI_DECISION_API_KEY`는 존재 여부만 보고 — 값은 절대 읽어 저장·출력하지 않는다.
@@ -199,7 +198,6 @@ pub struct RepoHooksStatus {
     pub repo_dir: String,
     pub repo_dir_exists: bool,
     pub hooks_json: bool,
-    pub hook_symlink: bool,
     pub excluded: bool,
 }
 
@@ -1666,19 +1664,8 @@ fn link_or_copy_refuse(source: &Path, target: &Path) -> std::io::Result<()> {
 }
 
 /// 타깃 프로젝트 훅 상태 진단(읽기전용) — `--repo` 지정 시 리포트에 포함된다.
-pub fn inspect_repo_hooks(repo_dir: &Path, orchestrator_root: &Path) -> RepoHooksStatus {
+pub fn inspect_repo_hooks(repo_dir: &Path, _orchestrator_root: &Path) -> RepoHooksStatus {
     let agents_dir = repo_dir.join(".agents");
-    let hook_link = agents_dir.join("hooks").join("dg-hook.ts");
-    let src_hook = orchestrator_root.join(".agents").join("hooks").join("dg-hook.ts");
-    let hook_symlink = match std::fs::symlink_metadata(&hook_link) {
-        Ok(meta) => {
-            meta.file_type().is_symlink()
-                && std::fs::read_link(&hook_link)
-                    .map(|p| p == src_hook)
-                    .unwrap_or(false)
-        }
-        Err(_) => false,
-    };
     let exclude_path = repo_dir.join(".git").join("info").join("exclude");
     let excluded = std::fs::read_to_string(&exclude_path)
         .map(|c| {
@@ -1690,7 +1677,6 @@ pub fn inspect_repo_hooks(repo_dir: &Path, orchestrator_root: &Path) -> RepoHook
         repo_dir: repo_dir.to_string_lossy().into_owned(),
         repo_dir_exists: repo_dir.exists(),
         hooks_json: agents_dir.join("hooks.json").exists(),
-        hook_symlink,
         excluded,
     }
 }
@@ -1708,9 +1694,10 @@ pub struct PathSkipEntry {
     pub reason: &'static str,
 }
 
-/// 타깃 프로젝트에 `.agents/hooks.json`(canonical 복사) + `hooks/dg-hook.ts`
-/// (오케스트레이터 심볼릭 링크)를 설치하고 `.git/info/exclude`에 두 경로를 추가해
-/// `git status`를 깨끗하게 유지한다. 기존 파일·다른 내용은 절대 덮어쓰지 않는다.
+/// 타깃 프로젝트에 `.agents/hooks.json`(canonical 복사)을 설치하고
+/// `.git/info/exclude`에 경로를 추가해 `git status`를 깨끗하게 유지한다.
+/// v2 훅은 네이티브 `dg hook --guard|--collect` 직접 실행 — `hooks/dg-hook.ts`
+/// 심볼릭 링크는 더 이상 배포하지 않는다. 기존 파일·다른 내용은 절대 덮어쓰지 않는다.
 pub fn install_repo_hooks(repo_dir: &Path, orchestrator_root: Option<&Path>) -> RepoHooksResult {
     let orch = orchestrator_root
         .map(Path::to_path_buf)
@@ -1721,8 +1708,7 @@ pub fn install_repo_hooks(repo_dir: &Path, orchestrator_root: Option<&Path>) -> 
         skipped: Vec::new(),
     };
     let src_json = orch.join(".agents").join("hooks.json");
-    let src_hook = orch.join(".agents").join("hooks").join("dg-hook.ts");
-    if !src_json.exists() || !src_hook.exists() {
+    if !src_json.exists() {
         res.skipped.push(PathSkipEntry {
             path: repo_dir.to_string_lossy().into_owned(),
             reason: "orchestrator-hook-source-missing",
@@ -1730,10 +1716,10 @@ pub fn install_repo_hooks(repo_dir: &Path, orchestrator_root: Option<&Path>) -> 
         return res;
     }
 
-    let hooks_dir = repo_dir.join(".agents").join("hooks");
-    if let Err(e) = std::fs::create_dir_all(&hooks_dir) {
+    let agents_dir = repo_dir.join(".agents");
+    if let Err(e) = std::fs::create_dir_all(&agents_dir) {
         res.skipped.push(PathSkipEntry {
-            path: hooks_dir.to_string_lossy().into_owned(),
+            path: agents_dir.to_string_lossy().into_owned(),
             reason: "mkdir-failed",
         });
         let _ = e;
@@ -1756,31 +1742,6 @@ pub fn install_repo_hooks(repo_dir: &Path, orchestrator_root: Option<&Path>) -> 
             path: dst_json.to_string_lossy().into_owned(),
             reason: "conflict-different-content",
         });
-    }
-
-    let dst_hook = hooks_dir.join("dg-hook.ts");
-    match std::fs::symlink_metadata(&dst_hook) {
-        Err(_) => {
-            match link_or_copy_refuse(&src_hook, &dst_hook) {
-                Ok(()) => res.written.push(dst_hook.to_string_lossy().into_owned()),
-                Err(_) => res.skipped.push(PathSkipEntry {
-                    path: dst_hook.to_string_lossy().into_owned(),
-                    reason: "symlink-failed",
-                }),
-            }
-        }
-        Ok(meta) => {
-            let already = meta.file_type().is_symlink()
-                && std::fs::read_link(&dst_hook).map(|p| p == src_hook).unwrap_or(false);
-            res.skipped.push(PathSkipEntry {
-                path: dst_hook.to_string_lossy().into_owned(),
-                reason: if already {
-                    "already-linked"
-                } else {
-                    "conflict-existing-path"
-                },
-            });
-        }
     }
 
     let git_dir = repo_dir.join(".git");
@@ -2224,15 +2185,6 @@ pub fn format_check_report(report: &EnvironmentReport) -> String {
             if h.hooks_json { "설치됨" } else { "미설치" }
         ));
         l.push(format!(
-            "  {} .agents/hooks/dg-hook.ts {}",
-            mark(h.hook_symlink, true),
-            if h.hook_symlink {
-                "심볼릭 링크됨"
-            } else {
-                "미설치"
-            }
-        ));
-        l.push(format!(
             "  {} .git/info/exclude {}",
             mark(h.excluded, true),
             if h.excluded { "항목 있음" } else { "항목 없음" }
@@ -2503,9 +2455,8 @@ mod tests {
     fn detect_environment_repo_hooks_included_when_repo_dir_given() {
         let home = fake_home("detect-hooks");
         let orch = home.join("orch");
-        std::fs::create_dir_all(orch.join(".agents").join("hooks")).unwrap();
+        std::fs::create_dir_all(orch.join(".agents")).unwrap();
         std::fs::write(orch.join(".agents").join("hooks.json"), "{}").unwrap();
-        std::fs::write(orch.join(".agents").join("hooks").join("dg-hook.ts"), "// hook").unwrap();
         let target = home.join("target-repo");
         std::fs::create_dir_all(&target).unwrap();
 
@@ -2524,7 +2475,7 @@ mod tests {
         let report = detect_environment(&deps);
         let h = report.repo_hooks.expect("repo hooks diagnosed");
         assert!(h.repo_dir_exists);
-        assert!(!h.hooks_json && !h.hook_symlink && !h.excluded);
+        assert!(!h.hooks_json && !h.excluded);
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -2971,9 +2922,8 @@ mod tests {
 
     fn orch_fixture(home: &Path) -> PathBuf {
         let orch = home.join("orch");
-        std::fs::create_dir_all(orch.join(".agents").join("hooks")).unwrap();
+        std::fs::create_dir_all(orch.join(".agents")).unwrap();
         std::fs::write(orch.join(".agents").join("hooks.json"), "{\"canonical\":true}").unwrap();
-        std::fs::write(orch.join(".agents").join("hooks").join("dg-hook.ts"), "// hook").unwrap();
         orch
     }
 
@@ -2995,13 +2945,11 @@ mod tests {
         init_git_repo(&target);
 
         let res = install_repo_hooks(&target, Some(&orch));
-        assert_eq!(res.written.len(), 3, "hooks.json + symlink + exclude");
+        assert_eq!(res.written.len(), 2, "hooks.json + exclude");
         assert!(res.written.iter().any(|p| p.ends_with(".agents/hooks.json")));
-        assert!(res.written.iter().any(|p| p.ends_with("dg-hook.ts")));
         assert!(res.written.iter().any(|p| p.ends_with(".git/info/exclude")));
-        // 심볼릭 링크 대상
-        let link = std::fs::read_link(target.join(".agents").join("hooks").join("dg-hook.ts")).unwrap();
-        assert_eq!(link, orch.join(".agents").join("hooks").join("dg-hook.ts"));
+        // v2 훅은 네이티브 `dg hook` 직접 실행 — hooks/dg-hook.ts 미배포
+        assert!(!target.join(".agents").join("hooks").join("dg-hook.ts").exists());
         // exclude 내용
         let exclude = std::fs::read_to_string(target.join(".git").join("info").join("exclude")).unwrap();
         assert!(exclude.contains(".agents/hooks.json"));
@@ -3011,7 +2959,6 @@ mod tests {
         let res2 = install_repo_hooks(&target, Some(&orch));
         assert!(res2.written.is_empty());
         assert!(res2.skipped.iter().any(|s| s.reason == "already-present"));
-        assert!(res2.skipped.iter().any(|s| s.reason == "already-linked"));
         assert!(res2.skipped.iter().any(|s| s.reason == "already-excluded"));
 
         // 다른 내용의 hooks.json은 절대 덮어쓰지 않는다
@@ -3047,7 +2994,7 @@ mod tests {
 
         // inspect — 설치 후 상태 true
         let st = inspect_repo_hooks(&nongit, &orch);
-        assert!(st.hooks_json && st.hook_symlink && !st.excluded);
+        assert!(st.hooks_json && !st.excluded);
         let _ = std::fs::remove_dir_all(&home);
     }
 

@@ -9,7 +9,7 @@
 
 ## 2. 도구·권한 경계 (이중 격리)
 
-- 읽기전용: `HERDR_READONLY=1` 세션이므로 `.agents/hooks/dg-hook.ts --guard`가 쓰기 도구·비화이트리스트 `run_command`를 deny한다. `--exclude-tools edit,write`가 두 번째 격리다.
+- 읽기전용: `HERDR_READONLY=1` 세션이므로 `.agents/hooks.json`의 `dg hook --guard`가 쓰기 도구·비화이트리스트 `run_command`를 deny한다. `--exclude-tools edit,write`가 두 번째 격리다.
 - `bash`는 화이트리스트 명령(`node --test`, `git diff`, `git log`, `git status`, `rg`, `ls`, `cat`, `wc`, `head`, `tail`)만 허용된다 — 테스트·diff 검증 용도다.
 - `invoke_subagent`·`manage_subagents`·`swarm` 금지 (`HERDR_DELEGATE_MODE=hc`).
 
@@ -22,7 +22,7 @@
 
 ## 4. 구조화 Verdict 산출 계약 (`.herdr/verify/<fork_id>-verdict.json`)
 
-- 판정 확정 시 **SSOT로 `.herdr/verify/<fork_id>-verdict.json`**을 생성한다(스키마 = `src/decision/verdict.ts` `VerdictDocument`, 검증기 = `validateVerdictFile`):
+- 판정 확정 시 **SSOT로 `.herdr/verify/<fork_id>-verdict.json`**을 생성한다(스키마 = `crates/dgate-core/src/verdict.rs` `VerdictDocument`, 검증기 = `validate_verdict_file`):
   ```json
   {
     "schema_version": 1,
@@ -50,6 +50,6 @@
 
 ## 5. 후속 결선
 
-- `[FAIL]` 또는 `rework`/`human` 판정이면 리드가 `node ./src/decision/dg.ts backprop --fork <fork_id> --verdict-file .herdr/verify/<fork_id>-verdict.json --expected-head <HEAD>`로 위 §4 JSON을 적용해 해당 fork를 재개방·파킹한다. `--expected-head`에는 위임 시점 `git rev-parse HEAD`(full sha)가 들어간다.
+- `[FAIL]` 또는 `rework`/`human` 판정이면 리드가 `dg backprop --fork <fork_id> --verdict-file .herdr/verify/<fork_id>-verdict.json --expected-head <HEAD>`로 위 §4 JSON을 적용해 해당 fork를 재개방·파킹한다. `--expected-head`에는 위임 시점 `git rev-parse HEAD`(full sha)가 들어간다.
 - **`pass` 판정도 같은 명령으로 반드시 적용한다** — PASS를 적용하지 않으면 fork가 검증자에 의해 닫히지 않고(`closed_by='verifier'` 미기록) `neon_verdict`도 NULL로 남아, 교차검증이 실제로 일어났는지 DB로 셀 수 없다. PASS 적용 시 fork는 `ok`로 닫히고 `closed_by='verifier'`·`neon_verdict='pass'`가 기록된다(exit 0). 판정을 파일로만 남기고 적용을 생략하는 것은 계약 위반이다.
 - 너의 역할은 판정 보고까지다. 수정·재검증 요청은 수행하지 않고 보고로 답한다.
