@@ -28,7 +28,7 @@ function shWrapperContent(name) {
   const header = `#!/bin/sh\n${WRAPPER_MARK}\n`;
   switch (name) {
     case 'dgate-tui':
-      return `${header}exec node ${root}/src/cli.ts --watch "$@"\n`;
+      return `${header}if [ -x ${root}/target/release/dgate-tui ]; then exec ${root}/target/release/dgate-tui "$@"; elif [ -x ${root}/target/debug/dgate-tui ]; then exec ${root}/target/debug/dgate-tui "$@"; else exec node ${root}/src/cli.ts --watch "$@"; fi\n`;
     case 'dgate-gui':
       return `${header}if [ -x ${root}/target/release/dgate-gui ]; then exec ${root}/target/release/dgate-gui "$@"; elif [ -x ${root}/target/debug/dgate-gui ]; then exec ${root}/target/debug/dgate-gui "$@"; else exec cargo run --release --manifest-path ${root}/Cargo.toml -p dgate-gui -- "$@"; fi\n`;
     case 'dg':
@@ -47,7 +47,7 @@ function cmdWrapperContent(name) {
   const header = `@echo off\r\n${WRAPPER_MARK_CMD}\r\n`;
   switch (name) {
     case 'dgate-tui':
-      return `${header}node "${root}\\src\\cli.ts" --watch %*\r\n`;
+      return `${header}if exist "${root}\\target\\release\\dgate-tui.exe" (\r\n  "${root}\\target\\release\\dgate-tui.exe" %*\r\n) else if exist "${root}\\target\\debug\\dgate-tui.exe" (\r\n  "${root}\\target\\debug\\dgate-tui.exe" %*\r\n) else (\r\n  node "${root}\\src\\cli.ts" --watch %*\r\n)\r\n`;
     case 'dgate-gui':
       return `${header}if exist "${root}\\target\\release\\dgate-gui.exe" (\r\n  "${root}\\target\\release\\dgate-gui.exe" %*\r\n) else if exist "${root}\\target\\debug\\dgate-gui.exe" (\r\n  "${root}\\target\\debug\\dgate-gui.exe" %*\r\n) else (\r\n  cargo run --release --manifest-path "${root}\\Cargo.toml" -p dgate-gui -- %*\r\n)\r\n`;
     case 'dg':

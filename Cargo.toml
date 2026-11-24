@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/dgate-core", "crates/dgate-cli", "crates/dgate-gui"]
+members = ["crates/dgate-core", "crates/dgate-cli", "crates/dgate-gui", "crates/dgate-tui"]
 default-members = ["crates/dgate-core", "crates/dgate-cli"]
 
 [workspace.package]
