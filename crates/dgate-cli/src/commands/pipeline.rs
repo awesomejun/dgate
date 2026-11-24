@@ -540,8 +540,66 @@ fn advisor_inner_argv(cfg: &ExecConfig, state: &PipelineState) -> Vec<String> {
     }
 }
 
-/// `dg wrap … -- sh -c 'exec env HERDR_ROLE=<role> HERDR_DELEGATE_MODE=hc <inner…> </dev/null'`
-/// 워커 스폰 argv — 관측된 코더 스폰 계약(`hc get t30f`)과 같은 형태.
+/// `cmd /C` 라인에서 셸 메타문자를 보호하는 이스케이프 — 공백·인용을 포함하는
+/// 인자는 Rust가 `"…"`로 감싸며 그 인용이 cmd를 그대로 통과해 자식 argv를 묶어
+/// 주므로 그대로 두고, 공백·인용이 없는 인자의 `&|<>`·`^`만 `^`로 이스케이프한다
+/// (Windows 실측: bare `a&b`는 명령 분리되고 `a^&b`는 리터럴로 도달). `%`는
+/// cmd에서 신뢰성 있게 이스케이프할 수 없어 건드리지 않는다(희귀 잔여 엣지).
+fn cmd_escape_token(s: &str) -> String {
+    if s.is_empty() || s.chars().any(|c| c.is_whitespace() || c == '"') {
+        return s.to_string();
+    }
+    s.chars()
+        .flat_map(|c| {
+            if "&|<>^".contains(c) {
+                vec!['^', c]
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
+}
+
+/// `dg wrap --` 뒤에 넘길 OS별 워커 스폰 argv (순수 — macOS에서도 양 분기 단위 검증).
+/// Unix: 기존 계약 그대로 `sh -c 'exec env HERDR_ROLE=<role> HERDR_DELEGATE_MODE=hc
+/// <inner…> </dev/null'`. Windows: `sh`/`env`/`/dev/null`이 없으므로
+/// `cmd /C set HERDR_ROLE=<role>&& set HERDR_DELEGATE_MODE=hc&& <inner> < NUL` —
+/// `dg wrap`에 `--env`가 없어 `set`으로 env를 심고 `< NUL`로 stdin을 닫아
+/// 워커의 stdin 대기(SIGTTIN 유사 정지)를 차단한다.
+/// 각 토큰을 별도 argv 요소로 넘기는 이유: 단일 스크립트 문자열에 손수 넣은 `"`는
+/// Rust가 `\"`로 재인용해 cmd의 프로그램 해석·공백 인자 묶기가 깨진다(Windows 실측).
+/// `set VAR=v&&`는 `&&` 앞 공백이 값에 섞이는 것을 막기 위해 반드시 한 토큰이다.
+fn wrap_inner_command(is_windows: bool, role: &str, inner: &[String]) -> Vec<String> {
+    if is_windows {
+        let mut argv = vec![
+            "cmd".to_string(),
+            "/C".to_string(),
+            "set".to_string(),
+            format!("HERDR_ROLE={role}&&"),
+            "set".to_string(),
+            "HERDR_DELEGATE_MODE=hc&&".to_string(),
+        ];
+        argv.extend(inner.iter().map(|a| cmd_escape_token(a)));
+        argv.push("<".to_string());
+        argv.push("NUL".to_string());
+        argv
+    } else {
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "exec env HERDR_ROLE={role} HERDR_DELEGATE_MODE=hc {} </dev/null",
+                inner
+                    .iter()
+                    .map(|a| sh_quote(a))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+        ]
+    }
+}
+
+/// `dg wrap … -- <OS별 워커 스폰 argv>` — 관측된 코더 스폰 계약(`hc get t30f`)과 같은 형태.
 /// `--role`/`--label`은 현재 wrap 파서에서 미사용 필드지만 spec이 요구하는 명시 계약이다.
 fn wrap_spawn_argv(
     cfg: &ExecConfig,
@@ -576,16 +634,7 @@ fn wrap_spawn_argv(
         argv.push(art.display().to_string());
     }
     argv.push("--".to_string());
-    argv.push("sh".to_string());
-    argv.push("-c".to_string());
-    argv.push(format!(
-        "exec env HERDR_ROLE={role} HERDR_DELEGATE_MODE=hc {} </dev/null",
-        inner
-            .iter()
-            .map(|a| sh_quote(a))
-            .collect::<Vec<_>>()
-            .join(" ")
-    ));
+    argv.extend(wrap_inner_command(cfg!(windows), role, inner));
     argv
 }
 
@@ -1469,5 +1518,59 @@ mod run_tests {
             Some(77)
         );
         assert_eq!(parse_pr_number("no url"), None);
+    }
+
+    // Windows 스폰 분기 — is_windows 플래그로 양 OS argv를 macOS에서 검증한다.
+    // Unix 경로는 기존 계약(sh -c exec env … </dev/null) 불변, Windows 경로는
+    // cmd /C + set env + < NUL이며 sh//dev/null 의존이 없어야 한다.
+    #[test]
+    fn wrap_inner_command_os_branch() {
+        let inner = vec![
+            "devin".to_string(),
+            "--permission-mode".to_string(),
+            "dangerous".to_string(),
+            "-p".to_string(),
+            "브리프 파일 x.md 를 읽고 구현하라".to_string(),
+        ];
+
+        // is_windows=false — 기존 Unix 계약 보존
+        let u = wrap_inner_command(false, "coder", &inner);
+        assert_eq!(u.len(), 3);
+        assert_eq!(u[0], "sh");
+        assert_eq!(u[1], "-c");
+        assert!(u[2].contains("HERDR_ROLE=coder"));
+        assert!(u[2].contains("HERDR_DELEGATE_MODE=hc"));
+        assert!(u[2].ends_with("</dev/null"));
+        assert!(u[2].starts_with("exec env "));
+        assert!(u[2].contains("devin"));
+
+        // is_windows=true — cmd /C + set env + < NUL, sh//dev/null 미포함
+        let w = wrap_inner_command(true, "verifier", &inner);
+        assert_eq!(w[0], "cmd");
+        assert_eq!(w[1], "/C");
+        assert!(!w.iter().any(|a| a == "sh"));
+        assert!(!w.join(" ").contains("/dev/null"));
+        // set `VAR=v&&`는 `&&` 앞 공백이 env 값에 섞이지 않도록 한 토큰이어야 한다.
+        assert!(w.iter().any(|a| a == "HERDR_ROLE=verifier&&"));
+        assert!(w.iter().any(|a| a == "HERDR_DELEGATE_MODE=hc&&"));
+        assert!(w.join(" ").contains("< NUL"));
+        // 내부 워커 argv는 뒤쪽에 그대로 이어진다(공백 인자는 Rust 인용으로 묶인다).
+        let pos = w.iter().position(|a| a == "devin").unwrap();
+        assert_eq!(&w[pos..], ["devin", "--permission-mode", "dangerous", "-p", "브리프 파일 x.md 를 읽고 구현하라", "<", "NUL"]);
+    }
+
+    // cmd /C 메타문자 이스케이프 — 공백·인용 없는 인자만 `^`로 보호하고,
+    // 공백/인용/빈 인자는 Rust 인용 계층에 맡긴다.
+    #[test]
+    fn cmd_escape_token_metachars() {
+        assert_eq!(cmd_escape_token("a&b"), "a^&b");
+        assert_eq!(cmd_escape_token("x|y"), "x^|y");
+        assert_eq!(cmd_escape_token("a<b>c"), "a^<b^>c");
+        assert_eq!(cmd_escape_token("x^y"), "x^^y");
+        // 공백이 있으면 Rust가 "…"로 감싸므로 ^ 이스케이프를 넣으면 오히려 리터럴 ^가 샌다.
+        assert_eq!(cmd_escape_token("a & b"), "a & b");
+        assert_eq!(cmd_escape_token("a\"b"), "a\"b");
+        assert_eq!(cmd_escape_token(""), "");
+        assert_eq!(cmd_escape_token("glm-zcode/glm-5.3"), "glm-zcode/glm-5.3");
     }
 }
