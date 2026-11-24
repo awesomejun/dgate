@@ -1,22 +1,26 @@
-//! `dg pipeline init|step|status` — 결정적 sublead 파이프라인 상태머신(0토큰).
+//! `dg pipeline init|step|status|run` — 결정적 sublead 파이프라인 상태머신(0토큰).
 //!
 //! `dgate_core::pipeline`의 순수 상태머신을 파일 영속 상태(`.herdr/pipelines/<run_id>.json`)
 //! 위에서 구동한다 — 상주 sublead LLM 없이 `coder → verifier → rework/advisor-g3 → READY_PR`
 //! 전이를 계산하고, 재시도 소진·human 판정 등 에스컬레이션만 sublead LLM 단발 기동으로 넘긴다.
 //!
 //! 종료 코드:
-//! - 0: 정상 전이(status 포함) / 1: 상태 파일 입출력 실패
+//! - 0: 정상 전이(status 포함) / 1: 상태 파일 입출력·실행기 오류
 //! - 2: 사용법 오류(필수 플래그 누락·알 수 없는 이벤트/서브커맨드·상태 파일 부재)
 //! - 3: 파이프라인이 `Escalated`에 도달(fail-closed — sublead 단발 기동 필요 신호)
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcCommand;
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::args::{bool_flag, optional_flag, parse_int_flag, require_flag, ParsedArgs, UsageError};
+use crate::util::eprint_line;
 use crate::util::prelude::*;
 use dgate_core::pipeline::{
     self, check_scope_glob, PipelineAction, PipelineEvent, PipelineInit, PipelinePhase,
+    PipelineState,
 };
+use dgate_core::roster;
 use dgate_core::verdict::{self, ValidateVerdictOptions};
 
 pub fn cmd_pipeline(sub: Option<&str>, args: &ParsedArgs, json: bool) -> CmdResult {
@@ -24,8 +28,9 @@ pub fn cmd_pipeline(sub: Option<&str>, args: &ParsedArgs, json: bool) -> CmdResu
         Some("init") => cmd_init(args, json),
         Some("step") => cmd_step(args, json),
         Some("status") => cmd_status(args, json),
+        Some("run") => cmd_run(args, json),
         other => Err(DgError::Usage(UsageError(format!(
-            "unknown pipeline subcommand: {} (allowed: init|step|status)",
+            "unknown pipeline subcommand: {} (allowed: init|step|status|run)",
             other.unwrap_or("(missing)")
         )))),
     }
@@ -274,4 +279,1195 @@ fn cmd_status(args: &ParsedArgs, json: bool) -> CmdResult {
         }),
     );
     Ok(0)
+}
+
+// ============================================================================
+// `dg pipeline run` — 0토큰 결정적 파이프라인 자동 실행 러너
+// ============================================================================
+//
+// `dg pipeline init`이 만든 상태 파일을 로드해, 현재 위상에 대응하는 결정적
+// 액션을 `PipelineExecutor`에 위임해 `PipelineEvent`를 얻고 `advance_pipeline`으로
+// 전이·영속화하는 루프를 돌린다. 전이 판정은 전부 `dgate_core::pipeline`에 있고
+// 여기서는 스케줄링(워커 스폰·대기·결과 수집)만 한다 — 상태 전이 중복 구현 없음.
+//
+// 종료 코드: 0 = ReadyPr 완주 · 1 = 실행기/상태 파일 오류 · 2 = 사용법 오류 ·
+// 3 = Escalated/Failed 도달(sublead 단발 기동 필요).
+
+/// 러너 스텝 상한 기본값 — 무한 루프 방지.
+pub const RUN_DEFAULT_MAX_STEPS: i64 = 20;
+/// 워커 `dg wrap` 스톨·최대 시간(관측된 코더 스폰 계약과 동일 값).
+const WRAP_STALL_MS: &str = "600000";
+const WRAP_MAX_MS: &str = "1500000";
+/// advisor 세션 화면 스캔 범위 — `[advisor:…]` 마커 검출용 `hc read` 꼬리 길이.
+const ADVISOR_READ_LINES: &str = "200";
+
+/// 파이프라인 실행 계약 — 결정적 액션 1건을 받아 상태머신 이벤트를 생산한다.
+/// 출력/알림성 액션(`EmitReadyPr`·`WakeSubleadEscalation`·`None`)은 이벤트가
+/// 없으므로 `Ok(None)`을 반환한다. 테스트는 Mock으로 전체 루프를 결정적 검증한다.
+pub trait PipelineExecutor {
+    fn execute(
+        &mut self,
+        action: &PipelineAction,
+        state: &PipelineState,
+    ) -> Result<Option<PipelineEvent>, String>;
+}
+
+/// 실제 실행기 설정 — hc/dg 실행 파일과 프로젝트 루트(verdict·gh 기준 디렉터리).
+#[derive(Debug, Clone)]
+pub struct ExecConfig {
+    pub hc_bin: String,
+    pub dg_bin: String,
+    pub repo_dir: PathBuf,
+}
+
+impl ExecConfig {
+    fn from_args(args: &ParsedArgs) -> Self {
+        ExecConfig {
+            // send.rs/reap.rs와 동일한 오버라이드 계약(HC_BIN).
+            hc_bin: std::env::var("HC_BIN").unwrap_or_else(|_| "hc".to_string()),
+            // 자기 자신(dg)을 백프랍·wrap 자식 명령으로 쓴다(dispatch.rs와 동일 패턴).
+            dg_bin: std::env::current_exe()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "dg".to_string()),
+            repo_dir: optional_flag(args, "repo")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(".")),
+        }
+    }
+}
+
+/// 워커 작업 디렉터리 — state.worktree_path 우선, 없으면 repo_dir.
+fn worker_cwd(cfg: &ExecConfig, state: &PipelineState) -> PathBuf {
+    state
+        .worktree_path
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cfg.repo_dir.clone())
+}
+
+/// hc `--name` 계약(`^[a-z0-9_-]{1,32}$`)으로 세션명을 만든다 —
+/// 역할 접두 + fork + 재작업 번호(재스폰 시 신규 세션, 크래시 재개 시 동일 세션 재사용).
+fn session_name(role: &str, fork_id: &str, attempt: Option<u32>) -> String {
+    let mut n = format!("{role}-{fork_id}");
+    if let Some(a) = attempt {
+        n = format!("{n}-a{a}");
+    }
+    n.to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(32)
+        .collect()
+}
+
+/// `sh -c` 페이로드 안에 넣을 argv 단일 인용 부호 이스케이프.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// 현재 위상 → 실행할 결정적 액션 재구성.
+/// `rework_pending`은 마지막 전이의 액션 라벨로 `dg backprop` 경유 여부를 복원한다
+/// (전이 시 이미 계산된 액션을 재실행하는 것이지 새 판정이 아님 — 0토큰).
+fn action_for_phase(state: &PipelineState) -> Result<PipelineAction, String> {
+    match state.phase {
+        PipelinePhase::Init | PipelinePhase::CoderRunning | PipelinePhase::ReworkPending => {
+            let last = state
+                .history
+                .last()
+                .map(|t| t.action.as_str())
+                .unwrap_or_default();
+            if state.phase == PipelinePhase::ReworkPending && last == "backprop_and_respawn_coder" {
+                let verdict_path = state.last_verdict_path.clone().ok_or_else(|| {
+                    "rework_pending(backprop)인데 last_verdict_path 없음".to_string()
+                })?;
+                Ok(PipelineAction::BackpropAndRespawnCoder {
+                    fork_id: state.fork_id.clone(),
+                    verdict_path,
+                    attempt: state.attempt,
+                })
+            } else {
+                Ok(PipelineAction::SpawnCoder {
+                    attempt: state.attempt,
+                    feedback: None,
+                })
+            }
+        }
+        PipelinePhase::VerifierRunning => Ok(PipelineAction::SpawnVerifier {
+            fork_id: state.fork_id.clone(),
+            head_sha: state.head_sha.clone(),
+            verifier_model: state.verifier_model.clone(),
+        }),
+        PipelinePhase::AdvisorG3Running => Ok(PipelineAction::SpawnAdvisorG3 {
+            fork_id: state.fork_id.clone(),
+            head_sha: state.head_sha.clone(),
+            verdict_path: state.last_verdict_path.clone().unwrap_or_default(),
+        }),
+        terminal => Err(format!(
+            "terminal phase {} — 실행할 액션 없음",
+            terminal.as_str()
+        )),
+    }
+}
+
+// ---------- 워커 프롬프트·argv (dry-run 계획과 실제 실행이 같은 빌더를 공유) ----------
+
+fn coder_prompt(
+    state: &PipelineState,
+    attempt: u32,
+    feedback: Option<&str>,
+    verdict_path: Option<&str>,
+) -> String {
+    let mut p = format!(
+        "브리프 파일 {} 를 읽고 Standards/Spec/Merge Danger을 모두 준수해 구현하라. \
+         git commit/push는 금지. 완료 시 변경 요약을 최종 메시지로 출력하라",
+        state.brief_path
+    );
+    if let Some(vp) = verdict_path {
+        p.push_str(&format!(" — 이전 검증 verdict {vp} 의 finding을 모두 해소하라"));
+    }
+    if let Some(fb) = feedback.filter(|f| !f.trim().is_empty()) {
+        p.push_str(&format!(" — 재작업 사유: {fb}"));
+    }
+    if attempt > 0 {
+        p.push_str(&format!(" (rework #{attempt})"));
+    }
+    p
+}
+
+/// 코더 내부 argv — spec 계약: `devin --permission-mode dangerous
+/// --respect-workspace-trust false -p <prompt>`.
+fn coder_inner_argv(
+    state: &PipelineState,
+    attempt: u32,
+    feedback: Option<&str>,
+    verdict_path: Option<&str>,
+) -> Vec<String> {
+    let mut a = vec![
+        roster::resolve_worker_bin(roster::WorkerCliKind::Devin, None),
+        "--permission-mode".to_string(),
+        "dangerous".to_string(),
+        "--respect-workspace-trust".to_string(),
+        "false".to_string(),
+    ];
+    if !state.coder_model.is_empty() {
+        a.push("--model".to_string());
+        a.push(state.coder_model.clone());
+    }
+    a.push("-p".to_string());
+    a.push(coder_prompt(state, attempt, feedback, verdict_path));
+    a
+}
+
+fn verifier_prompt(state: &PipelineState, verdict_path: &Path) -> String {
+    let head = state.head_sha.as_deref().unwrap_or("현재 HEAD");
+    format!(
+        "fork {fk} 구현(HEAD {head})을 브리프 {brief}의 Standards/Spec 두 축과 Merge Danger으로 \
+         검증하라. verdict JSON(schema_version 1, fork_id \"{fk}\", target_head \"{head}\", \
+         decision pass|rework|fail|human, reason, findings, merge_danger)을 {vp} 에 기록하라 \
+         (디렉터리가 없으면 생성)",
+        fk = state.fork_id,
+        head = head,
+        brief = state.brief_path,
+        vp = verdict_path.display(),
+    )
+}
+
+/// 검증자 내부 argv — spec 계약: `pi --provider opencodex --model <verifier_model>`.
+fn verifier_inner_argv(state: &PipelineState, verdict_path: &Path) -> Vec<String> {
+    let mut a = vec![
+        roster::resolve_worker_bin(roster::WorkerCliKind::Pi, None),
+        "--provider".to_string(),
+        "opencodex".to_string(),
+    ];
+    if !state.verifier_model.is_empty() {
+        a.push("--model".to_string());
+        a.push(state.verifier_model.clone());
+    }
+    a.extend(
+        ["--no-extensions", "--no-mcp", "--no-approve"]
+            .iter()
+            .map(|s| s.to_string()),
+    );
+    a.push(verifier_prompt(state, verdict_path));
+    a
+}
+
+fn advisor_prompt(state: &PipelineState) -> String {
+    let head = state.head_sha.as_deref().unwrap_or("현재 HEAD");
+    let vp = state.last_verdict_path.as_deref().unwrap_or("(없음)");
+    format!(
+        "G3 자문 — fork {fk} 구현(HEAD {head}, verdict {vp})을 브리프 {brief}의 Merge Danger 기준 \
+         최종 머지 관문으로 검토하라. 판정은 마커 하나만 출력하라: [advisor:pass] 또는 \
+         [advisor:challenge:<이유>]",
+        fk = state.fork_id,
+        head = head,
+        vp = vp,
+        brief = state.brief_path,
+    )
+}
+
+/// G3 자문 내부 argv — 로스터 advisor 슬롯(SKILL.md "로스터 advisor 모델")을 쓰고,
+/// 슬롯이 없으면 spec 패턴과 같은 pi/opencodex 폴백으로 내린다.
+fn advisor_inner_argv(cfg: &ExecConfig, state: &PipelineState) -> Vec<String> {
+    let prompt = advisor_prompt(state);
+    let loaded = roster::load_roster_config_quiet(None, Some(&cfg.repo_dir));
+    let (_name, profile, _fb) =
+        roster::resolve_roster_profile(&loaded.config, &loaded.config.default_profile);
+    if let Some(spec) = profile.roles.get(&roster::RoleSlot::Advisor) {
+        roster::build_worker_command(
+            spec,
+            &roster::BuildWorkerCommandOptions {
+                prompt: &prompt,
+                role_brief_path: None,
+                interactive: false,
+            },
+        )
+    } else {
+        vec![
+            roster::resolve_worker_bin(roster::WorkerCliKind::Pi, None),
+            "--provider".to_string(),
+            "opencodex".to_string(),
+            "--no-extensions".to_string(),
+            "--no-mcp".to_string(),
+            "--no-approve".to_string(),
+            prompt,
+        ]
+    }
+}
+
+/// `dg wrap … -- sh -c 'exec env HERDR_ROLE=<role> HERDR_DELEGATE_MODE=hc <inner…> </dev/null'`
+/// 워커 스폰 argv — 관측된 코더 스폰 계약(`hc get t30f`)과 같은 형태.
+/// `--role`/`--label`은 현재 wrap 파서에서 미사용 필드지만 spec이 요구하는 명시 계약이다.
+fn wrap_spawn_argv(
+    cfg: &ExecConfig,
+    sess: &str,
+    role: &str,
+    fork_id: &str,
+    require_artifact: Option<&Path>,
+    inner: &[String],
+) -> Vec<String> {
+    let mut argv = vec![
+        cfg.dg_bin.clone(),
+        "wrap".to_string(),
+        "--route".to_string(),
+        "file_select".to_string(),
+        "--tool-class".to_string(),
+        "file_edit".to_string(),
+        "--role".to_string(),
+        role.to_string(),
+        "--label".to_string(),
+        sess.to_string(),
+        "--fork".to_string(),
+        fork_id.to_string(),
+        "--project".to_string(),
+        cfg.repo_dir.display().to_string(),
+        "--stall-ms".to_string(),
+        WRAP_STALL_MS.to_string(),
+        "--max-ms".to_string(),
+        WRAP_MAX_MS.to_string(),
+    ];
+    if let Some(art) = require_artifact {
+        argv.push("--require-artifact".to_string());
+        argv.push(art.display().to_string());
+    }
+    argv.push("--".to_string());
+    argv.push("sh".to_string());
+    argv.push("-c".to_string());
+    argv.push(format!(
+        "exec env HERDR_ROLE={role} HERDR_DELEGATE_MODE=hc {} </dev/null",
+        inner
+            .iter()
+            .map(|a| sh_quote(a))
+            .collect::<Vec<_>>()
+            .join(" ")
+    ));
+    argv
+}
+
+/// `hc run --bg --name <sess> --cwd <dir> -- <worker argv…>` 전체 argv.
+fn hc_run_argv(cfg: &ExecConfig, sess: &str, cwd: &Path, worker_argv: &[String]) -> Vec<String> {
+    let mut a = vec![
+        cfg.hc_bin.clone(),
+        "run".to_string(),
+        "--bg".to_string(),
+        "--name".to_string(),
+        sess.to_string(),
+        "--cwd".to_string(),
+        cwd.display().to_string(),
+        "--".to_string(),
+    ];
+    a.extend(worker_argv.iter().cloned());
+    a
+}
+
+fn coder_commands(
+    cfg: &ExecConfig,
+    state: &PipelineState,
+    attempt: u32,
+    feedback: Option<&str>,
+    verdict_path: Option<&str>,
+) -> Vec<Vec<String>> {
+    let sess = session_name("coder", &state.fork_id, Some(attempt));
+    let cwd = worker_cwd(cfg, state);
+    let inner = coder_inner_argv(state, attempt, feedback, verdict_path);
+    let spawn = wrap_spawn_argv(cfg, &sess, "coder", &state.fork_id, None, &inner);
+    vec![
+        hc_run_argv(cfg, &sess, &cwd, &spawn),
+        vec![cfg.hc_bin.clone(), "wait".to_string(), sess.clone(), "--json".to_string()],
+        vec![cfg.hc_bin.clone(), "get".to_string(), sess.clone(), "--json".to_string()],
+        vec!["git".to_string(), "-C".to_string(), cwd.display().to_string(), "rev-parse".to_string(), "HEAD".to_string()],
+        vec![cfg.hc_bin.clone(), "rm".to_string(), sess],
+    ]
+}
+
+/// dry-run·실행 공용 커맨드 빌더 — 액션을 외부 명령 argv 리스트로 펼친다(순수, 실행 없음).
+/// 실제 실행기는 이 목록과 동일한 명령을 돌린다(dry-run 출력 = 실제 실행 명령).
+fn plan_commands(
+    action: &PipelineAction,
+    state: &PipelineState,
+    cfg: &ExecConfig,
+) -> Vec<Vec<String>> {
+    let cwd = worker_cwd(cfg, state);
+    match action {
+        PipelineAction::SpawnCoder { attempt, feedback } => {
+            coder_commands(cfg, state, *attempt, feedback.as_deref(), None)
+        }
+        PipelineAction::BackpropAndRespawnCoder {
+            fork_id,
+            verdict_path,
+            attempt,
+        } => {
+            let mut bp = vec![
+                cfg.dg_bin.clone(),
+                "backprop".to_string(),
+                "--fork".to_string(),
+                fork_id.clone(),
+                "--verdict-file".to_string(),
+                verdict_path.clone(),
+            ];
+            if let Some(h) = &state.head_sha {
+                bp.push("--expected-head".to_string());
+                bp.push(h.clone());
+            }
+            let mut cmds = vec![bp];
+            cmds.extend(coder_commands(
+                cfg,
+                state,
+                *attempt,
+                Some("verdict rework"),
+                Some(verdict_path),
+            ));
+            cmds
+        }
+        PipelineAction::SpawnVerifier { fork_id, .. } => {
+            let sess = session_name("verifier", fork_id, Some(state.attempt));
+            let vp = verdict::resolve_verdict_path(&cfg.repo_dir, fork_id);
+            let inner = verifier_inner_argv(state, &vp);
+            let spawn = wrap_spawn_argv(cfg, &sess, "verifier", fork_id, Some(&vp), &inner);
+            vec![
+                hc_run_argv(cfg, &sess, &cwd, &spawn),
+                vec![cfg.hc_bin.clone(), "wait".to_string(), sess.clone(), "--json".to_string()],
+                vec![cfg.hc_bin.clone(), "get".to_string(), sess.clone(), "--json".to_string()],
+                vec![cfg.hc_bin.clone(), "rm".to_string(), sess],
+            ]
+        }
+        PipelineAction::SpawnAdvisorG3 { fork_id, .. } => {
+            let sess = session_name("advisor-g3", fork_id, None);
+            let inner = advisor_inner_argv(cfg, state);
+            let spawn = wrap_spawn_argv(cfg, &sess, "advisor", fork_id, None, &inner);
+            vec![
+                hc_run_argv(cfg, &sess, &cwd, &spawn),
+                vec![cfg.hc_bin.clone(), "wait".to_string(), sess.clone(), "--json".to_string()],
+                vec![
+                    cfg.hc_bin.clone(),
+                    "read".to_string(),
+                    sess.clone(),
+                    "--lines".to_string(),
+                    ADVISOR_READ_LINES.to_string(),
+                ],
+                vec![cfg.hc_bin.clone(), "rm".to_string(), sess],
+                // [advisor:pass] 마커 확인 후에만 실행 — git push + gh pr create(ci-full 라벨 미부착)
+                vec![
+                    "git".to_string(),
+                    "-C".to_string(),
+                    cwd.display().to_string(),
+                    "push".to_string(),
+                    "-u".to_string(),
+                    "origin".to_string(),
+                    state.branch.clone(),
+                ],
+                vec![
+                    "gh".to_string(),
+                    "pr".to_string(),
+                    "create".to_string(),
+                    "--head".to_string(),
+                    state.branch.clone(),
+                    "--fill".to_string(),
+                ],
+            ]
+        }
+        PipelineAction::WakeSubleadEscalation { reason } => vec![vec![
+            cfg.hc_bin.clone(),
+            "send".to_string(),
+            "<parent>".to_string(),
+            format!("[pipeline] {} ESCALATED: {reason}", state.fork_id),
+        ]],
+        PipelineAction::EmitReadyPr { .. } | PipelineAction::None => Vec::new(),
+    }
+}
+
+// ---------- hc 헬퍼 ----------
+
+/// `hc get <t> --json` — 터미널 없음·실패는 None(스폰 필요 신호로 사용).
+fn hc_get(hc: &str, term: &str) -> Option<Value> {
+    let out = ProcCommand::new(hc).args(["get", term, "--json"]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&out.stdout).ok()
+}
+
+/// `hc wait <t> --json` — 워커가 "일을 멈출 때"까지 블록한다(sleep·폴링 금지 계약).
+fn hc_wait(hc: &str, term: &str) -> Result<Value, String> {
+    let out = ProcCommand::new(hc)
+        .args(["wait", term, "--json"])
+        .output()
+        .map_err(|e| format!("hc 실행 불가: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "hc wait {term} 실패: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    serde_json::from_slice(&out.stdout).map_err(|e| format!("hc wait JSON 파싱 실패: {e}"))
+}
+
+/// `hc run --bg` 스폰 — 세션명은 호출자의 결정적 이름을 쓴다(재개 식별용).
+fn hc_spawn(hc: &str, name: &str, cwd: &Path, argv: &[String]) -> Result<(), String> {
+    let cwd_s = cwd.display().to_string();
+    let mut args: Vec<&str> = vec!["run", "--bg", "--name", name, "--cwd", &cwd_s, "--"];
+    args.extend(argv.iter().map(String::as_str));
+    let out = ProcCommand::new(hc)
+        .args(&args)
+        .output()
+        .map_err(|e| format!("hc 실행 불가: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "hc run --bg {name} 실패: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// `hc read <t> --lines <n>` — 종료 세션의 화면 꼬리(wrap 요약·advisor 마커 검출용).
+fn hc_read(hc: &str, term: &str, lines: &str) -> String {
+    ProcCommand::new(hc)
+        .args(["read", term, "--lines", lines])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// 종료된 워커 터미널 정리(`hc rm`) — 최선노력, 실패 무시.
+fn hc_rm(hc: &str, term: &str) {
+    let _ = ProcCommand::new(hc).args(["rm", term]).output();
+}
+
+/// 세션 상태 문자열(live/finished/…) — 없으면 None.
+fn hc_session_state(info: Option<&Value>) -> Option<&str> {
+    info.and_then(|v| v.get("state")).and_then(Value::as_str)
+}
+
+/// 워커 스폰-or-재개-or-대기 후 종료 정보를 반환한다.
+/// finished면 결과 재사용, live면 대기만(크래시 재개), 없거나 dead/gone이면
+/// 잔여 세션을 정리하고 새로 스폰한다 — 종결적 세션명 결정성의 핵심.
+fn hc_run_to_exit(hc: &str, sess: &str, cwd: &Path, argv: &[String]) -> Result<Value, String> {
+    let info = hc_get(hc, sess);
+    match hc_session_state(info.as_ref()) {
+        Some("finished") => return Ok(info.expect("checked")),
+        Some("live") => {} // 재개 — 대기만 한다
+        _ => {
+            if info.is_some() {
+                hc_rm(hc, sess); // dead/gone 잔여 세션 — 이름 충돌 방지로 선제 정리
+            }
+            hc_spawn(hc, sess, cwd, argv)?;
+        }
+    }
+    // 비종료 사유(message·idle 등)로 wait가 조기 반환될 수 있어 유한 재시도로 완충한다.
+    for _ in 0..3 {
+        let _ = hc_wait(hc, sess)?;
+        let after = hc_get(hc, sess);
+        if hc_session_state(after.as_ref()) == Some("finished") {
+            return Ok(after.expect("checked"));
+        }
+    }
+    Err(format!("hc 세션 {sess}이(가) 종료되지 않음"))
+}
+
+/// 종료 세션 정보 → 종료 코드(exit_code 우선, signal이면 128+sig, 둘 다 없으면 -1).
+fn session_exit_code(info: &Value) -> i32 {
+    info.get("exit_code")
+        .and_then(Value::as_i64)
+        .or_else(|| info.get("signal").and_then(Value::as_i64).map(|s| 128 + s))
+        .unwrap_or(-1) as i32
+}
+
+/// 종료 코더 세션 → CoderExited. stalled는 `dg wrap` 요약 JSON을 터미널 화면에서 best-effort로 읽는다.
+fn coder_event_from_session(hc: &str, sess: &str, info: &Value) -> PipelineEvent {
+    let screen = hc_read(hc, sess, "60");
+    let stalled = screen.contains("\"stalled\":true") || screen.contains("\"stalled\": true");
+    PipelineEvent::CoderExited {
+        exit_code: session_exit_code(info),
+        head_sha: None, // 호출자가 git rev-parse로 채운다
+        stalled,
+    }
+}
+
+/// advisor 출력에서 판정 마커 추출 — `[advisor:pass]` 또는 `[advisor:challenge:<이유>]`.
+fn advisor_marker(screen: &str) -> (bool, String) {
+    if screen.contains("[advisor:pass]") {
+        return (true, String::new());
+    }
+    if let Some(pos) = screen.find("[advisor:challenge") {
+        let tail = &screen[pos + "[advisor:challenge".len()..];
+        let reason = tail
+            .trim_start_matches(':')
+            .split(']')
+            .next()
+            .unwrap_or("")
+            .trim();
+        let reason = if reason.is_empty() { "(사유 없음)" } else { reason };
+        return (false, format!("advisor challenge: {reason}"));
+    }
+    (false, "advisor 마커 없음([advisor:pass] 미검출)".to_string())
+}
+
+/// `gh pr create` 출력에서 PR 번호 추출 — `…/pull/<num>` 꼬리.
+fn parse_pr_number(text: &str) -> Option<u64> {
+    for token in text.split_whitespace() {
+        if let Some(pos) = token.find("/pull/") {
+            let digits: String = token[pos + 6..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if !digits.is_empty() {
+                return digits.parse().ok();
+            }
+        }
+    }
+    None
+}
+
+// ---------- 실제 실행기 ----------
+
+/// 실제 실행기 — hc+`dg wrap` 워커 스폰·대기·결과 수집. 모든 외부 명령은
+/// `plan_commands`와 동일한 argv로 실행된다(dry-run 출력 = 실제 실행 명령).
+pub struct RealPipelineExecutor {
+    pub cfg: ExecConfig,
+}
+
+impl RealPipelineExecutor {
+    pub fn new(cfg: ExecConfig) -> Self {
+        Self { cfg }
+    }
+
+    /// coder 세션 실행 → CoderExited. 세션명은 attempt와 결속해 재스폰을 구분한다.
+    fn run_coder(
+        &self,
+        state: &PipelineState,
+        attempt: u32,
+        feedback: Option<&str>,
+        verdict_path: Option<&str>,
+    ) -> Result<Option<PipelineEvent>, String> {
+        let sess = session_name("coder", &state.fork_id, Some(attempt));
+        let cwd = worker_cwd(&self.cfg, state);
+        let inner = coder_inner_argv(state, attempt, feedback, verdict_path);
+        let argv = wrap_spawn_argv(&self.cfg, &sess, "coder", &state.fork_id, None, &inner);
+        let info = hc_run_to_exit(&self.cfg.hc_bin, &sess, &cwd, &argv)?;
+        let mut event = coder_event_from_session(&self.cfg.hc_bin, &sess, &info);
+        if let PipelineEvent::CoderExited { ref mut head_sha, .. } = event {
+            *head_sha = verdict::resolve_git_head(&cwd);
+        }
+        hc_rm(&self.cfg.hc_bin, &sess);
+        Ok(Some(event))
+    }
+
+    /// verifier 세션 실행 → VerdictReceived. verdict 판정은 `validate_verdict_file`의
+    /// fail-closed `effective_decision`을 그대로 쓴다(무효·stale → Human → 에스컬레이션).
+    fn run_verifier(&self, state: &PipelineState) -> Result<Option<PipelineEvent>, String> {
+        let sess = session_name("verifier", &state.fork_id, Some(state.attempt));
+        let cwd = worker_cwd(&self.cfg, state);
+        let vp = verdict::resolve_verdict_path(&self.cfg.repo_dir, &state.fork_id);
+        if let Some(dir) = vp.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let inner = verifier_inner_argv(state, &vp);
+        let argv = wrap_spawn_argv(&self.cfg, &sess, "verifier", &state.fork_id, Some(&vp), &inner);
+        let _info = hc_run_to_exit(&self.cfg.hc_bin, &sess, &cwd, &argv)?;
+        hc_rm(&self.cfg.hc_bin, &sess);
+        let v = verdict::validate_verdict_file(
+            &vp,
+            &ValidateVerdictOptions {
+                expected_fork_id: state.fork_id.clone(),
+                expected_head: state.head_sha.clone(),
+            },
+        );
+        Ok(Some(PipelineEvent::VerdictReceived {
+            decision: v.effective_decision,
+            verdict_path: vp.display().to_string(),
+        }))
+    }
+
+    /// advisor-g3 세션 실행 → `[advisor:pass]` 마커 확인 → push + `gh pr create`
+    /// → AdvisorG3Result. pass인데 pr_number를 못 얻으면 상태머신이 프로토콜 위반으로
+    /// 에스컬레이션한다(fail-closed — 여기서 추정하지 않는다).
+    fn run_advisor_g3(&self, state: &PipelineState) -> Result<Option<PipelineEvent>, String> {
+        let sess = session_name("advisor-g3", &state.fork_id, None);
+        let cwd = worker_cwd(&self.cfg, state);
+        let inner = advisor_inner_argv(&self.cfg, state);
+        let argv = wrap_spawn_argv(&self.cfg, &sess, "advisor", &state.fork_id, None, &inner);
+        let _info = hc_run_to_exit(&self.cfg.hc_bin, &sess, &cwd, &argv)?;
+        let screen = hc_read(&self.cfg.hc_bin, &sess, ADVISOR_READ_LINES);
+        hc_rm(&self.cfg.hc_bin, &sess);
+        let (passed, marker_reason) = advisor_marker(&screen);
+        if !passed {
+            return Ok(Some(PipelineEvent::AdvisorG3Result {
+                passed: false,
+                pr_number: None,
+                reason: Some(marker_reason),
+            }));
+        }
+        let cwd_s = cwd.display().to_string();
+        let push = ProcCommand::new("git")
+            .args(["-C", &cwd_s, "push", "-u", "origin", &state.branch])
+            .output()
+            .map_err(|e| format!("git 실행 불가: {e}"))?;
+        if !push.status.success() {
+            return Ok(Some(PipelineEvent::AdvisorG3Result {
+                passed: false,
+                pr_number: None,
+                reason: Some(format!(
+                    "git push 실패: {}",
+                    String::from_utf8_lossy(&push.stderr).trim()
+                )),
+            }));
+        }
+        let gh = ProcCommand::new("gh")
+            .args(["pr", "create", "--head", &state.branch, "--fill"])
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| format!("gh 실행 불가: {e}"))?;
+        if !gh.status.success() {
+            return Ok(Some(PipelineEvent::AdvisorG3Result {
+                passed: false,
+                pr_number: None,
+                reason: Some(format!(
+                    "gh pr create 실패: {}",
+                    String::from_utf8_lossy(&gh.stderr).trim()
+                )),
+            }));
+        }
+        let pr_number = parse_pr_number(&String::from_utf8_lossy(&gh.stdout));
+        Ok(Some(PipelineEvent::AdvisorG3Result {
+            passed: true,
+            pr_number,
+            reason: None,
+        }))
+    }
+
+    /// 에스컬레이션 단발 알림 — stderr 출력 + `HC_TERMINAL_ID` 부모가 있으면 `hc send` 보고.
+    fn notify_escalation(&self, state: &PipelineState, reason: &str) {
+        let msg = format!("[pipeline] {} ESCALATED: {reason}", state.fork_id);
+        eprint_line(&format!("[pipeline run] {msg}"));
+        let Ok(tid) = std::env::var("HC_TERMINAL_ID") else {
+            return;
+        };
+        let Some(info) = hc_get(&self.cfg.hc_bin, &tid) else {
+            return;
+        };
+        let parent = info.get("parent").and_then(Value::as_str).unwrap_or("");
+        if parent.is_empty() {
+            return;
+        }
+        let _ = ProcCommand::new(&self.cfg.hc_bin)
+            .args(["send", parent, &msg])
+            .output();
+    }
+}
+
+impl PipelineExecutor for RealPipelineExecutor {
+    fn execute(
+        &mut self,
+        action: &PipelineAction,
+        state: &PipelineState,
+    ) -> Result<Option<PipelineEvent>, String> {
+        match action {
+            PipelineAction::SpawnCoder { attempt, feedback } => {
+                self.run_coder(state, *attempt, feedback.as_deref(), None)
+            }
+            PipelineAction::BackpropAndRespawnCoder {
+                fork_id,
+                verdict_path,
+                attempt,
+            } => {
+                // `dg backprop --fork <id> --verdict-file <path>` — verdict 역귀속 후 재스폰.
+                // backprop 실패는 경고만 남기고 진행한다(verdict는 이미 fail-closed 검증됨).
+                let mut bp_args = vec![
+                    "backprop".to_string(),
+                    "--fork".to_string(),
+                    fork_id.clone(),
+                    "--verdict-file".to_string(),
+                    verdict_path.clone(),
+                ];
+                if let Some(h) = &state.head_sha {
+                    bp_args.push("--expected-head".to_string());
+                    bp_args.push(h.clone());
+                }
+                match ProcCommand::new(&self.cfg.dg_bin).args(&bp_args).output() {
+                    Ok(o) if !o.status.success() => eprint_line(&format!(
+                        "[pipeline run] dg backprop 실패(exit {:?}): {}",
+                        o.status.code(),
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    )),
+                    Err(e) => eprint_line(&format!("[pipeline run] dg backprop 실행 불가: {e}")),
+                    _ => {}
+                }
+                self.run_coder(state, *attempt, Some("verdict rework"), Some(verdict_path))
+            }
+            PipelineAction::SpawnVerifier { .. } => self.run_verifier(state),
+            PipelineAction::SpawnAdvisorG3 { .. } => self.run_advisor_g3(state),
+            PipelineAction::EmitReadyPr { .. } | PipelineAction::None => Ok(None),
+            PipelineAction::WakeSubleadEscalation { reason } => {
+                self.notify_escalation(state, reason);
+                Ok(None)
+            }
+        }
+    }
+}
+
+/// `dg pipeline run` 결과 — exit_code·READY_PR 신호·에스컬레이션 사유를 담는다.
+#[derive(Debug)]
+pub struct RunOutcome {
+    pub exit_code: i32,
+    pub steps: u32,
+    pub final_phase: PipelinePhase,
+    pub ready_pr_signal: Option<String>,
+    pub escalation_reason: Option<String>,
+    pub max_steps_exceeded: bool,
+}
+
+/// 결정적 러너 루프 — `위상→액션→실행→이벤트→전이→원자적 저장`을 max_steps까지 반복.
+/// 종결 위상 도달 시 ReadyPr는 exit 0, Escalated/Failed는 exit 3. 스텝 소진은
+/// 결정적 한계 도달로 보고 에스컬레이션 알림 후 exit 3(상태 파일은 그대로 둔다).
+pub fn run_pipeline(
+    mut state: PipelineState,
+    state_dir: &Path,
+    executor: &mut dyn PipelineExecutor,
+    max_steps: u32,
+) -> Result<RunOutcome, String> {
+    let mut steps = 0u32;
+    let mut signal: Option<String> = None;
+    loop {
+        if state.phase.is_terminal() {
+            return Ok(RunOutcome {
+                exit_code: if state.phase == PipelinePhase::ReadyPr { 0 } else { 3 },
+                steps,
+                final_phase: state.phase,
+                ready_pr_signal: signal,
+                escalation_reason: state.escalation_reason.clone(),
+                max_steps_exceeded: false,
+            });
+        }
+        if steps >= max_steps {
+            let reason = format!("max_steps {max_steps} 초과 — 무한 루프 방지로 강제 에스컬레이션");
+            let action = PipelineAction::WakeSubleadEscalation {
+                reason: reason.clone(),
+            };
+            let _ = executor.execute(&action, &state);
+            return Ok(RunOutcome {
+                exit_code: 3,
+                steps,
+                final_phase: state.phase,
+                ready_pr_signal: signal,
+                escalation_reason: Some(reason),
+                max_steps_exceeded: true,
+            });
+        }
+        let action = action_for_phase(&state)?;
+        let event = executor
+            .execute(&action, &state)?
+            .ok_or_else(|| format!("executor가 액션 {}의 이벤트를 반환하지 않음", action.label()))?;
+        let (next, out_action) = pipeline::advance_pipeline(state, event);
+        pipeline::save_state(state_dir, &next)?;
+        steps += 1;
+        state = next;
+        match &out_action {
+            PipelineAction::EmitReadyPr { pr_number, head_sha } => {
+                signal = Some(format!(
+                    "READY_PR={} HEAD={} G3=PASS",
+                    pr_number,
+                    head_sha.as_deref().unwrap_or("unknown")
+                ));
+                let _ = executor.execute(&out_action, &state);
+            }
+            PipelineAction::WakeSubleadEscalation { .. } => {
+                let _ = executor.execute(&out_action, &state);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `dg pipeline run --fork <id> [--state-dir <dir>] [--repo <dir>] [--max-steps 20]
+/// [--dry-run] [--json]` — 상태 파일을 로드해 파이프라인을 자동 구동한다.
+fn cmd_run(args: &ParsedArgs, json: bool) -> CmdResult {
+    let fork_id = require_flag(args, "fork")?;
+    let dir = state_dir(args);
+    let state =
+        pipeline::load_state(&dir, &fork_id).map_err(|e| DgError::Usage(UsageError(e)))?;
+    let max_steps = parse_int_flag(args, "max-steps", RUN_DEFAULT_MAX_STEPS)?;
+    if max_steps < 1 {
+        return Err(DgError::Usage(UsageError(
+            "--max-steps must be >= 1".to_string(),
+        )));
+    }
+    let cfg = ExecConfig::from_args(args);
+
+    // --dry-run — 외부 프로세스 0회: 현재 위상의 예정 명령 목록만 출력하고 종료.
+    if bool_flag(args, "dry-run") {
+        if state.phase.is_terminal() {
+            emit(
+                json,
+                format!(
+                    "[pipeline run] {fork_id} — 이미 종결 위상 {}",
+                    state.phase.as_str()
+                ),
+                &json!({
+                    "action": "run",
+                    "dry_run": true,
+                    "fork_id": fork_id,
+                    "phase": state.phase.as_str(),
+                    "commands": Vec::<Vec<String>>::new(),
+                }),
+            );
+            return Ok(0);
+        }
+        let action = action_for_phase(&state).map_err(|e| DgError::Usage(UsageError(e)))?;
+        let commands = plan_commands(&action, &state, &cfg);
+        let mut human = format!(
+            "[pipeline run] {fork_id} dry-run — {} (action={})",
+            state.phase.as_str(),
+            action.label()
+        );
+        for c in &commands {
+            human.push_str(&format!("\n  $ {}", c.join(" ")));
+        }
+        emit(
+            json,
+            human,
+            &json!({
+                "action": "run",
+                "dry_run": true,
+                "fork_id": fork_id,
+                "phase": state.phase.as_str(),
+                "planned_action": action,
+                "commands": commands,
+            }),
+        );
+        return Ok(0);
+    }
+
+    let mut executor = RealPipelineExecutor::new(cfg);
+    match run_pipeline(state, &dir, &mut executor, max_steps as u32) {
+        Ok(outcome) => {
+            let mut human = format!(
+                "[pipeline run] {fork_id} → {} steps={}",
+                outcome.final_phase.as_str(),
+                outcome.steps
+            );
+            if let Some(sig) = &outcome.ready_pr_signal {
+                human.push_str(&format!("\n{sig}"));
+            }
+            if let Some(r) = &outcome.escalation_reason {
+                human.push_str(&format!("\nESCALATED: {r}"));
+            }
+            emit(
+                json,
+                human,
+                &json!({
+                    "action": "run",
+                    "fork_id": fork_id,
+                    "final_phase": outcome.final_phase.as_str(),
+                    "steps": outcome.steps,
+                    "exit_code": outcome.exit_code,
+                    "ready_pr_signal": outcome.ready_pr_signal,
+                    "escalation_reason": outcome.escalation_reason,
+                    "max_steps_exceeded": outcome.max_steps_exceeded,
+                }),
+            );
+            Ok(outcome.exit_code)
+        }
+        Err(e) => {
+            emit(
+                json,
+                format!("[pipeline run] {fork_id} 실행 오류: {e}"),
+                &json!({
+                    "action": "run",
+                    "fork_id": fork_id,
+                    "errors": [e],
+                }),
+            );
+            Ok(1)
+        }
+    }
+}
+
+#[cfg(test)]
+mod run_tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    use dgate_core::pipeline::{self, PipelineTransition};
+    use dgate_core::verdict::VerdictDecision;
+
+    /// 스크립트된 이벤트 큐 + 호출 기록 Mock 실행기 — 외부 프로세스 없이
+    /// 전체 루프(`Init → … → ReadyPr`/`Escalated` 탈출)를 결정적으로 검증한다.
+    struct MockExecutor {
+        calls: Vec<String>,
+        events: VecDeque<PipelineEvent>,
+    }
+
+    impl MockExecutor {
+        fn new(events: Vec<PipelineEvent>) -> Self {
+            Self {
+                calls: Vec::new(),
+                events: events.into(),
+            }
+        }
+        fn count(&self, label: &str) -> usize {
+            self.calls.iter().filter(|c| c.as_str() == label).count()
+        }
+    }
+
+    impl PipelineExecutor for MockExecutor {
+        fn execute(
+            &mut self,
+            action: &PipelineAction,
+            _state: &PipelineState,
+        ) -> Result<Option<PipelineEvent>, String> {
+            self.calls.push(action.label().to_string());
+            Ok(self.events.pop_front())
+        }
+    }
+
+    fn tmp_state_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("dg-run-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    fn init_state(fork: &str, max_reworks: u32) -> PipelineState {
+        pipeline::init_pipeline(&PipelineInit {
+            fork_id: fork.to_string(),
+            run_id: None,
+            brief_path: ".herdr/briefs/t.md".to_string(),
+            worktree_path: Some("/tmp/wt".to_string()),
+            branch: "feat/t".to_string(),
+            scope_glob: None,
+            max_reworks,
+            coder_model: "codex-gpt5".to_string(),
+            verifier_model: "glm-5.3".to_string(),
+        })
+        .0
+    }
+
+    fn coder_ok() -> PipelineEvent {
+        PipelineEvent::CoderExited {
+            exit_code: 0,
+            head_sha: Some("abc1234".to_string()),
+            stalled: false,
+        }
+    }
+
+    fn verdict(d: VerdictDecision) -> PipelineEvent {
+        PipelineEvent::VerdictReceived {
+            decision: d,
+            verdict_path: ".herdr/verify/fk_r-verdict.json".to_string(),
+        }
+    }
+
+    // 1) 정상 완주 — Init→Coder(0)→Verifier(Pass)→G3(Pass,PR=77)→ReadyPr, exit 0 + READY_PR 신호
+    #[test]
+    fn run_happy_path_ready_pr() {
+        let dir = tmp_state_dir("happy");
+        let state = init_state("fk_r", 2);
+        let mut mock = MockExecutor::new(vec![
+            coder_ok(),
+            verdict(VerdictDecision::Pass),
+            PipelineEvent::AdvisorG3Result {
+                passed: true,
+                pr_number: Some(77),
+                reason: None,
+            },
+        ]);
+        let outcome = run_pipeline(state, &dir, &mut mock, 20).unwrap();
+        assert_eq!(outcome.exit_code, 0);
+        assert_eq!(outcome.final_phase, PipelinePhase::ReadyPr);
+        assert_eq!(
+            outcome.ready_pr_signal.as_deref(),
+            Some("READY_PR=77 HEAD=abc1234 G3=PASS")
+        );
+        assert_eq!(
+            mock.calls,
+            vec!["spawn_coder", "spawn_verifier", "spawn_advisor_g3", "emit_ready_pr"]
+        );
+        // 매 스텝 영속화 — 마지막 상태 파일이 ready_pr
+        let saved = pipeline::load_state(&dir, "fk_r").unwrap();
+        assert_eq!(saved.phase, PipelinePhase::ReadyPr);
+        assert_eq!(saved.pr_number, Some(77));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // 2) 1회 rework 후 2회차 PASS 완주 — backprop 호출 정확히 1회
+    #[test]
+    fn run_rework_once_then_pass() {
+        let dir = tmp_state_dir("rework");
+        let state = init_state("fk_r", 2);
+        let mut mock = MockExecutor::new(vec![
+            coder_ok(),
+            verdict(VerdictDecision::Rework),
+            coder_ok(),
+            verdict(VerdictDecision::Pass),
+            PipelineEvent::AdvisorG3Result {
+                passed: true,
+                pr_number: Some(7),
+                reason: None,
+            },
+        ]);
+        let outcome = run_pipeline(state, &dir, &mut mock, 20).unwrap();
+        assert_eq!(outcome.exit_code, 0);
+        assert_eq!(mock.count("backprop_and_respawn_coder"), 1);
+        assert_eq!(mock.count("spawn_coder"), 1);
+        assert_eq!(mock.count("spawn_verifier"), 2);
+        let saved = pipeline::load_state(&dir, "fk_r").unwrap();
+        assert_eq!(saved.attempt, 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // 3) rework 예산 소진 → Escalated + WakeSubleadEscalation 호출 + exit 3
+    #[test]
+    fn run_rework_budget_exhausted_escalates() {
+        let dir = tmp_state_dir("esc");
+        let state = init_state("fk_r", 1); // max_reworks=1
+        let mut mock = MockExecutor::new(vec![
+            coder_ok(),
+            verdict(VerdictDecision::Rework), // attempt 1 → backprop 재스폰
+            coder_ok(),
+            verdict(VerdictDecision::Fail), // 예산 소진 → escalate
+        ]);
+        let outcome = run_pipeline(state, &dir, &mut mock, 20).unwrap();
+        assert_eq!(outcome.exit_code, 3);
+        assert_eq!(outcome.final_phase, PipelinePhase::Escalated);
+        assert_eq!(mock.count("backprop_and_respawn_coder"), 1);
+        assert_eq!(mock.count("wake_sublead_escalation"), 1);
+        assert!(outcome.escalation_reason.is_some());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // 4) --dry-run — 외부 프로세스 0회(plan_commands는 순수 빌더, executor 미호출) +
+    //    예정 명령 리스트(hc run/wait/get·dg backprop·dg wrap·devin·pi·gh pr create) 반환
+    #[test]
+    fn run_dry_run_lists_commands_without_spawning() {
+        let cfg = ExecConfig {
+            hc_bin: "hc".to_string(),
+            dg_bin: "dg".to_string(),
+            repo_dir: PathBuf::from("/repo"),
+        };
+        // coder_running — hc run(dg wrap + devin … </dev/null) + hc wait/get + git rev-parse
+        let state = init_state("fk_r", 2);
+        let action = action_for_phase(&state).unwrap();
+        assert!(matches!(action, PipelineAction::SpawnCoder { attempt: 0, .. }));
+        let cmds = plan_commands(&action, &state, &cfg);
+        let joined = cmds.iter().map(|c| c.join(" ")).collect::<Vec<_>>().join("\n");
+        assert!(cmds.iter().any(|c| c[0] == "hc" && c[1] == "run"));
+        assert!(joined.contains("dg wrap") || joined.contains("dg\" wrap") || joined.contains(" wrap "));
+        assert!(joined.contains("devin") && joined.contains("</dev/null"));
+        assert!(cmds.iter().any(|c| c[0] == "hc" && c[1] == "wait"));
+        assert!(cmds.iter().any(|c| c[0] == "git" && c.join(" ").contains("rev-parse")));
+
+        // verifier_running — dg wrap --role verifier + pi --provider opencodex --model glm-5.3
+        let mut s2 = state.clone();
+        s2.phase = PipelinePhase::VerifierRunning;
+        s2.history.push(PipelineTransition {
+            from: PipelinePhase::CoderRunning,
+            event: "coder_exited".to_string(),
+            to: PipelinePhase::VerifierRunning,
+            action: "spawn_verifier".to_string(),
+            note: None,
+        });
+        let action = action_for_phase(&s2).unwrap();
+        let cmds = plan_commands(&action, &s2, &cfg);
+        let joined = cmds.iter().map(|c| c.join(" ")).collect::<Vec<_>>().join("\n");
+        assert!(joined.contains("--role verifier"));
+        assert!(joined.contains("opencodex") && joined.contains("glm-5.3"));
+
+        // advisor_g3_running — dg wrap --role advisor + gh pr create 계획 포함
+        let mut s3 = state.clone();
+        s3.phase = PipelinePhase::AdvisorG3Running;
+        let action = action_for_phase(&s3).unwrap();
+        let cmds = plan_commands(&action, &s3, &cfg);
+        let joined = cmds.iter().map(|c| c.join(" ")).collect::<Vec<_>>().join("\n");
+        assert!(joined.contains("--role advisor"));
+        assert!(cmds.iter().any(|c| c[0] == "gh" && c.join(" ").contains("pr create")));
+
+        // backprop 경유 rework_pending — dg backprop --verdict-file 선행
+        let mut s4 = state.clone();
+        s4.phase = PipelinePhase::ReworkPending;
+        s4.attempt = 1;
+        s4.last_verdict_path = Some(".herdr/verify/fk_r-verdict.json".to_string());
+        s4.history.push(PipelineTransition {
+            from: PipelinePhase::VerifierRunning,
+            event: "verdict_received".to_string(),
+            to: PipelinePhase::ReworkPending,
+            action: "backprop_and_respawn_coder".to_string(),
+            note: None,
+        });
+        let action = action_for_phase(&s4).unwrap();
+        assert!(matches!(action, PipelineAction::BackpropAndRespawnCoder { attempt: 1, .. }));
+        let cmds = plan_commands(&action, &s4, &cfg);
+        assert_eq!(cmds[0][0], "dg");
+        assert_eq!(cmds[0][1], "backprop");
+        assert!(cmds[0].join(" ").contains("--verdict-file"));
+    }
+
+    // 부록) 유틸 — 세션명 계약·마커·PR 번호 파싱
+    #[test]
+    fn run_helpers() {
+        assert_eq!(
+            session_name("coder", "fk_abc123", Some(0)),
+            "coder-fk_abc123-a0"
+        );
+        let long = session_name("verifier", "FK_Upper.Case/Slug", Some(2));
+        assert!(long.len() <= 32 && long.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'));
+
+        let (pass, _) = advisor_marker("log… [advisor:pass] done");
+        assert!(pass);
+        let (fail, reason) = advisor_marker("[advisor:challenge: P0 보안 문제]");
+        assert!(!fail && reason.contains("P0 보안 문제"));
+        let (none, reason) = advisor_marker("no marker");
+        assert!(!none && reason.contains("마커 없음"));
+
+        assert_eq!(
+            parse_pr_number("Creating pull request\nhttps://github.com/o/r/pull/77\n"),
+            Some(77)
+        );
+        assert_eq!(parse_pr_number("no url"), None);
+    }
 }

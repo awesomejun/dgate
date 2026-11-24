@@ -117,9 +117,33 @@ dg pipeline step --fork fk_1 --event g3-fail --reason "P0 conflict" --json
 
 # 조회(읽기 전용) — 위상·시도·전이 이력.
 dg pipeline status --fork fk_1 --json
+
+# 자동 구동 — 상태 파일을 로드해 `위상→액션→실행→이벤트→전이→저장` 루프를
+# 최대 --max-steps(기본 20)까지 돌린다. 각 액션의 실제 실행은 PipelineExecutor
+# 계약으로 위임하고, 실제 실행기는 hc+dg wrap으로 워커를 스폰한다:
+#   · coder    — hc run --bg + dg wrap --role coder + devin --permission-mode
+#                dangerous --respect-workspace-trust false -p … </dev/null,
+#                hc wait 후 git rev-parse HEAD → CoderExited{exit_code, head_sha}
+#   · verifier — hc run --bg + dg wrap --role verifier + pi --provider opencodex
+#                --model <verifier_model> → 종료 후 validate_verdict_file의
+#                effective_decision(fail-closed)을 그대로 VerdictReceived로 사용
+#   · advisor  — hc run --bg + dg wrap --role advisor → `[advisor:pass]` 마커 확인
+#                후 git push + gh pr create(ci-full 라벨 미부착) → AdvisorG3Result
+#   · rework   — dg backprop --fork <id> --verdict-file <path> 실행 후 coder 재스폰
+# 세션명은 `<role>-<fork>-a<attempt>`로 결정적 — 러너가 중간에 죽어도 재실행 시
+# live 세션은 이어서 기다리고 finished 세션의 결과를 재사용한다(중복 스폰 없음).
+dg pipeline run --fork fk_1 --json
+#   ReadyPr 완주 → exit 0 + ready_pr_signal "READY_PR=<num> HEAD=<sha> G3=PASS"
+#   Escalated/Failed · 스텝 소진 → exit 3 (부모 hc 터미널이 있으면 hc send 보고)
+
+# --dry-run — 외부 프로세스 0회: 현재 위상의 예정 명령(hc run/wait/get·dg wrap·
+# dg backprop·git·gh pr create) argv 목록만 출력하고 exit 0.
+dg pipeline run --fork fk_1 --dry-run --json
 ```
 
 공용 `--state-dir <dir>`로 상태 디렉터리를 바꾼다(기본 `<cwd>/.herdr/pipelines`).
+`dg pipeline run`의 `--repo <dir>`는 verdict 경로·`gh pr create` 기준 디렉터리
+(기본 `<cwd>`)이고, 워커 작업 디렉터리는 상태 파일의 `worktree_path`를 우선 쓴다.
 환경변수 폴백: `--coder-model`/`HERDR_CODER_MODEL`, `--verifier-model`/`HERDR_VERIFIER_MODEL`.
 `--head` 미지정 시 verdict 결속은 상태 파일의 `head_sha`를 쓴다.
 
@@ -130,5 +154,8 @@ dg pipeline status --fork fk_1 --json
   프로토콜 위반 에스컬레이션, 스코프 가드 in/out, 상태 파일 라운드트립.
 - `crates/dgate-cli` E2E(test_09): `init → step(coder-ok/verdict/g3-pass) → status`
   라이프사이클 + 재작업 소진 exit 3 + 동종 모델 exit 3 + 사용법 오류 exit 2.
+- `crates/dgate-cli` `dg pipeline run` 단위 테스트: Mock executor로 완주(READY_PR
+  exit 0)·1회 rework 후 완주(backprop 1회)·예산 소진 에스컬레이션(exit 3) +
+  dry-run 계획 목록(hc/dg wrap/dg backprop/gh pr create) 검증.
 - `cargo test --workspace` 전수 통과 · `cargo clippy -p dgate-core -p dgate-cli`
   신규 경고 0건.

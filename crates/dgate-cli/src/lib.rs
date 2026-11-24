@@ -61,6 +61,7 @@ const HELP: &str = "dg — decision gate CLI (plan-r2.1 §4.7, v2 native Rust)
   dg pipeline init --fork <id> --brief <path> --branch <name> [--worktree <dir>] [--scope <glob>] [--max-reworks 2] [--coder-model <m>] [--verifier-model <m>] [--state-dir <dir>] [--json]   (결정적 파이프라인 상태 파일 생성)
   dg pipeline step --fork <id> --event <coder-ok|coder-fail|verdict|g3-pass|g3-fail> [--head <sha>] [--verdict-file <path>] [--pr <num>] [--reason <text>] [--stalled] [--state-dir <dir>] [--json]   (상태 전이 → 다음 결정적 액션; 에스컬레이션 exit 3)
   dg pipeline status --fork <id> [--state-dir <dir>] [--json]   (위상·시도·전이 이력 조회, 읽기 전용)
+  dg pipeline run --fork <id> [--state-dir <dir>] [--repo <dir>] [--max-steps 20] [--dry-run] [--json]   (0토큰 자동 구동 — hc+dg wrap 워커 스폰 루프; ReadyPr exit 0, 에스컬레이션 exit 3)
   dg merge-train --pr <num> [--repo <dir>] [--ci-label ci-full] [--max-reruns 1] [--worktree <path>] [--poll-interval-ms 5000] [--timeout-ms 1800000] [--dry-run] [--json]   (직렬 머지 트레인: update-branch → ci-full → 재시도 → squash merge; sublead 금지)
 
 라우트 r: file_select|tool_select|retry_or_abort|delegate_swarm
