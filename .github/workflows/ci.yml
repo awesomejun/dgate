@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            test_args: "-p dgate-core -p dgate-cli -p dgate-tui --no-fail-fast"
+          - os: ubuntu-latest
+            test_args: "-p dgate-core -p dgate-cli -p dgate-tui --no-fail-fast"
+          - os: macos-latest
+            test_args: "--workspace --no-fail-fast"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Configure git identity for tests
+        run: |
+          git config --global user.name "ci-bot"
+          git config --global user.email "ci@example.com"
+          git config --global init.defaultBranch main
+      - name: Run tests
+        env:
+          CARGO_TERM_COLOR: always
+        run: cargo test ${{ matrix.test_args }}
