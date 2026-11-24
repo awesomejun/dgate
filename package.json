@@ -30,6 +30,7 @@
     "rust:build": "cargo build --release",
     "rust:test": "cargo test",
     "gui:build": "cargo build --release -p dgate-gui",
+    "tui:build": "cargo build --release -p dgate-tui",
     "dgate-gui": "sh -c 'if [ -x ./target/release/dgate-gui ]; then exec ./target/release/dgate-gui \"$@\"; elif [ -x ./target/debug/dgate-gui ]; then exec ./target/debug/dgate-gui \"$@\"; else exec cargo run --release -p dgate-gui -- \"$@\"; fi' --"
   },
   "engines": {

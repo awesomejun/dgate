@@ -1,0 +1,28 @@
+[package]
+name = "dgate-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "dgate_tui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dgate-tui"
+path = "src/main.rs"
+
+[dependencies]
+dgate-core = { path = "../dgate-core" }
+# ratatui 0.30는 파사드 — 백엔드의 crossterm 버전은 feature로 명시해야 한다
+# (미지정 시 ratatui-crossterm이 컴파일 에러). 직접 dep의 crossterm과 같은 0.29.
+ratatui = { version = "0.30", features = ["crossterm_0_29"] }
+crossterm = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# libc은 Unix 전용(localtime_r) — Windows 빌드는 끌어오지 않는다.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
