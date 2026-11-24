@@ -29,7 +29,7 @@ use dgate_core::db::{open_db, resolve_db_path, resolve_project_identity, OpenDbO
 use dgate_core::engine::RouteId;
 use dgate_core::live_sync::{
     format_role_badge, DefaultHcRunner, HcExecRunner, LiveSyncOptions, LiveSyncSnapshotter,
-    LiveWorkerInfo,
+    LiveWorkerInfo, LiveWorkerSlot,
 };
 use dgate_core::redact::redact_secrets;
 use dgate_core::report::{generate_rule_candidate_report, DecisionApiShadowSummary, ReportOptions};
@@ -701,6 +701,64 @@ pub fn partition_sessions_by_role(workers: &[LiveWorkerInfo]) -> RolePartitions 
         }
     }
     parts
+}
+
+/// 소유 sublead 1개와 그 아래에 귀속된 워커 묶음.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubleadCluster {
+    pub sublead: LiveWorkerInfo,
+    pub workers: Vec<LiveWorkerInfo>,
+}
+
+/// Workers 파티션의 sublead별 클러스터 분할 결과.
+/// - `clusters`: 입력 순서대로 정렬된 sublead 클러스터 목록(소속 워커가 0개여도 헤더 유지).
+/// - `unowned`: sublead에 귀속되지 않은 나머지 워커(미소속 wrap·최상위 리드 직속·종료된 sublead 소유분).
+///   sublead 세션 자체는 클러스터 헤더 역할이므로 `unowned`에 중복 수록하지 않는다.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct WorkerClusterPartitions {
+    pub clusters: Vec<SubleadCluster>,
+    pub unowned: Vec<LiveWorkerInfo>,
+}
+
+/// 워커 목록을 소유 sublead별 클러스터 + 미소속 그룹으로 분할한다(순수 함수 — 입력 순서 보존).
+pub fn cluster_workers_by_sublead(workers: &[LiveWorkerInfo]) -> WorkerClusterPartitions {
+    let mut clusters: Vec<SubleadCluster> = Vec::new();
+    let mut index_by_addr: HashMap<String, usize> = HashMap::new();
+    for w in workers {
+        if w.slot == LiveWorkerSlot::Sublead {
+            let idx = clusters.len();
+            if !w.address.is_empty() {
+                index_by_addr.entry(w.address.clone()).or_insert(idx);
+            }
+            clusters.push(SubleadCluster {
+                sublead: w.clone(),
+                workers: Vec::new(),
+            });
+        }
+    }
+    let mut unowned: Vec<LiveWorkerInfo> = Vec::new();
+    for w in workers {
+        if w.slot == LiveWorkerSlot::Sublead {
+            continue;
+        }
+        if let Some(owner) = w
+            .owner_address
+            .as_deref()
+            .filter(|addr| !addr.is_empty())
+        {
+            if let Some(&cluster_idx) = index_by_addr.get(owner) {
+                clusters[cluster_idx].workers.push(w.clone());
+                continue;
+            }
+        }
+        unowned.push(w.clone());
+    }
+    WorkerClusterPartitions { clusters, unowned }
+}
+
+/// GUI 클러스터 헤더 1행 라벨(예: `sublead-auth · 2`).
+pub fn format_cluster_header_label(cluster: &SubleadCluster) -> String {
+    format!("{} · {}", cluster.sublead.name, cluster.workers.len())
 }
 
 /// 헤더 LEAD [n] 카운터 표시값 — Lead 카드 상태 표기와 항상 일치시키는 판정.
@@ -1462,7 +1520,8 @@ pub fn poll_once(cfg: &PollerConfig, snapshotter: &mut LiveSyncSnapshotter) -> D
         .iter()
         .map(|&slot| {
             let spec = profile.roles.get(&slot);
-            let live = workers.iter().find(|w| w.slot == slot);
+            // roster 역할 슬롯(5종)과 라이브 워커 슬롯(6종, sublead는 as_role()=None) 정합 매칭.
+            let live = workers.iter().find(|w| w.slot.as_role() == Some(slot));
             RoleCardData {
                 slot: slot.as_str().to_string(),
                 title: role_title(&slot).to_string(),
@@ -1628,13 +1687,19 @@ pub fn poll_once(cfg: &PollerConfig, snapshotter: &mut LiveSyncSnapshotter) -> D
 pub const RECENT_LOG_LIMIT: usize = 16;
 
 /// 데모용 live 워커 카드 — 주소 고정(활동바 안정 채움 계산에 사용).
-fn demo_worker(slot: RoleSlot, name: &str, activity: &str, short_model: &str) -> LiveWorkerInfo {
+fn demo_worker(
+    slot: LiveWorkerSlot,
+    name: &str,
+    activity: &str,
+    short_model: &str,
+) -> LiveWorkerInfo {
     LiveWorkerInfo {
         slot,
         badge: format!("{} (실행 중)", short_model),
         short_model: short_model.to_string(),
         model_name: short_model.to_string(),
         address: format!("demo-{}", name),
+        owner_address: None,
         name: name.to_string(),
         cwd: Some("/demo/demo-app".to_string()),
         repo_tag: "demo-app".to_string(),
@@ -1743,31 +1808,31 @@ pub fn demo_snapshot() -> DashboardSnapshot {
     };
     let workers = vec![
         demo_worker(
-            RoleSlot::Lead,
+            LiveWorkerSlot::Lead,
             "w-lead-1",
             "작업 분해 · Decision Gate 사전 확정 검토 중",
             "pi:glm-5.3",
         ),
         demo_worker(
-            RoleSlot::Explore,
+            LiveWorkerSlot::Explore,
             "w-explore-1",
             "src/ui 레이아웃 구조 탐색 중",
             "pi:gpt-5.6-luna",
         ),
         demo_worker(
-            RoleSlot::Coder,
+            LiveWorkerSlot::Coder,
             "w-coder-1",
             "renderApp.ts 5계층 토폴로지 리팩터 적용 중",
             "pi:glm-5.3",
         ),
         demo_worker(
-            RoleSlot::Verifier,
+            LiveWorkerSlot::Verifier,
             "w-verify-1",
             "cargo test -p demo-app 결과 교차 검토 중",
             "pi:gpt-6-astra",
         ),
         demo_worker(
-            RoleSlot::Advisor,
+            LiveWorkerSlot::Advisor,
             "w-advisor-1",
             "완료 전 최종 점검 자문 준비 중",
             "zai:glm-5.3-flash",
@@ -1977,8 +2042,7 @@ pub fn spawn_poller(cfg: PollerConfig) -> (PollerHandle, PollerJoinHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dgate_core::live_sync::LiveWorkerInfo;
-    use dgate_core::roster::RoleSlot;
+    use dgate_core::live_sync::{LiveWorkerInfo, LiveWorkerSlot};
     use std::sync::Mutex as StdMutex;
 
     // ---------- GUI CLI 파싱 ----------
@@ -2062,11 +2126,12 @@ mod tests {
 
     fn worker(addr: &str, name: &str, repo: &str, cwd: Option<&str>) -> LiveWorkerInfo {
         LiveWorkerInfo {
-            slot: RoleSlot::Coder,
+            slot: LiveWorkerSlot::Coder,
             badge: "pi:glm-5.3 (실행 중)".to_string(),
             short_model: "pi:glm-5.3".to_string(),
             model_name: "glm-zcode/glm-5.3".to_string(),
             address: addr.to_string(),
+            owner_address: None,
             name: name.to_string(),
             cwd: cwd.map(str::to_string),
             repo_tag: repo.to_string(),
@@ -2610,6 +2675,8 @@ mod tests {
     fn mock_sync(mock: MockHc, repo_dir: &Path) -> LiveSyncSnapshotter {
         LiveSyncSnapshotter::new(LiveSyncOptions {
             exec_runner: Arc::new(mock),
+            // 호스트에서 실행 중인 실제 `dg wrap` 프로세스가 단위 테스트에 누수되지 않게 격리.
+            proc_lister: Arc::new(|| None),
             ..LiveSyncOptions::new(repo_dir.to_path_buf())
         })
     }
@@ -2968,9 +3035,9 @@ mod tests {
         assert_eq!(lead_display_count(&snap), 0);
         // 명시적 lead 실행 세션 — 그 수를 그대로
         let mut lead = worker("addr-lead", "w-lead", "alpha", None);
-        lead.slot = RoleSlot::Lead;
+        lead.slot = LiveWorkerSlot::Lead;
         let mut lead2 = worker("addr-lead2", "w-lead2", "alpha", None);
-        lead2.slot = RoleSlot::Lead;
+        lead2.slot = LiveWorkerSlot::Lead;
         snap.workers.push(lead);
         snap.workers.push(lead2);
         assert_eq!(lead_display_count(&snap), 2);
@@ -2991,20 +3058,21 @@ mod tests {
     fn partition_sessions_by_role_buckets_all_slots() {
         // 동일 레포(paperwork)에 lead 2 · verifier 1 · advisor 1 · sub 3이 섞여 있어도
         // 주소 기준으로 정확히 4역할로 분할된다(입력 순서 보존).
-        let mk = |addr: &str, slot: RoleSlot, repo: &str| LiveWorkerInfo {
+        let mk = |addr: &str, slot: LiveWorkerSlot, repo: &str| LiveWorkerInfo {
             slot,
             address: addr.to_string(),
             repo_tag: repo.to_string(),
             ..worker(addr, addr, repo, None)
         };
         let workers = vec![
-            mk("t155", RoleSlot::Lead, "paperwork-operations"),
-            mk("t900", RoleSlot::Coder, "paperwork-operations"),
-            mk("t182", RoleSlot::Verifier, "paperwork-operations"),
-            mk("t901", RoleSlot::Explore, "other-repo"),
-            mk("t165", RoleSlot::Lead, "paperwork-operations"),
-            mk("t902", RoleSlot::Advisor, "other-repo"),
-            mk("t903", RoleSlot::Coder, "paperwork-operations"),
+            mk("t155", LiveWorkerSlot::Lead, "paperwork-operations"),
+            mk("t900", LiveWorkerSlot::Coder, "paperwork-operations"),
+            mk("t182", LiveWorkerSlot::Verifier, "paperwork-operations"),
+            mk("t901", LiveWorkerSlot::Explore, "other-repo"),
+            mk("tSub1", LiveWorkerSlot::Sublead, "paperwork-operations"),
+            mk("t165", LiveWorkerSlot::Lead, "paperwork-operations"),
+            mk("t902", LiveWorkerSlot::Advisor, "other-repo"),
+            mk("t903", LiveWorkerSlot::Coder, "paperwork-operations"),
         ];
         let parts = partition_sessions_by_role(&workers);
         assert_eq!(
@@ -3038,7 +3106,7 @@ mod tests {
                 .iter()
                 .map(|w| w.address.as_str())
                 .collect::<Vec<_>>(),
-            vec!["t900", "t901", "t903"]
+            vec!["t900", "t901", "tSub1", "t903"]
         );
         // 전원 합산 보존 — 어느 세션도 사라지거나 중복되지 않는다
         assert_eq!(
@@ -3062,15 +3130,15 @@ mod tests {
         // 역할 분할 아키텍처에서 verifier/advisor는 독립 세션이지 리드 조율 증거가 아니다.
         snap.workers.clear();
         let mut verifier = worker("addr-v", "w-v", "alpha", None);
-        verifier.slot = RoleSlot::Verifier;
+        verifier.slot = LiveWorkerSlot::Verifier;
         let mut advisor = worker("addr-a", "w-a", "alpha", None);
-        advisor.slot = RoleSlot::Advisor;
+        advisor.slot = LiveWorkerSlot::Advisor;
         snap.workers.push(verifier);
         snap.workers.push(advisor);
         assert_eq!(lead_display_count(&snap), 0);
         // 명시적 lead가 있으면 sub 실행 여부와 무관하게 그 수
         let mut lead = worker("addr-l", "w-l", "alpha", None);
-        lead.slot = RoleSlot::Lead;
+        lead.slot = LiveWorkerSlot::Lead;
         snap.workers.push(lead);
         assert_eq!(lead_display_count(&snap), 1);
     }
@@ -3312,5 +3380,122 @@ mod tests {
         let before = c.panel_sizes;
         c.apply_snapshot(snapshot_fixture());
         assert_eq!(c.panel_sizes, before);
+    }
+
+    // ---------- sublead별 Workers 클러스터 분할 ----------
+
+    #[test]
+    fn cluster_workers_by_sublead_covers_mixed_empty_dead_order_and_header_uniqueness() {
+        let mk = |addr: &str, name: &str, slot: LiveWorkerSlot, owner: Option<&str>| {
+            LiveWorkerInfo {
+                slot,
+                address: addr.to_string(),
+                owner_address: owner.map(str::to_string),
+                name: name.to_string(),
+                ..worker(addr, name, "dgate", None)
+            }
+        };
+
+        // (a) sublead + 소속 + 미소속 혼합 분할 + 입력 순서 보존 + sublead 중복 없음
+        let mixed = vec![
+            mk("pid:1", "w-unowned-first", LiveWorkerSlot::Coder, None),
+            mk("tSubB", "sublead-billing", LiveWorkerSlot::Sublead, None),
+            mk("pid:2", "w-auth-1", LiveWorkerSlot::Coder, Some("tSubA")),
+            mk("tSubA", "sublead-auth", LiveWorkerSlot::Sublead, None),
+            mk("pid:3", "w-bill-1", LiveWorkerSlot::Explore, Some("tSubB")),
+            mk("pid:4", "w-auth-2", LiveWorkerSlot::Coder, Some("tSubA")),
+            mk("pid:5", "w-lead-direct", LiveWorkerSlot::Coder, Some("tLead0")),
+            mk("tSubEmpty", "sublead-idle", LiveWorkerSlot::Sublead, None),
+        ];
+        let res = cluster_workers_by_sublead(&mixed);
+        // 클러스터 순서는 입력에 나타난 sublead 순서 그대로
+        assert_eq!(
+            res.clusters
+                .iter()
+                .map(|c| c.sublead.address.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tSubB", "tSubA", "tSubEmpty"]
+        );
+        assert_eq!(
+            res.clusters[0]
+                .workers
+                .iter()
+                .map(|w| w.address.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pid:3"]
+        );
+        assert_eq!(
+            res.clusters[1]
+                .workers
+                .iter()
+                .map(|w| w.address.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pid:2", "pid:4"]
+        );
+        assert!(res.clusters[2].workers.is_empty());
+        // 헤더 라벨 포맷
+        assert_eq!(format_cluster_header_label(&res.clusters[0]), "sublead-billing · 1");
+        assert_eq!(format_cluster_header_label(&res.clusters[1]), "sublead-auth · 2");
+        assert_eq!(format_cluster_header_label(&res.clusters[2]), "sublead-idle · 0");
+        // 미소속(owner 없음 + 최상위 리드 직속)만 순서 보존, sublead 자신은 unowned에 없음
+        assert_eq!(
+            res.unowned
+                .iter()
+                .map(|w| w.address.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pid:1", "pid:5"]
+        );
+        assert!(
+            res.unowned.iter().all(|w| w.slot != LiveWorkerSlot::Sublead),
+            "sublead 세션 자체는 unowned에 중복 수록되지 않는다"
+        );
+        // 총 워커 수 불변(커넥터 스템 수 정합)
+        let total: usize = res
+            .clusters
+            .iter()
+            .map(|c| 1 + c.workers.len())
+            .sum::<usize>()
+            + res.unowned.len();
+        assert_eq!(total, mixed.len());
+
+        // (b) sublead 없으면 clusters=[] · 전부 unowned (기존 레이아웃 회귀 0)
+        let no_sublead = vec![
+            mk("pid:10", "w-1", LiveWorkerSlot::Coder, None),
+            mk("pid:11", "w-2", LiveWorkerSlot::Explore, Some("tLead0")),
+        ];
+        let flat = cluster_workers_by_sublead(&no_sublead);
+        assert!(flat.clusters.is_empty());
+        assert_eq!(
+            flat.unowned
+                .iter()
+                .map(|w| w.address.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pid:10", "pid:11"]
+        );
+
+        // (c) 소유자 sublead가 죽어 카드가 사라지면 해당 워커는 자연히 unowned로 떨어진다
+        let dead_owner = vec![
+            mk("tSubAlive", "sublead-alive", LiveWorkerSlot::Sublead, None),
+            mk("pid:20", "w-orphaned-sub", LiveWorkerSlot::Coder, Some("tSubDead")),
+            mk("pid:21", "w-alive-child", LiveWorkerSlot::Coder, Some("tSubAlive")),
+        ];
+        let after_death = cluster_workers_by_sublead(&dead_owner);
+        assert_eq!(after_death.clusters.len(), 1);
+        assert_eq!(
+            after_death.clusters[0]
+                .workers
+                .iter()
+                .map(|w| w.address.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pid:21"]
+        );
+        assert_eq!(
+            after_death
+                .unowned
+                .iter()
+                .map(|w| w.address.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pid:20"]
+        );
     }
 }

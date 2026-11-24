@@ -18,6 +18,7 @@ import {
   createLiveRosterSyncer,
   defaultWrapLogDir,
   extractRecentOutputLines,
+  orderSwarmCardsByCluster,
   readWrapOutputTail,
   type LiveRosterSyncer,
   type LiveWorkerInfo,
@@ -583,8 +584,10 @@ export function applyKeyInput(
         state.modal = 'decision';
         break;
       case 'swarm': {
-        // 라이브 워커 카드가 있으면 선택 카드의 터미널 상세 뷰를 우선 오픈(Enter: 터미널 보기).
-        const cards = state.liveWorkers ?? [];
+        // 라이브 워커 카드가 있으면 렌더와 동일한 클러스터 파생 순서 기준으로 선택 카드의 터미널 상세 뷰를 오픈.
+        const cards = state.liveWorkers
+          ? orderSwarmCardsByCluster(state.liveWorkers).map((entry) => entry.card)
+          : [];
         const sel = state.liveWorkers ? cards[Math.min(state.cardSelect, cards.length - 1)] : undefined;
         if (sel) {
           openTerminalView(state, resolveTerminalTarget(sel), sel.recentOutput);
@@ -897,15 +900,17 @@ export function computeLiveSessionCounts(
     if (w.slot === 'lead') explicitLeads += 1;
     else if (w.slot === 'verifier') verifiers += 1;
     else if (w.slot === 'advisor') advisors += 1;
-    else subWorkers += 1; // explore | coder
+    else subWorkers += 1; // explore | coder | sublead(sublead도 Workers 카드로 센다)
   }
   const lead = explicitLeads > 0 ? explicitLeads : subWorkers > 0 ? 1 : 0;
   return { lead, workers: subWorkers, verifiers, advisors };
 }
 
 /**
- * Workers 카드에 남길 종속(부하) 워커만 걸러낸다 — explore/coder만 반환하고
+ * Workers 카드에 남길 종속(부하) 워커만 걸러낸다 — explore/coder/sublead만 반환하고
  * lead/verifier/advisor는 각자의 역할 패널이 담당하므로 카드에서 배제한다(GPUI 파티션 계약).
+ * sublead는 Phase 1 최소 연결로 Workers 카드에 `sublead ·` 배지를 얹어 표시한다
+ * (소유 sublead별 클러스터 그룹핑은 설계 Phase 4).
  */
 export function filterSubordinateWorkers(workers: readonly LiveWorkerInfo[]): LiveWorkerInfo[] {
   return workers.filter((w) => w.slot !== 'lead' && w.slot !== 'verifier' && w.slot !== 'advisor');
@@ -1288,8 +1293,10 @@ function main(): void {
       const done = w.status === 'done';
       const liveElapsed = Math.max(0, Math.floor((nowMs - startedAtMs) / 1000));
       const frozenElapsedSec = done ? basis.frozenElapsedSec : null;
+      // sublead 배지 — Workers 파티션에서 스코프 리드를 일반 워커와 구분(Phase 1 최소 연결).
+      const baseName = w.slot === 'sublead' ? `sublead · ${w.name}` : w.name;
       return {
-        name: scoped ? w.name : `[${w.repoTag}] ${w.name}`,
+        name: scoped ? baseName : `[${w.repoTag}] ${baseName}`,
         model: w.telemetryLine ?? w.shortModel,
         progress: w.status === 'done' ? 100 : 0,
         description: w.activity,
@@ -1299,6 +1306,7 @@ function main(): void {
         address: w.address,
         recentOutput: w.recentOutput,
         ownerAddress: w.ownerAddress,
+        slot: w.slot,
       };
     });
     state.swarmActive = subWorkers.filter(isActivelyRunningWorker).length;

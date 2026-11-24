@@ -503,6 +503,9 @@ fn plan_dispatch_inner(input: &PlanInput, api: Option<&ApiOverride>) -> Dispatch
                 }
                 m
             });
+            let env_conversation_id = std::env::var("HERDR_CONVERSATION")
+                .ok()
+                .filter(|s| !s.is_empty());
             let issue = engine::issue_fork(
                 db,
                 &engine::IssueForkInput {
@@ -514,7 +517,7 @@ fn plan_dispatch_inner(input: &PlanInput, api: Option<&ApiOverride>) -> Dispatch
                     p_at_gate: post.p,
                     basis_at_gate: post.basis,
                     forced_split: forced.forced_split,
-                    conversation_id: None,
+                    conversation_id: env_conversation_id.as_deref(),
                     ttl_ms: Some(engine::TTL_EXPLORE_MS),
                     title: input.task_file.as_deref(),
                     metadata: metadata.as_ref(),
@@ -1266,5 +1269,41 @@ blast_radius: 테스트 경로 전반
         );
         assert!(!plan.hc_commands[0].join(" ").contains("{brief}"), "플레이스홀더 잔존 금지");
         std::fs::remove_dir_all(db.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn issue_fork_persists_conversation_id_roundtrip() {
+        let db_path = temp_db_path("conv-owner");
+        let dbs = db_path.display().to_string();
+        let conn = dgate_core::db::open_db_safe(
+            Some(&dbs),
+            OpenDbOptions { read_only: false, busy_timeout_ms: Some(5000) },
+        )
+        .unwrap();
+        let fk = engine::issue_fork(
+            &conn,
+            &engine::IssueForkInput {
+                project_id: "__GLOBAL__",
+                project_label: "ut",
+                route: dgate_core::engine::RouteId::FileSelect,
+                tool_class: "file_edit",
+                decision: "split",
+                p_at_gate: 0.5,
+                basis_at_gate: dgate_core::engine::DecisionBasis::Prior,
+                forced_split: false,
+                conversation_id: Some("conv-ut"),
+                ttl_ms: None,
+                title: None,
+                metadata: None,
+                now_ms: None,
+            },
+        )
+        .unwrap();
+        let row = engine::get_fork(&conn, &fk)
+            .unwrap()
+            .expect("발급된 fork가 DB에 존재해야 함");
+        assert_eq!(row.conversation_id.as_deref(), Some("conv-ut"));
+        drop(conn);
+        std::fs::remove_dir_all(db_path.parent().unwrap()).ok();
     }
 }

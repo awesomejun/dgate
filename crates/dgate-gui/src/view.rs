@@ -50,10 +50,11 @@ use gpui::{
 };
 
 use crate::state::{
-    continuous_phase, format_elapsed_mmss, has_active_work, kill_worker_safe, lead_display_count,
-    partition_sessions_by_role, smooth_pulse_opacity, visible_worker_columns, DashboardController,
-    DashboardSnapshot, DecisionLabel, DefaultKillExecutor, DragTarget, FocusPanel, GuiCliOptions,
-    LogPanelSize, PollerHandle, RecentLogEntry, RouteMetric, ACTIVE_ANIM_FRAME_MS,
+    cluster_workers_by_sublead, continuous_phase, format_cluster_header_label, format_elapsed_mmss,
+    has_active_work, kill_worker_safe, lead_display_count, partition_sessions_by_role,
+    smooth_pulse_opacity, visible_worker_columns, DashboardController, DashboardSnapshot,
+    DecisionLabel, DefaultKillExecutor, DragTarget, FocusPanel, GuiCliOptions, LogPanelSize,
+    PollerHandle, RecentLogEntry, RouteMetric, SubleadCluster, ACTIVE_ANIM_FRAME_MS,
     UI_REFRESH_TICK_MS,
 };
 use dgate_core::live_sync::LiveWorkerInfo;
@@ -1409,28 +1410,143 @@ impl DashboardView {
             }
             return div().flex().flex_row().justify_center().child(box_);
         }
-        if cols == 1 {
+        let clustered = cluster_workers_by_sublead(sub_workers);
+        // 클러스터 0개(sublead 없음) — 기존 평면 그리드 그대로(레이아웃 회귀 없음).
+        if clustered.clusters.is_empty() {
+            return self.render_worker_grid(snap, cx, sub_workers, cols, 0);
+        }
+
+        // sublead 클러스터별 헤더 + 소속 워커 그리드 → unowned 평면 그리드(헤더 없음).
+        let mut container = div().flex().flex_col().gap_2().w_full();
+        let mut card_idx = 0usize;
+        for cluster in &clustered.clusters {
+            let mut block = div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .w_full()
+                .child(self.render_cluster_header(cluster, cx));
+            if !cluster.workers.is_empty() {
+                let group_cols = visible_worker_columns(cluster.workers.len()).min(cols.max(1));
+                block = block.child(self.render_worker_grid(
+                    snap,
+                    cx,
+                    &cluster.workers,
+                    group_cols,
+                    card_idx,
+                ));
+                card_idx += cluster.workers.len();
+            }
+            container = container.child(block);
+        }
+        if !clustered.unowned.is_empty() {
+            let unowned_cols = visible_worker_columns(clustered.unowned.len()).min(cols.max(1));
+            container = container.child(self.render_worker_grid(
+                snap,
+                cx,
+                &clustered.unowned,
+                unowned_cols,
+                card_idx,
+            ));
+        }
+        container
+    }
+
+    /// sublead 클러스터 1행 컴팩트 헤더(예: `sublead-auth · 2`) — 과한 장식 없이
+    /// LEAD_ORANGE 액센트로 소속 워커 그룹을 구분한다.
+    fn render_cluster_header(&self, cluster: &SubleadCluster, cx: &Context<Self>) -> gpui::Div {
+        let sub = &cluster.sublead;
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .h(px(22.))
+            .px_2()
+            .rounded_md()
+            .bg(BG_CHROME)
+            .border_1()
+            .border_color(BORDER_LOG)
+            .cursor_pointer()
+            .hover(|s| s.border_color(LEAD_ORANGE))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.controller.open_detail(FocusPanel::Workers);
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .w(px(3.))
+                    .h(px(12.))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(LEAD_ORANGE),
+            )
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(LEAD_ORANGE)
+                    .truncate()
+                    .child(format_cluster_header_label(cluster)),
+            )
+            .child(
+                div()
+                    .text_size(px(9.))
+                    .text_color(MUTED)
+                    .truncate()
+                    .child(format!("[{}] {}", sub.repo_tag, sub.address)),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .text_size(px(9.))
+                    .text_color(MUTED)
+                    .truncate()
+                    .child(sub.telemetry_line()),
+            )
+    }
+
+    /// 워커 카드 평면 그리드 — 1열은 중앙 정렬(최대 460px), 2~4열은 균등 분할 + 빈 셀 스페이서.
+    fn render_worker_grid(
+        &self,
+        snap: &DashboardSnapshot,
+        cx: &Context<Self>,
+        workers: &[LiveWorkerInfo],
+        cols: usize,
+        idx_offset: usize,
+    ) -> gpui::Div {
+        if cols <= 1 && workers.len() == 1 {
             // 단일 워커 — 중앙 정렬 카드(단일 중앙 스템과 정렬, 가로 레일 없음)
             return div().flex().flex_row().justify_center().child(
-                self.render_worker_card(&sub_workers[0], cx, 0, parent_of(snap, &sub_workers[0]))
+                self.render_worker_card(&workers[0], cx, idx_offset, parent_of(snap, &workers[0]))
                     .w_full()
                     .max_w(px(460.)),
             );
         }
         // 2~4열 — 카드 flex_1·mx_1 → 셀 중심 = 스템 중심 정확 정렬.
         // cols 초과분은 cols열씩 랩하고 마지막 행 빈 열은 스페이서로 열 폭 유지.
+        let effective_cols = cols.max(1);
         let mut column = div().flex().flex_col().gap_2();
-        for (row_idx, chunk) in sub_workers.chunks(cols).enumerate() {
+        for (row_idx, chunk) in workers.chunks(effective_cols).enumerate() {
             let mut row = div().flex().flex_row();
             for (i, w) in chunk.iter().enumerate() {
                 row = row.child(
-                    self.render_worker_card(w, cx, row_idx * cols + i, parent_of(snap, w))
-                        .flex_1()
-                        .min_w_0()
-                        .mx_1(),
+                    self.render_worker_card(
+                        w,
+                        cx,
+                        idx_offset + row_idx * effective_cols + i,
+                        parent_of(snap, w),
+                    )
+                    .flex_1()
+                    .min_w_0()
+                    .mx_1(),
                 );
             }
-            for _ in chunk.len()..cols {
+            for _ in chunk.len()..effective_cols {
                 row = row.child(div().flex_1().h_0().mx_1());
             }
             column = column.child(row);

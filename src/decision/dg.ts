@@ -24,6 +24,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
 import {
   createWorktreeCheckpoint,
   restoreWorktreeCheckpoint,
@@ -1088,6 +1089,26 @@ function wrapWorkerTelemetry(command: readonly string[]): Record<string, string>
   return out;
 }
 
+/**
+ * `dg wrap` 자식 워커(손자 프로세스)에 주입할 fork 컨텍스트 env를 조립한다.
+ * fork 미지정(`null`·빈 문자열) 또는 폴백(`fk_fallback_` 접두)이면 빈 객체를 반환해
+ * 기존 워크플로우 env를 건드리지 않는다. `conversationId`가 비어 있지 않으면
+ * `HERDR_CONVERSATION`도 함께 전파한다.
+ */
+export function forkContextEnv(
+  forkId: string | null,
+  conversationId: string | null
+): Record<string, string> {
+  if (forkId === null || forkId.length === 0 || forkId.startsWith('fk_fallback_')) {
+    return {};
+  }
+  const out: Record<string, string> = { HERDR_FORK_ID: forkId };
+  if (conversationId !== null && conversationId.length > 0) {
+    out['HERDR_CONVERSATION'] = conversationId;
+  }
+  return out;
+}
+
 async function cmdWrap(args: ParsedArgs, json: boolean): Promise<number> {
   const route = parseRoute(requireFlag(args, 'route'));
   const toolClass = requireFlag(args, 'tool-class');
@@ -1101,7 +1122,7 @@ async function cmdWrap(args: ParsedArgs, json: boolean): Promise<number> {
   const roleOpt = optionalFlag(args, 'role');
   if (roleOpt !== undefined && parseLiveWorkerSlot(roleOpt) === null) {
     throw new UsageError(
-      `invalid --role "${roleOpt}" (allowed: lead|explore|coder|verifier|advisor)`
+      `invalid --role "${roleOpt}" (allowed: lead|sublead|explore|coder|verifier|advisor)`
     );
   }
 
@@ -1126,6 +1147,7 @@ async function cmdWrap(args: ParsedArgs, json: boolean): Promise<number> {
     .filter((s) => s.length > 0);
 
   let forkId: string | null = null;
+  let forkConversationId: string | null = null;
   let db: DatabaseSync | null = null;
   try {
     db = openWriter(dbFlag(args));
@@ -1135,6 +1157,7 @@ async function cmdWrap(args: ParsedArgs, json: boolean): Promise<number> {
       if (!fork) throw new UsageError(`fork not found: ${forkOpt}`);
       if (!isForkLiveStatus(fork.status)) throw new UsageError(`fork ${forkOpt} not open (status=${fork.status})`);
       forkId = forkOpt;
+      forkConversationId = fork.conversation_id;
     } else {
       const post = getPosterior(db, identity.projectId, route, toolClass);
       const forced = evaluateForced(db, identity.projectId, route, toolClass, null);
@@ -1187,9 +1210,13 @@ async function cmdWrap(args: ParsedArgs, json: boolean): Promise<number> {
     if (db === null || isFallbackFork || forkId === null) return;
     touchFork(db, forkId);
   };
+  // fork 미지정(--fork 생략) 또는 fallback(fk_fallback_) wrap은 env 주입 없음(기존 워크플로우 회귀 0)
+  const forkCtx = forkContextEnv(forkOpt !== undefined ? forkId : null, forkConversationId);
   const childEnv = sanitizeEnv
-    ? buildSanitizedChildEnv({ allowKeys: allowEnv })
-    : process.env;
+    ? buildSanitizedChildEnv({ allowKeys: allowEnv, extraEnv: forkCtx })
+    : Object.keys(forkCtx).length > 0
+      ? { ...process.env, ...forkCtx }
+      : process.env;
 
   // PB-1 §3.2: 스폰 직후 `exec` 구간을 연다 — fk_fallback 또는 DB 무연결 시 생략
   const execAttempt =
@@ -1647,7 +1674,7 @@ const HELP = `dg — decision gate CLI (plan-r2.1 §4.7)
   dg attempt --fork <id> [--bump-gen] [--json]
   dg retro --fork <id> [--out <path>] [--json]
   dg settle-orphans [--json]
-  dg wrap --route <r> --tool-class <c> [--fork <id>] [--role <lead|explore|coder|verifier|advisor>] [--label <role>-<topic>] [--source wrap] [--require-artifact <path>] [--require-nonempty] [--require-stdout-nonempty] [--stall-ms 120000] [--max-ms 1200000] [--heartbeat-ms 60000] [--kill-grace-ms 1000] [--expected-gen <n>] [--expected-attempt <n>] [--sanitize-env] [--allow-env K1,K2] [--json] -- <cmd…>
+  dg wrap --route <r> --tool-class <c> [--fork <id>] [--role <lead|sublead|explore|coder|verifier|advisor>] [--label <role>-<topic>] [--source wrap] [--require-artifact <path>] [--require-nonempty] [--require-stdout-nonempty] [--stall-ms 120000] [--max-ms 1200000] [--heartbeat-ms 60000] [--kill-grace-ms 1000] [--expected-gen <n>] [--expected-attempt <n>] [--sanitize-env] [--allow-env K1,K2] [--json] -- <cmd…>
   dg compact [--max-events 50000] [--days 30] [--json]
   dg stats [--cost] [--timing] [--project <dir>] [--fork <id>] [--days 14] [--db <path>] [--json]
   dg checkpoint create --worktree <path> --run-id <id> [--repo <dir>] [--name <wtName>] [--checkpoint-root <dir>] [--json]
@@ -1769,7 +1796,21 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  process.stderr.write(`[dg] fatal: ${(err as Error).message}\n`);
-  process.exit(1);
-});
+function isMainModule(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  const selfPath = fileURLToPath(import.meta.url);
+  if (path.resolve(entry) === selfPath) return true;
+  try {
+    return fs.realpathSync(entry) === fs.realpathSync(selfPath);
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
+  main().catch((err) => {
+    process.stderr.write(`[dg] fatal: ${(err as Error).message}\n`);
+    process.exit(1);
+  });
+}

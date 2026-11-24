@@ -38,6 +38,7 @@ import {
   parseLiveWorkerSlot,
   type LiveWorkerSlot,
   type RosterDisplayLabels,
+  type SwarmCard,
 } from '../types.ts';
 
 const execFileAsync = promisify(execFile);
@@ -73,7 +74,7 @@ export interface HcTerminalDetail extends HcTerminalSummary {
   foregroundArgv?: string[];
 }
 
-/** 역할 슬롯 — `src/types.ts`의 공유 어휘(5종)를 재노출. TUI 파티션·`dg wrap --role`·`HERDR_ROLE`이 같은 표를 쓴다. */
+/** 역할 슬롯 — `src/types.ts`의 공유 어휘(6종)를 재노출. TUI 파티션·`dg wrap --role`·`HERDR_ROLE`이 같은 표를 쓴다. */
 export type { LiveWorkerSlot };
 
 /** 현재 실행 중인 워커 1개의 TUI 표시 정보. */
@@ -166,7 +167,12 @@ const PARENT_MATCH_AGENTS = new Set([
   'hermes',
 ]);
 
-/** 워커 세션명 접두 — herdr-quad-launch/dispatch가 만드는 이름 규약. */
+/**
+ * 워커 세션명 접두 — herdr-quad-launch/dispatch가 만드는 이름 규약.
+ * `sublead`(대시 없음·`coder`와 같은 형식)와 `sub-`는 sublead 스코프 리드 세션이
+ * parent 없이 떠도 워커로 관측되게 한다 — 이 접두가 없으면 parent 없는 sublead 세션이
+ * 최상위 리드 후보로 오인되어 Lead 카드로 정규화된다(단일 리드 불변식 위반).
+ */
 const WORKER_NAME_PREFIXES = [
   'w-',
   'exp-',
@@ -175,6 +181,8 @@ const WORKER_NAME_PREFIXES = [
   'verify-',
   'verifier-',
   'lead-',
+  'sublead',
+  'sub-',
   'advisor-',
   'carbon-',
 ] as const;
@@ -207,14 +215,23 @@ function isMonitorOrGuiName(name: string): boolean {
  *    roster.json 대기 배지로 깜빡이지 않게 한다) ③ parent 부재·빈 값
  * ④ 모니터·GUI(dg-monitor-, mon-, dgate-gui- 접두) 제외
  * ⑤ agent(소문자)가 AI 코딩 에이전트 7종 안팎.
+ * ⑥ sublead 이름 규약(`sublead`·`sublead-`·`sub-`) 제외 — sublead는 parent를 가진
+ *    스코프 리드다(단일 리드 불변식). 이름으로 선언된 sublead는 부모 없이 떠도
+ *    최상위 리드 후보가 될 수 없다(Lead 정규화 대상 아님, 워커 접두로 관측됨).
  */
 const TOP_LEVEL_ACTIVE_STATUSES = new Set(['working', 'idle', 'done']);
+
+/** sublead 세션명 규약 — 최상위 리드 후보에서 제외할 때 쓰는 정확한 접두 판정. */
+function isSubleadName(name: string): boolean {
+  return name === 'sublead' || name.startsWith('sublead-') || name.startsWith('sub-');
+}
 
 export function isActiveTopLevelSession(t: HcTerminalSummary): boolean {
   if (!t || t.state !== 'live') return false;
   if (!t.status || !TOP_LEVEL_ACTIVE_STATUSES.has(t.status)) return false;
   if (t.parent && t.parent.trim().length > 0) return false;
   if (isMonitorOrGuiName(t.name ?? '')) return false;
+  if (isSubleadName(t.name ?? '')) return false;
   const agent = (t.agent ?? '').toLowerCase();
   return TOP_LEVEL_AI_AGENTS.has(agent);
 }
@@ -227,7 +244,7 @@ export function isObservableTerminal(t: HcTerminalSummary): boolean {
 /**
  * `hc ls` 터미널이 우리가 표시할 "워커"인지 판정:
  * ① `state === 'live'` 필수 ② 모니터(`dg-monitor*`·`mon-*`) 제외 ③ 셸·antigravity 제외
- * ④ 이름 접두(`w-`·`exp-`·`coder`·`verify-`…) 매칭 또는 parent 존재 + 워커 CLI 에이전트.
+ * ④ 이름 접두(`w-`·`exp-`·`coder`·`verify-`·`sublead`·`sub-`…) 매칭 또는 parent 존재 + 워커 CLI 에이전트.
  */
 export function isWorkerTerminal(t: HcTerminalSummary): boolean {
   if (!t || t.state !== 'live') return false;
@@ -925,7 +942,7 @@ function parseWorkerCliAndModel(
 /**
  * `hc get` 상세 + 화면 원문 → LiveWorkerInfo.
  * 슬롯은 ① argv의 `HERDR_ROLE=`(carbon→advisor) ② 세션명 규약(verify-/exp-/carbon-/lead-
- * …) 순으로 판정하고, CLI·모델은 `env`·`dg wrap` 래퍼를 벗겨낸 뒤 실제 CLI와
+ * …/sublead-/sub-) 순으로 판정하고, CLI·모델은 `env`·`dg wrap` 래퍼를 벗겨낸 뒤 실제 CLI와
  * `--model`에서 읽는다(실패 시 `detail.agent` 폴백).
  */
 export function inferLiveWorkerSlot(
@@ -953,8 +970,14 @@ export function inferLiveWorkerSlot(
       }
     }
   }
-  // 세션명 접두(verify-/verifier-/neon-/exp-/carbon-/lead-/argon-) — 공유 접두 테이블로 판정.
+  // 세션명 접두(verify-/verifier-/neon-/exp-/carbon-/lead-/argon-/sublead-/sub-) — 공유 접두 테이블로 판정.
   // 리드는 부모 없는 최상위 세션일 때만(하위 세션은 coder). 어느 접두도 아니면 coder.
+  //
+  // 단일 리드 불변식(docs/sublead-design.md): parent 없는 세션만 lead다. 강등(lead-* + parent →
+  // coder)은 `byName === 'lead'` 경로에만 적용하고, sublead는 강등 대상이 아니다 — sublead는
+  // parent를 가진 스코프 리드라서 `sublead-*`/`sub-*` 이름 또는 `HERDR_ROLE=sublead`면 parent
+  // 유무와 무관하게 sublead 슬롯을 유지한다. 아래 `else if (byName)` 분기가 parent를 보지
+  // 않으므로 여기서 코드 추가 없이 성립한다(회귀 테스트가 이를 고정한다).
   const name = detail.name ?? '';
   if (!roleFromArgv && name.length > 0) {
     const byName = inferLiveWorkerSlotFromName(name);
@@ -1164,12 +1187,12 @@ export function readWrapOutputTail(wrapPid: number, logDir = defaultWrapLogDir()
   }
 }
 
-/** wrap 워커 슬롯 추론 — label(--label) 우선, 없으면 route 근사. 역할 카드 매핑의 근거. */
 /**
  * wrap 워커 슬롯 — ① 명시 `--role`(최우선) ② 라벨/프로젝트명 **접두**(`inferLiveWorkerSlotFromName`)
  * ③ 라벨 없는 file_select → explore ④ coder. 부분 문자열 판정은 쓰지 않는다: 주제에 역할어가
  * 들어간 coder 라벨(`fix-rust-verifier-observations`)을 verifier로 보내면 Workers 카드에서 사라지고
  * 검증 패널을 오염시킨다. 라벨만으로 리드가 되지는 않는다(wrap 워커는 리드가 아니다) — 명시 `--role lead`만 인정.
+ * sublead 라벨(`sublead-auth`)은 스코프 리드 신원이므로 lead와 달리 라벨로도 인정한다.
  */
 function inferWrapSlot(p: WrapProc): LiveWorkerSlot {
   if (p.role) return p.role;
@@ -1283,7 +1306,10 @@ export function normalizeTopLevelWorker(
   };
 }
 
-/** 라이브 오버라이드 대상 슬롯(lead는 watchedLead 부재 시에만). */
+/**
+ * 라이브 오버라이드 대상 슬롯(lead는 watchedLead 부재 시에만). sublead는 roster.json 역할이
+ * 아니라(5종 그대로) Workers 카드로만 표시되는 라이브 슬롯이므로 라벨을 덮지 않는다.
+ */
 const LIVE_OVERRIDE_SLOTS: readonly LiveWorkerSlot[] = ['verifier', 'coder', 'explore', 'advisor'];
 
 /**
@@ -1646,7 +1672,8 @@ export function createLiveRosterSyncer(opts: LiveRosterSyncerOptions): LiveRoste
           const rawScreen = screen ?? screenCache.get(summary.address);
           let worker = inferLiveWorkerSlot(detail, rawScreen);
           // 최상위 활성 AI 세션(워커 규약 밖 리드 등) — Lead 슬롯·표시명·shortModel
-          // 폴백을 정규화한다. 워커 규약 터미널은 그대로 둔다.
+          // 폴백을 정규화한다. 워커 규약 터미널은 그대로 둔다. sublead(sublead-/sub- 이름)
+          // 는 워커 접두라 이 분기에 들어오지 않아 sublead 슬롯이 보존된다(최상위 리드 후보 아님).
           if (
             worker &&
             isActiveTopLevelSession(summary) &&
@@ -1813,4 +1840,101 @@ export function createLiveRosterSyncer(opts: LiveRosterSyncerOptions): LiveRoste
       return runTick();
     },
   };
+}
+
+// ---------- sublead별 Workers 클러스터 분할 (Rust state.rs 대칭) ----------
+
+/** 클러스터 분할 입력의 최소 형태 — LiveWorkerInfo·SwarmCard 모두 수용. */
+export interface ClusterableWorker {
+  readonly slot?: LiveWorkerSlot;
+  readonly address?: string;
+  readonly ownerAddress?: string;
+}
+
+/** 소유 sublead 1개와 그 아래에 귀속된 워커 묶음. */
+export interface SubleadCluster<T extends ClusterableWorker = LiveWorkerInfo> {
+  sublead: T;
+  workers: T[];
+}
+
+/** Workers 파티션의 sublead별 클러스터 분할 결과. */
+export interface WorkerClusterPartitions<T extends ClusterableWorker = LiveWorkerInfo> {
+  clusters: SubleadCluster<T>[];
+  unowned: T[];
+}
+
+/**
+ * 워커 목록을 소유 sublead별 클러스터 + 미소속 그룹으로 분할한다(순수 함수 — 입력 순서 보존).
+ * - sublead 세션 자체는 각 클러스터 헤더(`cluster.sublead`)로만 존재하고 `unowned`에 중복되지 않는다.
+ * - 소유자 sublead가 종료돼 목록에서 사라지면 해당 워커는 자연히 `unowned`로 떨어진다.
+ */
+export function clusterWorkersBySublead<T extends ClusterableWorker>(
+  workers: readonly T[]
+): WorkerClusterPartitions<T> {
+  const clusters: SubleadCluster<T>[] = [];
+  const indexByAddr = new Map<string, number>();
+  for (const w of workers) {
+    if (w.slot === 'sublead') {
+      const idx = clusters.length;
+      if (w.address && !indexByAddr.has(w.address)) {
+        indexByAddr.set(w.address, idx);
+      }
+      clusters.push({ sublead: w, workers: [] });
+    }
+  }
+  const unowned: T[] = [];
+  for (const w of workers) {
+    if (w.slot === 'sublead') continue;
+    const owner = w.ownerAddress;
+    if (owner) {
+      const clusterIdx = indexByAddr.get(owner);
+      if (clusterIdx !== undefined) {
+        clusters[clusterIdx]!.workers.push(w);
+        continue;
+      }
+    }
+    unowned.push(w);
+  }
+  return { clusters, unowned };
+}
+
+/** 클러스터 정렬된 TUI 카드 1항목(원본 liveWorkers 불변 파생). */
+export interface OrderedClusterCard {
+  readonly card: SwarmCard;
+  /** 소유 sublead 짧은 배지(예: `↳ sublead-auth`). 미소속·sublead 본인은 null. */
+  readonly ownerBadge: string | null;
+}
+
+/** sublead 카드명(`[repo] sublead · auth`·`sublead-auth` 등)을 짧은 소유 배지(`↳ sublead-auth`)로 정규화. */
+export function formatSubleadOwnerBadge(subleadName: string): string {
+  const clean = subleadName
+    .replace(/^\[[^\]]+\]\s*/, '')
+    .replace(/^sublead\s*·\s*/i, '')
+    .trim();
+  if (!clean) return '↳ sublead';
+  if (/^(?:sublead(?:[-_]|$)|sub[-_])/i.test(clean)) return `↳ ${clean}`;
+  return `↳ sublead-${clean}`;
+}
+
+/**
+ * SwarmCard 목록을 sublead 클러스터 순서(각 sublead → 소속 워커들) → 미소속 순서로 파생 정렬한다.
+ * sublead가 없으면 원본 순서 그대로 반환(회귀 0). 총 길이는 항상 입력과 같다.
+ */
+export function orderSwarmCardsByCluster(cards: readonly SwarmCard[]): OrderedClusterCard[] {
+  const { clusters, unowned } = clusterWorkersBySublead(cards);
+  if (clusters.length === 0) {
+    return cards.map((card) => ({ card, ownerBadge: null }));
+  }
+  const out: OrderedClusterCard[] = [];
+  for (const cluster of clusters) {
+    out.push({ card: cluster.sublead, ownerBadge: null });
+    const ownerBadge = formatSubleadOwnerBadge(cluster.sublead.name);
+    for (const worker of cluster.workers) {
+      out.push({ card: worker, ownerBadge });
+    }
+  }
+  for (const card of unowned) {
+    out.push({ card, ownerBadge: null });
+  }
+  return out;
 }

@@ -8,6 +8,7 @@ import {
 } from '../core/width.ts';
 import { LOG_FILTER_LABELS, TRIGGER_LABELS, effortToGauge, getFilteredLogs, sortRoutesForDisplay } from '../state/store.ts';
 import { THEME, lerpColor, resolveColorKey, type RGB } from '../theme.ts';
+import { orderSwarmCardsByCluster, type OrderedClusterCard } from '../backend/liveWorkerSync.ts';
 import { applyLiveRolePanels, createLiveRoleTrail, formatElapsedMmss } from '../cli.ts';
 import type { AppState, SwarmCard } from '../types.ts';
 import { computeLayout, maxCardSlotsFor, type CompactLayout, type FullLayout } from './layout.ts';
@@ -94,9 +95,20 @@ function renderFullLayout(buf: CellBuffer, state: AppState, L: FullLayout): void
   renderFooter(buf, state, L.padX, L.footerY, L.cols - L.padX * 2);
 }
 
-/** Workers 패널 카드 소스 — 라이브 hc 워커 카드가 있으면 우선, 없으면 기존 3슬롯 cards로 폴백. */
+/**
+ * Workers 패널 파생 카드 목록 — 라이브 워커가 있으면 sublead 클러스터 순서(원본 liveWorkers 불변),
+ * 없으면 기존 3슬롯 cards를 그대로 감싸 반환한다.
+ */
+function orderedWorkerCardsOf(state: AppState): OrderedClusterCard[] {
+  if (state.liveWorkers && state.liveWorkers.length > 0) {
+    return orderSwarmCardsByCluster(state.liveWorkers);
+  }
+  return state.cards.map((card) => ({ card, ownerBadge: null }));
+}
+
+/** Workers 패널 카드 소스 — 라이브 hc 워커 카드가 있으면 클러스터 파생 순서 우선, 없으면 기존 3슬롯 cards로 폴백. */
 function workerCardsOf(state: AppState): SwarmCard[] {
-  return state.liveWorkers && state.liveWorkers.length > 0 ? state.liveWorkers : state.cards;
+  return orderedWorkerCardsOf(state).map((entry) => entry.card);
 }
 
 /** 라이브 watch 폴링은 살아 있지만 활성 하위 워커가 0명인 정직한 빈 상태. */
@@ -955,9 +967,9 @@ function renderDecisionPanel(buf: CellBuffer, state: AppState, L: FullLayout): v
 
 function renderSwarmSection(buf: CellBuffer, state: AppState, L: FullLayout): void {
   // 위임 라벨 (하위 에이전트에 위임 · Workers) — 슬롯 초과 워커는 +N 배지로 안내
-  const workerCards = workerCardsOf(state);
+  const orderedCards = orderedWorkerCardsOf(state);
   // 라이브 watch 빈 상태(카드 1칸)에서 cards(3) 폴백 길이로 '+N개 더' 오탐 방지
-  const overflow = isEmptyLiveWatch(state) ? 0 : workerCards.length - L.cards.length;
+  const overflow = isEmptyLiveWatch(state) ? 0 : orderedCards.length - L.cards.length;
   if (L.delegateLabelY < L.fanOutY) {
     const first = L.cards[0]!;
     const last = L.cards[L.cards.length - 1]!;
@@ -1012,12 +1024,13 @@ function renderSwarmSection(buf: CellBuffer, state: AppState, L: FullLayout): vo
   // 라이브 카드 모드에서만 ←/→·숫자 카드 선택(Enter: 터미널 보기)이 의미 있다.
   const isLiveCards = Boolean(state.liveWorkers && state.liveWorkers.length > 0);
   const selCardIdx = isLiveCards
-    ? Math.min(Math.max(0, state.cardSelect), workerCards.length - 1)
+    ? Math.min(Math.max(0, state.cardSelect), orderedCards.length - 1)
     : -1;
 
   L.cards.forEach((cardRect, idx) => {
-    const card = workerCards[idx];
-    if (!card) return;
+    const entry = orderedCards[idx];
+    if (!entry) return;
+    const { card, ownerBadge } = entry;
 
     const cardAdvisoryGlow = errAdvisory && idx === 0;
     const cardSelected = focused && idx === selCardIdx;
@@ -1044,8 +1057,22 @@ function renderSwarmSection(buf: CellBuffer, state: AppState, L: FullLayout): vo
     const iw = cardRect.w - 4;
     let cy = cardRect.y + 1;
 
-    // 역할 이름 (상단: 역할/세션명만 — 선택 카드는 ▶ 마커)
-    buf.writeCentered(ix, cy++, iw, (cardSelected ? '▶ ' : '') + card.name, THEME.fg, cardBg, true);
+    // 역할 이름 (상단: 역할/세션명만 — 선택 카드는 ▶ 마커; 5행 컴팩트 카드에선 소유 배지를 같은 줄에 병기)
+    const inlineOwner = ownerBadge && cardRect.h < 6 ? ` ${ownerBadge}` : '';
+    buf.writeCentered(
+      ix,
+      cy++,
+      iw,
+      (cardSelected ? '▶ ' : '') + card.name + inlineOwner,
+      THEME.fg,
+      cardBg,
+      true
+    );
+
+    // 소유 sublead 배지 — 소속 워커 카드에만 표시(sublead 본인과 미소속은 줄 추가 없음).
+    if (ownerBadge && cardRect.h >= 6 && cy < cardRect.y + cardRect.h - 2) {
+      buf.writeCentered(ix, cy++, iw, ownerBadge, THEME.orange, cardBg, false);
+    }
 
     // 모델 태그 — demo 모드만 상단 2행 유지; watch 모드는 하단에 cli · model · effort 표시
     if (state.mode !== 'watch' && cy < cardRect.y + cardRect.h - 1 && cardRect.h >= 6) {

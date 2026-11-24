@@ -69,6 +69,8 @@ export interface SwarmCard {
   recentOutput?: string[];
   /** pid:N(wrap) 워커를 소유한 hc 터미널 주소 — 터미널 상세 뷰가 이 터미널을 보여준다. */
   ownerAddress?: string;
+  /** 라이브 워커 슬롯 — sublead 클러스터 정렬·소유 배지 표시용(선택). */
+  slot?: LiveWorkerSlot;
 }
 
 /** 터미널 상세 뷰 대상 — Enter로 연 역할 카드 1개의 터미널 식별 정보. */
@@ -309,13 +311,16 @@ export type StreamEvent =
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 라이브 워커 슬롯 — TUI 파티션(Lead/Workers/Verifier/Advisor)·`dg wrap --role`·
-// `HERDR_ROLE`·세션명/라벨 접두가 함께 쓰는 단일 어휘. 역할 이름이 곳마다 달라져
+// `HERDR_ROLE`·세션명/라벨 접두가 함께 쓰는 단일 어휘. 역할 이름이 곳곳에서 달라져
 // (`verify` vs `verifier` vs `neon`) verifier가 coder로 오분류되어 Workers 카드에
 // 뜨던 사고를 막기 위해 이 표 하나만 믿는다.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** 라이브 워커 슬롯 5종. coder는 라벨로 유도하지 않는다(명시 `--role`/`HERDR_ROLE`만). */
-export const LIVE_WORKER_SLOTS = ['lead', 'explore', 'coder', 'verifier', 'advisor'] as const;
+/**
+ * 라이브 워커 슬롯 6종. sublead는 리드가 띄운 영역별 스코프 리드다(조정 위임 —
+ * docs/sublead-design.md). coder는 라벨로 유도하지 않는다(명시 `--role`/`HERDR_ROLE`만).
+ */
+export const LIVE_WORKER_SLOTS = ['lead', 'sublead', 'explore', 'coder', 'verifier', 'advisor'] as const;
 export type LiveWorkerSlot = (typeof LIVE_WORKER_SLOTS)[number];
 
 /** 슬롯 별칭 — herdr 관문 이름 `carbon`은 advisor 슬롯. */
@@ -334,11 +339,17 @@ export function parseLiveWorkerSlot(value: string | null | undefined): LiveWorke
 
 /**
  * 세션명·`dg wrap --label`의 역할 접수 어휘 — `<역할>-<주제>` 규약(`verify-stage1`·
- * `research-hcdesign`·`advisor-g3`)과 herdr-quad-launch의 agy 세션명(`argon`/`carbon`/`neon`)을 포함한다.
- * lead는 세션명으로만 의미가 있고(라벨 `lead-…`로 wrap 워커가 리드가 되지는 않는다) 나머지 4종을 라벨에서 유도한다.
+ * `research-hcdesign`·`advisor-g3`·`sublead-auth`)과 herdr-quad-launch의 agy 세션명
+ * (`argon`/`carbon`/`neon`)을 포함한다. lead는 세션명으로만 의미가 있고(라벨 `lead-…`로
+ * wrap 워커가 리드가 되지는 않는다) 나머지 5종을 라벨에서 유도한다.
+ *
+ * sublead 접두 `sub`는 ASCII 구분자 규칙(`^sub(?:[-_\d]|$)`) 덕분에 `sublead-x`·`submit-3`
+ * 모두와 불일치한다 — `sublead-x`는 같은 슬롯의 더 긴 접두 `sublead`가 잡고, `submit-3`은
+ * `sub` 뒤에 구분자가 없어 어느 접두에도 걸리지 않아(coder 폴백) 오분류가 없다.
  */
 const SLOT_NAME_PREFIXES: Readonly<Record<LiveWorkerSlot, readonly string[]>> = {
   lead: ['lead', 'argon'],
+  sublead: ['sublead', 'sub'],
   verifier: ['verifier', 'verify', 'neon', '검증'],
   explore: ['explore', 'exp', 'research', '탐색', '조사'],
   advisor: ['advisor', 'carbon', '자문'],

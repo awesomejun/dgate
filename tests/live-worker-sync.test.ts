@@ -255,6 +255,11 @@ test('1. inferLiveWorkerSlot — pi --model / dg wrap / devin / HERDR_ROLE / 모
     ['w-verifier', 't165', 'verifier'],
     ['advisor-1', 't165', 'advisor'],
     ['exp-2', 't165', 'explore'],
+    ['sublead-auth', 't165', 'sublead'],
+    ['sub-2', 't165', 'sublead'],
+    ['sublead', undefined, 'sublead'],
+    ['submit-pr', 't165', 'coder'],
+    ['submit-fix', undefined, 'coder'],
   ] as const) {
     const inferred = inferLiveWorkerSlot({
       address: `t-${name}`,
@@ -284,6 +289,28 @@ test('1. inferLiveWorkerSlot — pi --model / dg wrap / devin / HERDR_ROLE / 모
   // (h) 긍정 — 이름 접두 / parent+워커 CLI 에이전트
   assert.equal(isWorkerTerminal({ address: 'a', agent: 'pi', name: 'w-x', state: 'live' }), true);
   assert.equal(isWorkerTerminal({ address: 'a', agent: 'devin', parent: 't1', state: 'live' }), true);
+
+  // (i) HERDR_ROLE=sublead — argv 우선 + parent 유무와 무관하게 sublead 유지(단일 리드 불변식: parent 없는 세션만 lead)
+  const subleadNoParent = inferLiveWorkerSlot({
+    address: 't7',
+    agent: 'pi',
+    name: 'w-auth-scope1',
+    state: 'live',
+    cwd: '/tmp/my-repo',
+    argv: ['env', 'HERDR_ROLE=sublead', '/tools/pi', '--model', 'glm-zcode/glm-5.3'],
+  });
+  assert.equal(subleadNoParent?.slot, 'sublead');
+
+  const subleadWithParent = inferLiveWorkerSlot({
+    address: 't8',
+    agent: 'pi',
+    name: 'w-auth-scope1',
+    parent: 't165',
+    state: 'live',
+    cwd: '/tmp/my-repo',
+    argv: ['env', 'HERDR_ROLE=sublead', '/tools/pi', '--model', 'glm-zcode/glm-5.3'],
+  });
+  assert.equal(subleadWithParent?.slot, 'sublead');
 });
 
 test('2. extractRepoTag / matchesRepoScope — 일반 경로·워크트리 환원·스코프 판정', () => {

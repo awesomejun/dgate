@@ -120,8 +120,100 @@ impl HcTerminalDetail {
     }
 }
 
-/// 역할 슬롯 — roster RoleSlot과 동일한 5종.
-pub type LiveWorkerSlot = RoleSlot;
+/// 라이브 워커 슬롯 6종 — TS `LIVE_WORKER_SLOTS`(src/types.ts) 미러.
+/// roster 역할 슬롯(`RoleSlot` 5종)과 분리한다: sublead는 라이브 관측·wrap `--role`용
+/// 슬롯일 뿐 roster.json 역할·비용 스펙이 아니다(Phase 1 슬롯 신원 — docs/sublead-design.md).
+/// 어휘·값·의미는 Node v1과 일치해야 한다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LiveWorkerSlot {
+    Lead,
+    Sublead,
+    Explore,
+    Coder,
+    Verifier,
+    Advisor,
+}
+
+impl LiveWorkerSlot {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LiveWorkerSlot::Lead => "lead",
+            LiveWorkerSlot::Sublead => "sublead",
+            LiveWorkerSlot::Explore => "explore",
+            LiveWorkerSlot::Coder => "coder",
+            LiveWorkerSlot::Verifier => "verifier",
+            LiveWorkerSlot::Advisor => "advisor",
+        }
+    }
+
+    /// `--role`·`HERDR_ROLE` 값 → 슬롯(TS `parseLiveWorkerSlot` 미러) — 대소문자·앞뒤
+    /// 공백은 무시하고, `carbon`은 advisor 별칭, 미등값은 None(호출자가 폴백을 정한다).
+    pub fn parse(value: &str) -> Option<Self> {
+        let v = value.trim().to_lowercase();
+        match v.as_str() {
+            "lead" => Some(LiveWorkerSlot::Lead),
+            "sublead" => Some(LiveWorkerSlot::Sublead),
+            "explore" => Some(LiveWorkerSlot::Explore),
+            "coder" => Some(LiveWorkerSlot::Coder),
+            "verifier" => Some(LiveWorkerSlot::Verifier),
+            "advisor" | "carbon" => Some(LiveWorkerSlot::Advisor),
+            _ => None,
+        }
+    }
+
+    /// roster 역할 슬롯으로 환원 — sublead는 roster 역할이 아니므로 None(라벨 오버라이드 대상 아님).
+    pub fn as_role(&self) -> Option<RoleSlot> {
+        match self {
+            LiveWorkerSlot::Lead => Some(RoleSlot::Lead),
+            LiveWorkerSlot::Sublead => None,
+            LiveWorkerSlot::Explore => Some(RoleSlot::Explore),
+            LiveWorkerSlot::Coder => Some(RoleSlot::Coder),
+            LiveWorkerSlot::Verifier => Some(RoleSlot::Verifier),
+            LiveWorkerSlot::Advisor => Some(RoleSlot::Advisor),
+        }
+    }
+
+    /// 이름(세션명·라벨)의 **접두**로 슬롯 판정(TS `inferLiveWorkerSlotFromName` 미러).
+    /// - ASCII 접두는 뒤에 `-`·`_`·숫자·끝이 와야 한다(`submit-3`≠sub, `expandex`≠exp).
+    /// - 한글 접두는 구분자 없이 붙여도 인정한다(`검증-g1`·`검증g1`).
+    /// - `w-` 접두는 hc 세션명 규약상 벗겨고 본다. coder는 라벨로 유도하지 않는다.
+    /// 부분 문자열 판정을 쓰지 않는다 — 주제에 역할어가 들어간 coder 라벨 오분류 방지.
+    pub fn infer_from_name(name: &str) -> Option<Self> {
+        let lower = name.trim().to_lowercase();
+        let n = lower.strip_prefix("w-").unwrap_or(lower.as_str());
+        if n.is_empty() {
+            return None;
+        }
+        let matches_prefix = |prefix: &str| -> bool {
+            n.strip_prefix(prefix).is_some_and(|rest| {
+                if prefix.chars().all(|c| c.is_ascii_lowercase()) {
+                    rest.is_empty()
+                        || rest.starts_with('-')
+                        || rest.starts_with('_')
+                        || rest.as_bytes()[0].is_ascii_digit()
+                } else {
+                    true // 한글 접두 — 구분자 없이 붙여도 인정
+                }
+            })
+        };
+        // TS `SLOT_NAME_PREFIXES` 삽입 순서 미러 — 접두끼리 겹치지 않아 순서는 결과에 영향 없다.
+        // (`sub` 접두는 `^sub(?:[-_\d]|$)` 규칙상 `sublead-x`·`submit-3` 모두와 불일치하고,
+        // `sublead-x`는 같은 슬롯의 더 긴 접두 `sublead`가 잡는다.)
+        let table: [(Self, &[&str]); 5] = [
+            (Self::Lead, &["lead", "argon"]),
+            (Self::Sublead, &["sublead", "sub"]),
+            (Self::Verifier, &["verifier", "verify", "neon", "검증"]),
+            (Self::Explore, &["explore", "exp", "research", "탐색", "조사"]),
+            (Self::Advisor, &["advisor", "carbon", "자문"]),
+        ];
+        for (slot, prefixes) in table {
+            if prefixes.iter().any(|p| matches_prefix(p)) {
+                return Some(slot);
+            }
+        }
+        None
+    }
+}
 
 /// TUI 표시용 roster 라벨 묶음 — TS `RosterDisplayLabels`.
 #[derive(Debug, Clone, PartialEq)]
@@ -136,7 +228,7 @@ pub struct RosterDisplayLabels {
 }
 
 impl RosterDisplayLabels {
-    pub fn get_slot(&self, slot: &LiveWorkerSlot) -> &String {
+    pub fn get_slot(&self, slot: &RoleSlot) -> &String {
         match slot {
             RoleSlot::Lead => &self.lead,
             RoleSlot::Explore => &self.explore,
@@ -146,7 +238,7 @@ impl RosterDisplayLabels {
         }
     }
 
-    pub fn set_slot(&mut self, slot: &LiveWorkerSlot, value: String) {
+    pub fn set_slot(&mut self, slot: &RoleSlot, value: String) {
         match slot {
             RoleSlot::Lead => self.lead = value,
             RoleSlot::Explore => self.explore = value,
@@ -168,6 +260,8 @@ pub struct LiveWorkerInfo {
     /// 예: 'glm-zcode/glm-5.3' · 'devin' (원문 모델명, 없으면 CLI명)
     pub model_name: String,
     pub address: String,
+    /// pid:N(wrap) 워커를 소유한 hc 터미널 주소 — sublead 클러스터 그룹핑용(고아·직속 워커는 None).
+    pub owner_address: Option<String>,
     pub name: String,
     pub cwd: Option<String>,
     /// 레포 basename — `.herdr/worktrees/<wt>`는 소속 레포명으로 환원
@@ -247,7 +341,10 @@ const PARENT_MATCH_AGENTS: [&str; 7] = [
 ];
 
 /// 워커 세션명 접두 — herdr-quad-launch/dispatch가 만드는 이름 규약.
-const WORKER_NAME_PREFIXES: [&str; 9] = [
+/// `sublead`(대시 없음·`coder`와 같은 형식)와 `sub-`는 sublead 스코프 리드 세션이
+/// parent 없이 떠도 워커로 관측되게 한다 — 이 접두가 없으면 parent 없는 sublead 세션이
+/// 최상위 리드 후보로 오인되어 Lead 카드로 정규화된다(단일 리드 불변식 위반).
+const WORKER_NAME_PREFIXES: [&str; 11] = [
     "w-",
     "exp-",
     "explore-",
@@ -255,6 +352,8 @@ const WORKER_NAME_PREFIXES: [&str; 9] = [
     "verify-",
     "verifier-",
     "lead-",
+    "sublead",
+    "sub-",
     "advisor-",
     "carbon-",
 ];
@@ -314,10 +413,18 @@ pub fn is_observable_terminal(t: &HcTerminalSummary) -> bool {
     is_worker_terminal(t) || is_active_top_level_session(t)
 }
 
+/// sublead 세션명 규약 — 최상위 리드 후보에서 제외할 때 쓰는 정확한 접두 판정.
+fn is_sublead_name(name: &str) -> bool {
+    name == "sublead" || name.starts_with("sublead-") || name.starts_with("sub-")
+}
+
 /// 최상위(parent 없음) 활성 AI 에이전트 세션 판정 — 리드 관측 확장:
 /// ① `state === 'live'` ② `status ∈ {working, idle, done}` (None 불가 — 종료·불명 제외)
 /// ③ parent 부재·빈 값 ④ 모니터·GUI(dg-monitor*/mon-*/dgate-gui*) 제외
 /// ⑤ agent(소문자)가 AI 코딩 에이전트 7종 안팎.
+/// ⑥ sublead 이름 규약(`sublead`·`sublead-`·`sub-`) 제외 — sublead는 parent를 가진
+///    스코프 리드다(단일 리드 불변식). 이름으로 선언된 sublead는 부모 없이 떠도
+///    최상위 리드 후보가 될 수 없다(Lead 정규화 대상 아님, 워커 접두로 관측됨).
 /// idle/done도 관측해 'antigravity (대기 중)'처럼 리드 자리가 사라지지 않게 한다.
 pub fn is_active_top_level_session(t: &HcTerminalSummary) -> bool {
     if t.state.as_deref() != Some("live") {
@@ -338,6 +445,9 @@ pub fn is_active_top_level_session(t: &HcTerminalSummary) -> bool {
     }
     let name = t.name.as_deref().unwrap_or("");
     if is_monitor_or_gui_name(name) {
+        return false;
+    }
+    if is_sublead_name(name) {
         return false;
     }
     let agent = t.agent.as_deref().unwrap_or("").to_lowercase();
@@ -1370,7 +1480,7 @@ pub fn roster_labels_from_profile(
 
 /// `hc get` 상세 + 화면 원문 → LiveWorkerInfo.
 /// 슬롯은 ① argv의 `HERDR_ROLE=`(carbon→advisor) ② 세션명 규약(verify-/exp-/carbon-/lead-
-/// …) 순으로 판정하고, CLI·모델은 `env`·`dg wrap` 래퍼를 벗겨낸 뒤 실제 CLI와
+/// …/sublead-/sub-) 순으로 판정하고, CLI·모델은 `env`·`dg wrap` 래퍼를 벗겨낸 뒤 실제 CLI와
 /// `--model`에서 읽는다(실패 시 `detail.agent` 폴백).
 pub fn infer_live_worker_slot(
     detail: &HcTerminalDetail,
@@ -1388,46 +1498,43 @@ pub fn infer_live_worker_slot(
         &argv
     };
 
-    // 1) 슬롯 — HERDR_ROLE env가 최우선 (래퍼 argv·포그라운드 argv 모두 검사)
-    let mut slot: LiveWorkerSlot = RoleSlot::Coder;
+    // 1) 슬롯 — HERDR_ROLE env가 최우선 (래퍼 argv·포그라운드 argv 모두 검사).
+    //    미등값은 TS와 같이 무시하고(폴백 유지) 세션명 추론으로 넘어간다(Node v1 패리티).
+    let mut slot: LiveWorkerSlot = LiveWorkerSlot::Coder;
     let mut role_from_argv = false;
     for token in argv.iter().chain(fg_argv.iter()) {
         if let Some(m) = re_herdr_role().captures(token) {
-            let role = m
-                .get(1)
-                .map(|g| g.as_str().to_lowercase())
-                .unwrap_or_default();
-            slot = if role == "carbon" {
-                RoleSlot::Advisor
-            } else {
-                RoleSlot::parse(&role).unwrap_or(RoleSlot::Coder)
-            };
-            role_from_argv = true;
-            break;
+            if let Some(parsed) = m.get(1).and_then(|g| LiveWorkerSlot::parse(g.as_str())) {
+                slot = parsed;
+                role_from_argv = true;
+                break;
+            }
         }
     }
+    // 세션명 접두 — 공유 접두 판정(`LiveWorkerSlot::infer_from_name`).
+    //
+    // 단일 리드 불변식(docs/sublead-design.md): parent 없는 세션만 lead다. 강등
+    // (lead-* + parent → coder)은 Lead 접두 경로에만 적용하고, sublead는 강등 대상이
+    // 아니다 — sublead는 parent를 가진 스코프 리드라서 `sublead-*`/`sub-*` 이름 또는
+    // `HERDR_ROLE=sublead`면 parent 유무와 무관하게 sublead 슬롯을 유지한다.
+    // 아래 `Some(other)` 분기가 parent를 보지 않으므로 코드 추가 없이 성립한다(회귀 테스트가 고정).
     let name = detail.name.clone().unwrap_or_default();
     if !role_from_argv && !name.is_empty() {
-        let lower = name.to_lowercase();
-        let stem = lower.strip_prefix("w-").unwrap_or(lower.as_str());
-        let has_role_prefix = |s: &str, prefix: &str| -> bool {
-            s.strip_prefix(prefix).is_some_and(|rest| {
-                rest.is_empty()
-                    || rest.starts_with('-')
-                    || rest.starts_with('_')
-                    || rest.as_bytes()[0].is_ascii_digit()
-            })
-        };
-        if has_role_prefix(stem, "verify") || has_role_prefix(stem, "verifier") {
-            slot = RoleSlot::Verifier;
-        } else if stem.starts_with("exp-") || has_role_prefix(stem, "explore") {
-            slot = RoleSlot::Explore;
-        } else if has_role_prefix(stem, "advisor") || has_role_prefix(stem, "carbon") {
-            slot = RoleSlot::Advisor;
-        } else if has_role_prefix(&lower, "lead") && detail.parent.is_none() {
-            slot = RoleSlot::Lead;
-        } else {
-            slot = RoleSlot::Coder;
+        let has_parent = detail
+            .parent
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|p| !p.is_empty());
+        match LiveWorkerSlot::infer_from_name(&name) {
+            Some(LiveWorkerSlot::Lead) => {
+                slot = if has_parent {
+                    LiveWorkerSlot::Coder
+                } else {
+                    LiveWorkerSlot::Lead
+                };
+            }
+            Some(other) => slot = other,
+            None => slot = LiveWorkerSlot::Coder,
         }
     }
 
@@ -1464,6 +1571,7 @@ pub fn infer_live_worker_slot(
         short_model,
         model_name,
         address: detail.address.clone(),
+        owner_address: None,
         name: if name.is_empty() {
             detail.address.clone()
         } else {
@@ -1532,6 +1640,8 @@ pub struct WrapProc {
     pub effort: Option<String>,
     /// 표시명 우선순위 1순위 `--label` 원문.
     pub label: Option<String>,
+    /// 명시적 역할 `--role <slot>`(최우선) — 미지정·무효값이면 None(라벨 접두로 폴백).
+    pub role: Option<LiveWorkerSlot>,
     /// 원본 `--project` 경로 — 고아 wrap 스코프 판정·cwd 폴백용(표시명은 `project`).
     pub project_path: Option<String>,
     pub project: Option<String>,
@@ -1669,6 +1779,7 @@ pub fn find_wrap_processes(rows: &[PsRow]) -> Vec<WrapProc> {
             model,
             effort,
             label,
+            role: flag_value(&tokens, "--role").as_deref().and_then(LiveWorkerSlot::parse),
             project_path,
             project,
             route: flag_value(&tokens, "--route"),
@@ -1742,22 +1853,23 @@ pub fn wrap_proc_to_worker(p: &WrapProc, parent: &HcTerminalSummary) -> LiveWork
     wrap_proc_to_worker_with_log_dir(p, parent, None)
 }
 
-/// wrap 워커 슬롯 추론 — label(--label) 우선, 없으면 route 근사. 역할 카드 매핑의 근거.
-fn infer_wrap_slot(p: &WrapProc) -> RoleSlot {
-    let label = p.project.as_deref().unwrap_or("").to_lowercase();
-    if label.contains("verify") || label.contains("검증") {
-        return RoleSlot::Verifier;
+/// wrap 워커 슬롯 — ① 명시 `--role`(최우선) ② 라벨/프로젝트명 **접두**
+/// (`LiveWorkerSlot::infer_from_name` — TS와 같은 공유 접두 규칙) ③ 라벨 없는 file_select →
+/// explore ④ coder. 라벨만으로 리드가 되지는 않는다(wrap 워커는 리드가 아니다) — 명시
+/// `--role lead`만 인정. sublead 라벨(`sublead-auth`)은 스코프 리드 신원이므로 인정한다.
+fn infer_wrap_slot(p: &WrapProc) -> LiveWorkerSlot {
+    if let Some(role) = p.role {
+        return role;
     }
-    if label.contains("research") || label.contains("explore") || label.contains("조사") || label.contains("탐색") {
-        return RoleSlot::Explore;
-    }
-    if label.contains("advisor") || label.contains("자문") {
-        return RoleSlot::Advisor;
+    if let Some(by_label) = p.project.as_deref().and_then(LiveWorkerSlot::infer_from_name) {
+        if by_label != LiveWorkerSlot::Lead {
+            return by_label;
+        }
     }
     if p.project.is_none() && p.route.as_deref() == Some("file_select") {
-        return RoleSlot::Explore;
+        return LiveWorkerSlot::Explore;
     }
-    RoleSlot::Coder
+    LiveWorkerSlot::Coder
 }
 
 /// 테스트·커스텀 경로용 wrap 프로세스 → LiveWorkerInfo 변환.
@@ -1786,6 +1898,7 @@ pub fn wrap_proc_to_worker_with_log_dir(
         model_name: p.model.clone().unwrap_or_else(|| p.cli.clone()),
         short_model,
         address: format!("pid:{}", p.wrap_pid),
+        owner_address: Some(parent.address.clone()),
         name: p
             .project
             .clone()
@@ -1834,6 +1947,7 @@ pub fn wrap_proc_to_unowned_worker_with_log_dir(
         model_name: p.model.clone().unwrap_or_else(|| p.cli.clone()),
         short_model,
         address: format!("pid:{}", p.wrap_pid),
+        owner_address: None,
         name: p
             .project
             .clone()
@@ -1897,7 +2011,7 @@ fn parse_hc_get_pids(raw: &str) -> Vec<u64> {
 /// - 표시명은 비어 있지 않은 세션명, 없으면 'lead'(원 주소 노출 방지).
 /// - `--model` 미파싱 시 shortModel·modelName을 agent명(예: 'antigravity')으로 폴백.
 pub fn normalize_top_level_worker(worker: &mut LiveWorkerInfo, summary: &HcTerminalSummary) {
-    worker.slot = RoleSlot::Lead;
+    worker.slot = LiveWorkerSlot::Lead;
     let name = summary
         .name
         .as_deref()
@@ -1918,12 +2032,13 @@ pub fn normalize_top_level_worker(worker: &mut LiveWorkerInfo, summary: &HcTermi
     }
 }
 
-/// 라이브 오버라이드 대상 슬롯(lead는 watchedLead 부재 시에만).
+/// 라이브 오버라이드 대상 슬롯(lead는 watchedLead 부재 시에만). sublead는 roster.json
+/// 역할이 아니라(5종 그대로) Workers 카드로만 표시되는 라이브 슬롯이므로 라벨을 덮지 않는다.
 const LIVE_OVERRIDE_SLOTS: [LiveWorkerSlot; 4] = [
-    RoleSlot::Verifier,
-    RoleSlot::Coder,
-    RoleSlot::Explore,
-    RoleSlot::Advisor,
+    LiveWorkerSlot::Verifier,
+    LiveWorkerSlot::Coder,
+    LiveWorkerSlot::Explore,
+    LiveWorkerSlot::Advisor,
 ];
 
 /// roster 대기(standby) 라벨 위에 라이브 워커 배지를 얹는다.
@@ -1946,7 +2061,7 @@ pub fn merge_live_roster_labels(
     let mut verifier_worker: Option<&LiveWorkerInfo> = None;
     let mut claimed: HashSet<LiveWorkerSlot> = HashSet::new();
     for w in workers {
-        if w.slot == RoleSlot::Lead {
+        if w.slot == LiveWorkerSlot::Lead {
             if watched_lead.is_none() && lead_worker.is_none() {
                 lead_worker = Some(w);
             }
@@ -1954,8 +2069,11 @@ pub fn merge_live_roster_labels(
         }
         if LIVE_OVERRIDE_SLOTS.contains(&w.slot) && !claimed.contains(&w.slot) {
             claimed.insert(w.slot);
-            labels.set_slot(&w.slot, w.short_model.clone());
-            if w.slot == RoleSlot::Verifier {
+            // sublead는 `as_role()`가 None이지만 LIVE_OVERRIDE_SLOTS에 없으므로 여기 도달하지 않는다.
+            if let Some(role) = w.slot.as_role() {
+                labels.set_slot(&role, w.short_model.clone());
+            }
+            if w.slot == LiveWorkerSlot::Verifier {
                 verifier_worker = Some(w);
             }
         }
@@ -2332,10 +2450,12 @@ impl LiveSyncSnapshotter {
                     worker.turn = summary.turn;
                     // 최상위 활성 AI 세션(워커 규약 밖 리드 등) — Lead 슬롯·표시명·
                     // shortModel 폴백을 정규화한다. 워커 규약 터미널은 그대로 둔다.
+                    // sublead(sublead-/sub- 이름)는 워커 접두라 이 분기에 들어오지 않아
+                    // sublead 슬롯이 보존된다(최상위 리드 후보 아님).
                     if is_active_top_level_session(summary) && !is_worker_terminal(summary) {
                         normalize_top_level_worker(&mut worker, summary);
                     }
-                    if worker.slot == RoleSlot::Lead {
+                    if worker.slot == LiveWorkerSlot::Lead {
                         let conv_id = detail
                             .foreground_argv
                             .as_deref()
@@ -2396,7 +2516,7 @@ impl LiveSyncSnapshotter {
                             }
                         }
                     }
-                    if worker.slot != RoleSlot::Lead {
+                    if worker.slot != LiveWorkerSlot::Lead {
                         if let Some(raw) = raw_screen.as_deref() {
                             worker.recent_output = extract_recent_output_lines(raw, 12);
                         }
@@ -2754,10 +2874,10 @@ mod tests {
     fn top_level_worker_normalized_to_lead_card() {
         // 이름·slot·shortModel 폴백 — 렌더 카드 '[paperwork-operations] lead · antigravity'
         let sum = top_summary("paperwork-operations", "antigravity", Some("working"));
-        let mut w = worker(RoleSlot::Coder, "custom", None);
+        let mut w = worker(LiveWorkerSlot::Coder, "custom", None);
         w.name = "t155".to_string();
         normalize_top_level_worker(&mut w, &sum);
-        assert_eq!(w.slot, RoleSlot::Lead);
+        assert_eq!(w.slot, LiveWorkerSlot::Lead);
         assert_eq!(w.name, "paperwork-operations");
         assert_eq!(w.short_model, "antigravity");
         assert_eq!(w.badge, "antigravity (실행 중)");
@@ -2765,10 +2885,10 @@ mod tests {
         // 이름 없으면 'lead'로 표시
         let mut sum2 = top_summary("", "pi", Some("working"));
         sum2.name = None;
-        let mut w2 = worker(RoleSlot::Coder, "pi", None);
+        let mut w2 = worker(LiveWorkerSlot::Coder, "pi", None);
         w2.name = "t155".to_string();
         normalize_top_level_worker(&mut w2, &sum2);
-        assert_eq!(w2.slot, RoleSlot::Lead);
+        assert_eq!(w2.slot, LiveWorkerSlot::Lead);
         assert_eq!(w2.name, "lead");
         assert_eq!(w2.short_model, "pi");
     }
@@ -3043,7 +3163,7 @@ mod tests {
             ..Default::default()
         };
         let w = wrap_proc_to_worker(&procs[0], &parent);
-        assert_eq!(w.slot, RoleSlot::Coder);
+        assert_eq!(w.slot, LiveWorkerSlot::Coder);
         assert_eq!(w.address, "pid:700");
         assert_eq!(w.name, "pi-cli-manager");
         assert_eq!(w.repo_tag, "paperwork-operations");
@@ -3145,13 +3265,13 @@ mod tests {
     #[test]
     fn infer_slot_from_herdr_role_env_priority() {
         for (role, expect) in [
-            ("lead", RoleSlot::Lead),
-            ("explore", RoleSlot::Explore),
-            ("verifier", RoleSlot::Verifier),
-            ("advisor", RoleSlot::Advisor),
-            ("coder", RoleSlot::Coder),
-            ("carbon", RoleSlot::Advisor), // carbon→advisor 매핑
-            ("LEAD", RoleSlot::Lead),      // 대소문자 무시
+            ("lead", LiveWorkerSlot::Lead),
+            ("explore", LiveWorkerSlot::Explore),
+            ("verifier", LiveWorkerSlot::Verifier),
+            ("advisor", LiveWorkerSlot::Advisor),
+            ("coder", LiveWorkerSlot::Coder),
+            ("carbon", LiveWorkerSlot::Advisor), // carbon→advisor 매핑
+            ("LEAD", LiveWorkerSlot::Lead),      // 대소문자 무시
         ] {
             let d = detail(
                 "a",
@@ -3168,20 +3288,20 @@ mod tests {
     #[test]
     fn infer_slot_from_session_name_fallback() {
         for (name, expect) in [
-            ("verify-1", RoleSlot::Verifier),
-            ("w-verifier", RoleSlot::Verifier),
-            ("exp-2", RoleSlot::Explore),
-            ("explore-x", RoleSlot::Explore),
-            ("advisor-1", RoleSlot::Advisor),
-            ("carbon-9", RoleSlot::Advisor),
-            ("lead-1", RoleSlot::Lead),
-            ("w-plain", RoleSlot::Coder),
-            ("coderr", RoleSlot::Coder), // 'coder' 접두가 아니라 contains 아님 — name은 규약 접두
-            ("w-live-lead-rust", RoleSlot::Coder),
-            ("w-live-lead-node", RoleSlot::Coder),
-            ("w-fix-advisor-width", RoleSlot::Coder),
-            ("w-fix-verify-panel", RoleSlot::Coder),
-            ("w-fix-explore-layout", RoleSlot::Coder),
+            ("verify-1", LiveWorkerSlot::Verifier),
+            ("w-verifier", LiveWorkerSlot::Verifier),
+            ("exp-2", LiveWorkerSlot::Explore),
+            ("explore-x", LiveWorkerSlot::Explore),
+            ("advisor-1", LiveWorkerSlot::Advisor),
+            ("carbon-9", LiveWorkerSlot::Advisor),
+            ("lead-1", LiveWorkerSlot::Lead),
+            ("w-plain", LiveWorkerSlot::Coder),
+            ("coderr", LiveWorkerSlot::Coder), // 'coder' 접두가 아니라 contains 아님 — name은 규약 접두
+            ("w-live-lead-rust", LiveWorkerSlot::Coder),
+            ("w-live-lead-node", LiveWorkerSlot::Coder),
+            ("w-fix-advisor-width", LiveWorkerSlot::Coder),
+            ("w-fix-verify-panel", LiveWorkerSlot::Coder),
+            ("w-fix-explore-layout", LiveWorkerSlot::Coder),
         ] {
             let d = detail("a", name, "pi", &["pi"], None);
             let w = infer_live_worker_slot(&d, None).unwrap();
@@ -3192,7 +3312,7 @@ mod tests {
         child_lead.parent = Some("t165".to_string());
         assert_eq!(
             infer_live_worker_slot(&child_lead, None).unwrap().slot,
-            RoleSlot::Coder
+            LiveWorkerSlot::Coder
         );
     }
 
@@ -3390,7 +3510,7 @@ mod tests {
         }
     }
 
-    fn worker(slot: RoleSlot, short: &str, model: Option<&str>) -> LiveWorkerInfo {
+    fn worker(slot: LiveWorkerSlot, short: &str, model: Option<&str>) -> LiveWorkerInfo {
         LiveWorkerInfo {
             slot,
             badge: format!("{} (실행 중)", short),
@@ -3399,6 +3519,7 @@ mod tests {
                 .map(str::to_string)
                 .unwrap_or_else(|| short.to_string()),
             address: format!("addr-{}", short),
+            owner_address: None,
             name: short.to_string(),
             cwd: None,
             repo_tag: "r".into(),
@@ -3426,9 +3547,9 @@ mod tests {
     #[test]
     fn merge_overrides_slots_with_first_worker_per_slot() {
         let workers = vec![
-            worker(RoleSlot::Coder, "pi:glm-5.3", Some("glm-zcode/glm-5.3")),
-            worker(RoleSlot::Coder, "devin", None), // 동일 슬롯 2번째 — 무시
-            worker(RoleSlot::Verifier, "devin", None),
+            worker(LiveWorkerSlot::Coder, "pi:glm-5.3", Some("glm-zcode/glm-5.3")),
+            worker(LiveWorkerSlot::Coder, "devin", None), // 동일 슬롯 2번째 — 무시
+            worker(LiveWorkerSlot::Verifier, "devin", None),
         ];
         let m = merge_live_roster_labels(&base_labels(), None, &workers);
         assert_eq!(m.labels.coder, "pi:glm-5.3");
@@ -3443,8 +3564,12 @@ mod tests {
     #[test]
     fn merge_lead_worker_and_watched_lead_precedence() {
         let workers = vec![
-            worker(RoleSlot::Lead, "pi:glm-5.3", Some("glm-zcode/glm-5.3")),
-            worker(RoleSlot::Verifier, "pi:glm-5.3", Some("glm-zcode/glm-5.3")),
+            worker(LiveWorkerSlot::Lead, "pi:glm-5.3", Some("glm-zcode/glm-5.3")),
+            worker(
+                LiveWorkerSlot::Verifier,
+                "pi:glm-5.3",
+                Some("glm-zcode/glm-5.3"),
+            ),
         ];
         // watchedLead 없음 — lead 워커는 플래그만 주도(라벨 슬롯 침범 없음 —
         // TS LIVE_OVERRIDE_SLOTS가 lead를 제외하는 원문 계약).
@@ -3619,7 +3744,7 @@ mod tests {
         let merged = snap.tick_now();
         assert_eq!(merged.active_worker_count, 1);
         assert_eq!(merged.workers[0].address, "a1");
-        assert_eq!(merged.workers[0].slot, RoleSlot::Coder);
+        assert_eq!(merged.workers[0].slot, LiveWorkerSlot::Coder);
         assert_eq!(merged.workers[0].short_model, "pi:glm-5.3");
         assert_eq!(merged.workers[0].activity, "editing main.rs");
         assert_eq!(merged.workers[0].repo_tag, "repo-a");
@@ -3659,11 +3784,11 @@ mod tests {
         // working(t155) + idle(t156) 최상위 AI 세션 2개 관측, zsh(t157)는 제외
         assert_eq!(merged.active_worker_count, 2);
         let w = &merged.workers[0];
-        assert_eq!(w.slot, RoleSlot::Lead);
+        assert_eq!(w.slot, LiveWorkerSlot::Lead);
         assert_eq!(w.name, "paperwork-operations");
         assert_eq!(w.short_model, "antigravity");
         let w2 = &merged.workers[1];
-        assert_eq!(w2.slot, RoleSlot::Lead);
+        assert_eq!(w2.slot, LiveWorkerSlot::Lead);
         assert_eq!(w2.name, "idle-session");
         assert_eq!(w2.short_model, "antigravity");
         assert!(merged.workers.iter().all(|w| w.name != "shell"));
@@ -4036,6 +4161,40 @@ mod tests {
         // ①② dg wrap 호스팅 터미널 카드 소멸(§3.5 ps wrap 카드가 대신 표시), ③ bash 실행 카드 유지
         assert_eq!(addrs, vec!["tSh"]);
         assert_eq!(merged.workers[0].name, "coder-shelljob");
+        assert_eq!(merged.workers[0].owner_address, None);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn wrap_proc_sets_owner_address_for_owned_and_none_for_unowned() {
+        let proc = WrapProc {
+            wrap_pid: 4242,
+            ancestors: vec![100, 1],
+            cli: "pi".to_string(),
+            model: Some("glm-zcode/glm-5.3".to_string()),
+            effort: Some("high".to_string()),
+            role: None,
+            label: Some("coder-auth".to_string()),
+            project_path: Some("/tmp/repo-a".to_string()),
+            project: Some("coder-auth".to_string()),
+            route: Some("file_select".to_string()),
+        };
+        let parent = HcTerminalSummary {
+            address: "tSub1".to_string(),
+            agent: Some("pi".to_string()),
+            name: Some("sublead-auth".to_string()),
+            parent: Some("tLead0".to_string()),
+            state: Some("live".to_string()),
+            status: Some("working".to_string()),
+            cwd: Some("/tmp/repo-a".to_string()),
+            turn: None,
+        };
+        let owned = wrap_proc_to_worker(&proc, &parent);
+        assert_eq!(owned.address, "pid:4242");
+        assert_eq!(owned.owner_address.as_deref(), Some("tSub1"));
+
+        let unowned = wrap_proc_to_unowned_worker(&proc);
+        assert_eq!(unowned.address, "pid:4242");
+        assert_eq!(unowned.owner_address, None);
     }
 }

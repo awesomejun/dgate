@@ -85,6 +85,15 @@ export function sessionNameOk(name: string): boolean {
   return HC_NAME_RE.test(name);
 }
 
+/**
+ * 환경 변수에서 sublead·세션 대화 ID(`HERDR_CONVERSATION`)를 읽는다.
+ * 비어 있지 않은 문자열이면 그 값을 반환하고, 미설정·빈 문자열이면 null(기존 동작 유지).
+ */
+export function conversationFromEnv(env: Record<string, string | undefined>): string | null {
+  const value = env.HERDR_CONVERSATION;
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
 // ---------- hc ls 충돌 점검 (N12) ----------
 
 interface HcLsTerminal {
@@ -418,6 +427,7 @@ function planDispatchInner(input: PlanDispatchInput, api: ApiOverride | null): D
         pAtGate: post.p,
         basisAtGate: post.basis,
         forcedSplit: forced.forcedSplit,
+        conversationId: conversationFromEnv(process.env),
         ttlMs: TTL_EXPLORE_MS,
         title: input.taskFile ?? null,
         // 점유 리스는 실제 디스패치(비 deferred) 때만 기록 — deferred fork는 스코프를

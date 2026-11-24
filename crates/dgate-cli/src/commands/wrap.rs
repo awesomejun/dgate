@@ -376,6 +376,25 @@ fn stat_size_or_null(p: &str) -> Option<u64> {
     std::fs::metadata(p).map(|m| m.len()).ok()
 }
 
+/// `dg wrap` 자식 워커(손자 프로세스)로 전파할 fork 컨텍스트 env를 조립한다.
+/// fork 미지정(`None`·빈 문자열) 또는 폴백(`fk_fallback_` 접두)이면 빈 맵을 반환해
+/// 기존 워크플로우 env를 건드리지 않는다. `conversation_id`가 비어 있지 않으면
+/// `HERDR_CONVERSATION`도 함께 전파한다(TS `dg.ts::forkContextEnv` 미러).
+pub(crate) fn fork_context_env(
+    fork_id: Option<&str>,
+    conversation_id: Option<&str>,
+) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let Some(fk) = fork_id.filter(|s| !s.is_empty() && !s.starts_with("fk_fallback_")) else {
+        return out;
+    };
+    out.insert("HERDR_FORK_ID".to_string(), fk.to_string());
+    if let Some(conv) = conversation_id.filter(|s| !s.is_empty()) {
+        out.insert("HERDR_CONVERSATION".to_string(), conv.to_string());
+    }
+    out
+}
+
 pub fn cmd_wrap(args: &ParsedArgs, json: bool) -> CmdResult {
     let route = parse_route(&require_flag(args, "route")?, "route")?;
     let tool_class = require_flag(args, "tool-class")?;
@@ -416,6 +435,7 @@ pub fn cmd_wrap(args: &ParsedArgs, json: bool) -> CmdResult {
 
     // ---------- fork 확보(DB 오류 → 폴백 fork) ----------
     let mut fork_id: Option<String> = None;
+    let mut fork_conversation_id: Option<String> = None;
     let mut fork_exec_attempt: Option<i64> = None;
     let db_holder: Arc<Mutex<Option<rusqlite::Connection>>> = Arc::new(Mutex::new(None));
     {
@@ -426,7 +446,7 @@ pub fn cmd_wrap(args: &ParsedArgs, json: bool) -> CmdResult {
         })();
         match db_result {
             Ok(Some(db)) => {
-                let assign = (|| -> Result<String, DgError> {
+                let assign = (|| -> Result<(String, Option<String>), DgError> {
                     if let Some(fk) = &fork_opt {
                         let fork = engine::get_fork(&db, fk).map_err(DgError::Fatal)?.ok_or_else(|| {
                             DgError::Usage(crate::args::UsageError(format!("fork not found: {fk}")))
@@ -437,7 +457,8 @@ pub fn cmd_wrap(args: &ParsedArgs, json: bool) -> CmdResult {
                                 fork.status
                             ))));
                         }
-                        Ok(fk.clone())
+                        let conv = fork.conversation_id.filter(|s| !s.is_empty());
+                        Ok((fk.clone(), conv))
                     } else {
                         let post = engine::get_posterior(&db, &identity.project_id, route, &tool_class)
                             .map_err(DgError::Fatal)?;
@@ -451,7 +472,7 @@ pub fn cmd_wrap(args: &ParsedArgs, json: bool) -> CmdResult {
                             "split"
                         };
                         let title: String = command.join(" ").chars().take(80).collect();
-                        engine::issue_fork(
+                        let fk = engine::issue_fork(
                             &db,
                             &IssueForkInput {
                                 project_id: &identity.project_id,
@@ -469,17 +490,19 @@ pub fn cmd_wrap(args: &ParsedArgs, json: bool) -> CmdResult {
                                 now_ms: None,
                             },
                         )
-                        .map_err(DgError::Fatal)
+                        .map_err(DgError::Fatal)?;
+                        Ok((fk, None))
                     }
                 })();
                 match assign {
-                    Ok(fk) => {
+                    Ok((fk, conv)) => {
                         let exec_attempt = engine::get_fork_gen_attempt(&db, &fk)
                             .ok()
                             .flatten()
                             .map(|(_, att)| att);
                         *db_holder.lock().unwrap() = Some(db);
                         fork_id = Some(fk);
+                        fork_conversation_id = conv;
                         fork_exec_attempt = exec_attempt;
                     }
                     Err(DgError::Usage(u)) => return Err(DgError::Usage(u)),
@@ -521,8 +544,24 @@ pub fn cmd_wrap(args: &ParsedArgs, json: bool) -> CmdResult {
     let effective_fork = fork_id.clone().unwrap_or_else(fallback_fork_id_hex);
     let is_fallback_fork = effective_fork.starts_with("fk_fallback_");
 
+    // fork 미지정(--fork 생략) 또는 fallback(fk_fallback_) wrap은 env 주입 없음(기존 워크플로우 회귀 0)
+    let fork_ctx = fork_context_env(
+        if fork_opt.is_some() {
+            Some(effective_fork.as_str())
+        } else {
+            None
+        },
+        fork_conversation_id.as_deref(),
+    );
+
     let child_env = if sanitize_env {
-        Some(build_sanitized_child_env(&allow_env))
+        let mut env_map = build_sanitized_child_env(&allow_env);
+        env_map.extend(fork_ctx);
+        Some(env_map)
+    } else if !fork_ctx.is_empty() {
+        let mut env_map: BTreeMap<String, String> = std::env::vars().collect();
+        env_map.extend(fork_ctx);
+        Some(env_map)
     } else {
         None
     };
@@ -719,4 +758,25 @@ pub fn cmd_wrap(args: &ParsedArgs, json: bool) -> CmdResult {
         let _ = writeln!(so, "{summary_value}");
     }
     Ok(exit_code as i32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fork_context_env_handles_owned_standalone_fallback_and_none() {
+        let full = fork_context_env(Some("fk_abc123"), Some("conv-sub-1"));
+        assert_eq!(full.get("HERDR_FORK_ID").map(String::as_str), Some("fk_abc123"));
+        assert_eq!(full.get("HERDR_CONVERSATION").map(String::as_str), Some("conv-sub-1"));
+        assert_eq!(full.len(), 2);
+
+        let fork_only = fork_context_env(Some("fk_abc123"), None);
+        assert_eq!(fork_only.get("HERDR_FORK_ID").map(String::as_str), Some("fk_abc123"));
+        assert!(!fork_only.contains_key("HERDR_CONVERSATION"));
+        assert_eq!(fork_only.len(), 1);
+
+        assert!(fork_context_env(Some("fk_fallback_deadbeef"), Some("conv-sub-1")).is_empty());
+        assert!(fork_context_env(None, Some("conv-sub-1")).is_empty());
+    }
 }
