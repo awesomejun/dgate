@@ -31,7 +31,8 @@
 ## 5. Carbon 3관문 자문 (온디맨드 — 상시 세션 금지)
 
 - 관문: **Gate 0** 계획 확정 전 · **Gate 1** 같은 오류 2회(`forcedSplit` 자동 점등) · **Gate 2** 완료 선언 전.
-- 절차: 브리프 `.herdr/advice/gate<N>-<id>.md` 작성 → `hc run --bg --name carbon-gate<N>-<RUN_ID> --cwd "$REPO" -- env HERDR_ROLE=carbon HERDR_READONLY=1 pi --provider opencodex --model glm-zcode/glm-5.3 --thinking high --tools read,grep,find,ls --no-extensions --no-mcp --no-approve "관문 N 검토: <BRIEF_PATH>"` → `hc wait` → `hc read` → **즉시 `hc kill; hc rm` 정리**. 자문 워커의 CLI·모델은 활성 roster의 advisor 슬롯을 따른다 — 기본 quota-saver는 `agy` 호출 완전 금지(opt-in `agy-quad`에서만 agy 자문).
+- 절차: 브리프 `.herdr/advice/gate<N>-<id>.md` 작성 → `hc run --bg --name carbon-gate<N>-<RUN_ID> --cwd "$REPO" -- env HERDR_ROLE=carbon HERDR_READONLY=1 <활성 roster의 advisor 슬롯이 지정한 CLI·모델> "관문 N 검토: <BRIEF_PATH>"` → `hc wait` → `hc read` → **즉시 `hc kill; hc rm` 정리**. 자문 워커의 CLI·모델은 활성 roster의 advisor 슬롯을 따른다 — 현재 전역 지시(2026-11-24): `agy --model "Claude Opus 5.5 (Medium)"` 온디맨드.
+- **수용 규칙 (2026-11-24 사용자 지시)**: 자문 결과 중 **치명적 결함을 막는 조언만** 블로킹으로 수용한다 — 데이터 무결성·보안·복구 불가 변경·계약 위반을 예방하는 지적만 진행을 멈추고 반영한다. 그 외 의견(선호·최적화·비핵심 개선)은 관찰로 기록하고 진행을 막지 않는다.
 
 ## 6. 독립 검증 (Verifier) 결선
 
