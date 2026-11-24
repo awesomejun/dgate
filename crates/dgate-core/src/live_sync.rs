@@ -498,6 +498,23 @@ fn resolve_path_best(p: &str) -> PathBuf {
     })
 }
 
+/// Windows `canonicalize`는 `\\?\C:\…` verbatim 경로를 반환하지만, 미존재 경로의
+/// resolve 폴백은 `C:\…` 일반 형태를 낸다 — 두 형태가 섞이면 접두 비교가 어긋난다.
+/// `\\?\` 접두를 벗겨 비교 형태를 통일한다(UNC는 `\\server\share`로 환원).
+fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let s = p.to_string_lossy();
+        if let Some(rest) = s.strip_prefix("\\\\?\\UNC\\") {
+            return PathBuf::from(format!("\\\\{rest}"));
+        }
+        if let Some(rest) = s.strip_prefix("\\\\?\\") {
+            return PathBuf::from(rest);
+        }
+    }
+    p
+}
+
 /// 워커 cwd가 `--repo <dir>` 스코프 안에 있는지 판정.
 /// 필터 없음(None)이면 전역 관측(항상 true), 워커 cwd 미상이면 스코프 지정 시 false.
 /// 워크트리 서브디렉터리(`.herdr/worktrees/…`)도 소속 레포 스코프에 포함된다.
@@ -508,19 +525,11 @@ pub fn matches_repo_scope(worker_cwd: Option<&str>, repo_filter_dir: Option<&str
     let Some(worker) = worker_cwd.map(str::trim).filter(|s| !s.is_empty()) else {
         return false;
     };
-    let worker_path = resolve_path_best(worker);
-    let scope_path = resolve_path_best(filter);
-    let scope_str = scope_path.to_string_lossy().into_owned();
-    // 스코프가 루트('/')면 `scopePath + sep`가 '//'가 되어 전부 거짓이 되는 사고 방지 —
-    // 이미 구분자로 끝나는 스코프는 그대로 접두사로 쓴다.
-    let sep = std::path::MAIN_SEPARATOR.to_string();
-    let prefix = if scope_str.ends_with(&sep) {
-        scope_str.clone()
-    } else {
-        format!("{}{}", scope_str, sep)
-    };
-    let worker_str = worker_path.to_string_lossy();
-    worker_str == scope_str || worker_str.starts_with(&prefix)
+    let worker_path = strip_verbatim_prefix(resolve_path_best(worker));
+    let scope_path = strip_verbatim_prefix(resolve_path_best(filter));
+    // 컴포넌트 단위 접두 — `/repo2/x`가 `/repo` 스코프에 잘못 포함되지 않고,
+    // 루트 스코프('/' 또는 'C:\')는 그 하위 전부를 포함한다(구분자 더블링 사고 없음).
+    worker_path.starts_with(&scope_path)
 }
 
 // ---------------------------------------------------------------------------

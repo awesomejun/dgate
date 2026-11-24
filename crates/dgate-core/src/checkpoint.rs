@@ -677,7 +677,9 @@ pub fn verify_worktree_checkpoint(checkpoint_dir: &Path) -> VerifyCheckpointResu
     if let Some(manifest) = &manifest {
         for entry in &manifest.files {
             let abs = dir.join(&entry.relpath);
-            if abs.strip_prefix(&dir).map(|p| p.to_string_lossy() != entry.relpath).unwrap_or(true) {
+            // relpath는 항상 `/` 구분(매니페스트 계약) — Windows join 결과(`\` 구분)와
+            // 문자열 비교하면 정상 하위 경로도 escape로 오판하므로 컴포넌트 비교를 쓴다.
+            if abs.strip_prefix(&dir).map(|p| p != Path::new(&entry.relpath)).unwrap_or(true) {
                 errors.push(format!("path escapes checkpoint dir: {}", entry.relpath));
                 continue;
             }
@@ -771,7 +773,7 @@ pub fn restore_worktree_checkpoint(checkpoint_dir: &Path, target_worktree_dir: &
         }
         let src_abs = dir.join(&entry.relpath);
         let dest = target.join(rel);
-        if dest.strip_prefix(&target).map(|p| p.to_string_lossy() != rel).unwrap_or(true) {
+        if dest.strip_prefix(&target).map(|p| p != Path::new(rel)).unwrap_or(true) {
             errors.push(format!("path escapes target worktree: {}", rel));
             continue;
         }
@@ -957,6 +959,7 @@ mod tests {
             .iter()
             .map(|f| format!("{}|{}{}", f.relpath, f.kind.as_str(), if f.symlink { "|symlink" } else { "" }))
             .collect();
+        #[allow(unused_mut)] // Windows는 cfg(unix) push가 없어 mut 미사용
         let mut expected_entries = vec![
             "index.patch|index_patch",
             "worktree.patch|worktree_patch",

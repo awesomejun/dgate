@@ -364,13 +364,30 @@ fn is_executable_file(_p: &Path) -> bool {
 }
 
 /// Windows — 실행 비트가 없으므로 PATHEXT 확장(.EXE/.CMD/.…) 보유를
-/// 실행 가능 판정으로 쓴다(`where.exe`와 동일 의미론).
+/// 실행 가능 판정으로 쓴다(`where.exe`와 동일 의미론). Unix와 같은 선결 조건:
+/// 실제 존재하는 일반 파일이어야 한다(확장자만으로는 미존재 `name.COM`도 통과해
+/// 설치 오탐이 생겼다 — 실측 버그).
 #[cfg(windows)]
 fn is_executable_file(p: &Path) -> bool {
+    if !p.is_file() {
+        return false;
+    }
     let Some(ext) = p.extension().and_then(|e| e.to_str()) else {
         return false;
     };
     executable_extensions().iter().any(|e| e.eq_ignore_ascii_case(ext))
+}
+
+/// 디렉터리 엔트리의 실제 파일명(대소문자 보존) — `where.exe`가 보고하는 형태.
+/// PATHEXT는 `.EXE` 대문자지만 디스크 파일은 `tool.exe`일 수 있으므로,
+/// 대소문자 무시 매치된 엔트리의 실제 이름을 돌려준다.
+#[cfg(windows)]
+fn actual_entry_name(dir: &Path, wanted: &str) -> Option<String> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .find(|n| n.eq_ignore_ascii_case(wanted))
 }
 
 /// PATHEXT 실행 확장 목록(앞점 제거). 환경 변수가 없으면 Windows 기본값.
@@ -412,9 +429,12 @@ pub fn find_on_path(name: &str, search_dirs: &[PathBuf]) -> Option<String> {
                 );
             }
             for cand in candidates {
-                let p = dir.join(cand);
+                let p = dir.join(&cand);
                 if is_executable_file(&p) {
-                    return Some(p.to_string_lossy().into_owned());
+                    // PATHEXT 대문자 후보로 디스크 파일(소문자 .exe 등)에 매치될 수 있다 —
+                    // where.exe 패리티로 실제 엔트리명을 보고한다.
+                    let real = actual_entry_name(dir, &cand).unwrap_or(cand);
+                    return Some(dir.join(real).to_string_lossy().into_owned());
                 }
             }
         }
@@ -2447,7 +2467,8 @@ mod tests {
         // 4) 기본 XDG state
         let r4 = detect_environment(&mk(vec![]));
         assert_eq!(r4.db.source, "default");
-        assert!(r4.db.path.ends_with("dgate/decision.db"));
+        // Windows는 `\` 구분자 — 문자열 ends_with 대신 컴포넌트 비교
+        assert!(Path::new(&r4.db.path).ends_with(Path::new("dgate").join("decision.db")));
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -2887,7 +2908,8 @@ mod tests {
         let res3 = install_skill_links(&opts);
         assert!(
             res3.skipped.iter().any(|s|
-                s.dir == home.join(".pi").join("agent").to_string_lossy().into_owned()
+                // `.pi/agent`의 `/`는 OS 구분자로 조인된다 — 문자열이 아닌 Path 비교
+                Path::new(&s.dir) == home.join(".pi").join("agent")
                     && s.reason == "conflict-existing-path")
         );
         assert_eq!(
@@ -2946,8 +2968,9 @@ mod tests {
 
         let res = install_repo_hooks(&target, Some(&orch));
         assert_eq!(res.written.len(), 2, "hooks.json + exclude");
-        assert!(res.written.iter().any(|p| p.ends_with(".agents/hooks.json")));
-        assert!(res.written.iter().any(|p| p.ends_with(".git/info/exclude")));
+        // Windows는 `\` 구분자 — 컴포넌트 ends_with로 OS 중립 비교
+        assert!(res.written.iter().any(|p| Path::new(p).ends_with(Path::new(".agents").join("hooks.json"))));
+        assert!(res.written.iter().any(|p| Path::new(p).ends_with(Path::new(".git").join("info").join("exclude"))));
         // v2 훅은 네이티브 `dg hook` 직접 실행 — hooks/dg-hook.ts 미배포
         assert!(!target.join(".agents").join("hooks").join("dg-hook.ts").exists());
         // exclude 내용

@@ -98,15 +98,36 @@ fn shell_command(script: &str) -> Vec<String> {
     }
 }
 
-/// 산출물 생성 스크립트 — redirect 인용규칙이 셸마다 다르다(sh '…' / cmd "…").
-fn write_artifact_script(path: &str) -> String {
+/// 산출물 생성 커맨드 argv — Windows는 `>`·`&`를 별도 argv 토큰으로 넘겨야
+/// `cmd /C`가 구문 그대로 해석한다. 단일 스크립트 문자열 안에 손수 넣은 `"`는
+/// Rust Command::arg가 MSVCRT `\"`로 재인용해 cmd가 "파일 이름 구문 오류"를
+/// 내는 실측 버그가 있다(pipeline.rs wrap_inner_command와 동일 설계: 토큰 단위
+/// 전달 — 리다이렉트 대상이 공백을 포함해도 Rust가 그 토큰만 따로 인용한다).
+fn write_artifact_command(path: &str) -> Vec<String> {
     #[cfg(unix)]
     {
-        format!("echo working; echo result > '{path}'; echo done")
+        vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            format!("echo working; echo result > '{path}'; echo done"),
+        ]
     }
     #[cfg(windows)]
     {
-        format!("echo working & echo result > \"{path}\" & echo done")
+        vec![
+            "cmd".to_string(),
+            "/C".to_string(),
+            "echo".to_string(),
+            "working".to_string(),
+            "&".to_string(),
+            "echo".to_string(),
+            "result".to_string(),
+            ">".to_string(),
+            path.to_string(),
+            "&".to_string(),
+            "echo".to_string(),
+            "done".to_string(),
+        ]
     }
 }
 
@@ -207,7 +228,7 @@ fn test_01_route_wrap_lifecycle_stats_report_readonly() {
     .iter()
     .map(|s| s.to_string())
     .collect();
-    wrap_args.extend(shell_command(&write_artifact_script(&artifact.display().to_string())));
+    wrap_args.extend(write_artifact_command(&artifact.display().to_string()));
     let r = dg(&strs(&wrap_args), &envs);
     assert_eq!(r.status, 0, "wrap success exit=0 (stderr={})", r.stderr);
     let summary: Value = serde_json::from_str(r.stderr.trim().lines().last().unwrap()).unwrap();
@@ -665,8 +686,14 @@ fn test_06_usage_errors_and_safe_fallback() {
         }
     }
 
-    // DB 폴백: 존재 불가 경로 → 경고 + 안전 JSON + exit 0
-    let bad_db = "/nonexistent-dir-xyz/dg-e2e/none.db";
+    // DB 폴백: 상위 구성요소가 일반 파일인 경로 → create_dir_all이 어떤 OS에서도
+    // 실패해 진짜 open 실패를 유발한다(POSIX `/nonexistent/…`는 Windows에서
+    // `C:\nonexistent\…`로 풀려 드라이브 루트에 실제 생성될 수 있어 폴백이 안 뜬다).
+    let bad_root = temp_base("baddb");
+    let blocker = bad_root.join("blocker");
+    std::fs::write(&blocker, "x").unwrap();
+    let bad_db = blocker.join("dg-e2e").join("none.db").display().to_string();
+    let bad_db = bad_db.as_str();
     let r = dg(&["route", "--task-kind", "explore_read", "--db", bad_db, "--json"], &[]);
     assert_eq!(r.status, 0, "DB 폴백 경로는 exit 0");
     assert!(r.stderr.contains("db fallback"), "stderr에 폴백 경고: {}", r.stderr);
@@ -682,6 +709,7 @@ fn test_06_usage_errors_and_safe_fallback() {
     assert_eq!(r.status, 0);
     let v: Value = serde_json::from_str(r.stdout.trim().lines().last().unwrap()).unwrap();
     assert_eq!(v["recorded"], false);
+    std::fs::remove_dir_all(&bad_root).unwrap();
 }
 
 #[test]
@@ -825,6 +853,9 @@ fn test_08_dispatch_brief_after_gates() {
     let meta: Value = serde_json::from_str(meta.as_deref().unwrap()).unwrap();
     assert_eq!(meta["after_fork"].as_str(), Some(fk.as_str()));
     assert_eq!(meta["dispatch"].as_bool(), Some(true));
+    // Windows는 열린 DB 핸들이 남아 있으면 remove_dir_all이 ERROR_SHARING_VIOLATION
+    // (code 32)으로 실패한다 — 연결을 명시적으로 닫고 정리한다.
+    drop(conn);
 
     std::fs::remove_dir_all(&base).unwrap();
 }

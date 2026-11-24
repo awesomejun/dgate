@@ -871,7 +871,8 @@ mod tests {
         std::env::set_var("XDG_STATE_HOME", "   ");
         let p = default_db_path();
         assert!(p.ends_with("dgate/decision.db"));
-        assert!(p.to_string_lossy().contains(".local/state"));
+        // Windows는 `\` 구분자 — 문자열 포함 검사 대신 컴포넌트 suffix 비교
+        assert!(p.ends_with(Path::new(".local").join("state").join("dgate").join("decision.db")));
         std::env::remove_var("XDG_STATE_HOME");
     }
 
