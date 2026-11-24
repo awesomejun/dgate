@@ -8,6 +8,7 @@ pub mod dispatch;
 pub mod dispatch_mode;
 pub mod gate;
 pub mod hook;
+pub mod merge_train;
 pub mod pipeline;
 pub mod reap;
 pub mod record;

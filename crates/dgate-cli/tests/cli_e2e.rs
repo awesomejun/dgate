@@ -989,3 +989,58 @@ fn test_09_pipeline_init_step_status_lifecycle() {
 
     std::fs::remove_dir_all(&base).unwrap();
 }
+
+#[test]
+fn test_10_merge_train_guard_and_dry_run() {
+    let base = temp_base("merge-train");
+    // HERDR_ROLE을 lead로 고정 — 호출 세션의 역할 env가 새어 들어와도 건조하게 유지.
+    let envs = [("HERDR_ROLE", "lead")];
+
+    // (a) dry-run — 러너 호출 0회(gh/git 미호출), 예정 단계 목록 + exit 0
+    let r = dg(
+        &["merge-train", "--pr", "42", "--dry-run", "--json"],
+        &envs,
+    );
+    assert_eq!(r.status, 0, "dry-run → exit 0 (stderr={})", r.stderr);
+    let v: Value = serde_json::from_str(r.stdout.trim().lines().last().unwrap()).unwrap();
+    assert_eq!(v["cmd"], "merge-train");
+    assert_eq!(v["status"], "dry_run");
+    assert_eq!(v["pr_number"], 42);
+    assert_eq!(v["exit_code"], 0);
+    let steps: Vec<&str> = v["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        steps,
+        vec![
+            "update_branch",
+            "add_label",
+            "wait_for_ci_run",
+            "rerun_failed",
+            "check_merge_state",
+            "squash_merge",
+        ],
+        "worktree 미지정 → cleanup_worktree 미포함"
+    );
+
+    // (b) HERDR_ROLE=sublead → 물리 차단 UsageError exit 2 (dry-run 진입 전 차단)
+    let r = dg(
+        &["merge-train", "--pr", "42", "--dry-run", "--json"],
+        &[("HERDR_ROLE", "sublead")],
+    );
+    assert_eq!(r.status, 2, "HERDR_ROLE=sublead → exit 2");
+    assert!(r.stderr.contains("sublead"), "거부 사유: {}", r.stderr);
+
+    // (c) --pr 누락/정수 아님 → exit 2
+    let r = dg(&["merge-train", "--dry-run"], &envs);
+    assert_eq!(r.status, 2, "--pr 누락 → exit 2");
+    let r = dg(&["merge-train", "--pr", "abc", "--dry-run"], &envs);
+    assert_eq!(r.status, 2, "--pr 정수 아님 → exit 2");
+    let r = dg(&["merge-train", "--pr", "42", "--max-reruns", "-1", "--dry-run"], &envs);
+    assert_eq!(r.status, 2, "--max-reruns 음수 → exit 2");
+
+    std::fs::remove_dir_all(&base).unwrap();
+}
