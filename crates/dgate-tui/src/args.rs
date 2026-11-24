@@ -29,6 +29,8 @@ pub struct TuiCliOptions {
     pub cols: u16,
     /// `--rows <n>` — 스냅숏 세로 셀 (기본 40).
     pub rows: u16,
+    /// `--time <sec>` — 스냅숏 모션 시간 위상 (기본 10.0 — 결정론적 재현용).
+    pub time: f64,
     /// `--help` / `-h` — 사용법 출력 후 종료.
     pub help: bool,
 }
@@ -45,6 +47,7 @@ impl Default for TuiCliOptions {
             watch_path: None,
             cols: DEFAULT_COLS,
             rows: DEFAULT_ROWS,
+            time: 10.0,
             help: false,
         }
     }
@@ -67,6 +70,7 @@ DGATE TUI (v2) — ratatui 라이브 관측 대시보드
   --snapshot           지정 해상도의 텍스트 프레임을 stdout에 1회 출력하고 종료
   --cols <n>           스냅숏 가로 셀 크기 (기본: 140)
   --rows <n>           스냅숏 세로 셀 크기 (기본: 40)
+  --time <sec>         스냅숏 모션 시간 위상 (기본: 10.0 — 같은 값이면 같은 프레임)
   --help, -h           이 도움말을 출력하고 종료
 
 단축키:
@@ -100,12 +104,16 @@ pub fn parse_tui_cli_options(args: &[String]) -> Result<TuiCliOptions, String> {
                     }
                 }
             }
-            "--watch-db" | "--db" | "--repo" | "--project" | "--cols" | "--rows" => {
+            "--watch-db" | "--db" | "--repo" | "--project" | "--cols" | "--rows" | "--time" => {
                 i += 1;
                 let value = args
                     .get(i)
                     .cloned()
-                    .filter(|v| !v.trim().is_empty() && !v.starts_with('-'))
+                    .filter(|v| {
+                        !v.trim().is_empty()
+                            && (!v.starts_with('-')
+                                || (arg == "--time" && v.parse::<f64>().is_ok()))
+                    })
                     .ok_or_else(|| {
                         format!("{} 플래그에 값이 필요합니다 (예: {} <value>)", arg, arg)
                     })?;
@@ -115,8 +123,11 @@ pub fn parse_tui_cli_options(args: &[String]) -> Result<TuiCliOptions, String> {
                     "--cols" => {
                         opts.cols = parse_u16(arg, &value)?;
                     }
-                    _ => {
+                    "--rows" => {
                         opts.rows = parse_u16(arg, &value)?;
+                    }
+                    _ => {
+                        opts.time = parse_f64(arg, &value)?;
                     }
                 }
             }
@@ -137,6 +148,13 @@ fn parse_u16(flag: &str, value: &str) -> Result<u16, String> {
         .parse::<u16>()
         .map_err(|_| format!("{} 값이 숫자가 아닙니다: {}", flag, value))
         .map(|n| n.max(1))
+}
+
+fn parse_f64(flag: &str, value: &str) -> Result<f64, String> {
+    value
+        .parse::<f64>()
+        .map_err(|_| format!("{} 값이 숫자가 아닙니다: {}", flag, value))
+        .map(|n| if n.is_finite() { n.max(0.0) } else { 0.0 })
 }
 
 #[cfg(test)]
@@ -197,6 +215,17 @@ mod tests {
         let opts = parse(&["--watch", "/tmp/session.jsonl"]).unwrap();
         assert!(opts.watch);
         assert_eq!(opts.watch_path.as_deref(), Some("/tmp/session.jsonl"));
+    }
+
+    #[test]
+    fn parses_time_flag_for_deterministic_snapshots() {
+        let opts = parse(&["--snapshot", "--time", "0.5"]).unwrap();
+        assert_eq!(opts.time, 0.5);
+        let opts = parse(&["--time", "-2.5"]).unwrap();
+        assert_eq!(opts.time, 0.0, "음수·비유한 값은 0으로 클램프");
+        assert_eq!(parse(&[]).unwrap().time, 10.0);
+        assert!(parse(&["--time", "abc"]).is_err());
+        assert!(parse(&["--time"]).is_err());
     }
 
     #[test]

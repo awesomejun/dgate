@@ -1,11 +1,12 @@
 //! dgate-tui 실행 진입점 — `ratatui` + `crossterm` 라이브 관측 대시보드.
 //!
-//! 목적: `hc` 라이브 워커 로스터와 읽기전용 결정 DB를 3단 레이아웃으로 보여준다.
+//! 목적: `hc` 라이브 워커 로스터와 읽기전용 결정 DB를 원본 2컬럼 토폴로지
+//! 레이아웃(좌측 Advisor + 우측 Lead↔Verifier → Gate → Workers)으로 보여준다.
 //! `--snapshot`은 터미널 초기화 없이 텍스트 프레임만 출력하는 헤드리스 경로다.
 //!
 //! 주의:
-//! - 이벤트 루프는 250ms 폴링, 데이터 리프레시는 2000ms — `hc`/SQLite 호출이
-//!   매 프레임 도배되지 않게 한다(§3.5 조용한 폴백 계약은 state가 담당).
+//! - 이벤트 루프는 100ms 폴링(모션 틱), 데이터 리프레시는 2000ms — `hc`/SQLite
+//!   호출이 매 프레임 도배되지 않게 한다(§3.5 조용한 폴백 계약은 state가 담당).
 //! - 종료(q/Ctrl+C) 시 raw 모드 해제·대체 화면 복원을 Drop 가드가 보장한다.
 
 use std::io::{stdout, IsTerminal};
@@ -29,9 +30,10 @@ use dgate_tui::state::{
 };
 use dgate_tui::view::{render_dashboard, render_to_text, UiState};
 
-/// 터미널 이벤트 폴링 간격 — 데이터 주기(2s)보다 훨씬 짧게 잡아 키 입력을
-/// 즉시 반영한다(화면 자체는 마지막 스냅숏으로 그린다).
-const EVENT_POLL_MS: u64 = 250;
+/// 터미널 이벤트 폴링 간격 — 원본 TUI의 100ms 모션 틱과 동일.
+/// 데이터 리프레시는 2000ms(`DEFAULT_POLL_MS`)에 그대로 두어 `hc`/SQLite 호출이
+/// 매 프레임 도배되지 않게 한다(§3.5 조용한 폴백 계약은 state가 담당).
+const EVENT_POLL_MS: u64 = 100;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -71,7 +73,14 @@ fn run_snapshot(opts: &TuiCliOptions) -> ExitCode {
         let mut snapshotter = LiveSyncSnapshotter::new(LiveSyncOptions::new(roster_base_dir(opts)));
         poll_once(opts.db_path.as_deref(), &scope, &mut snapshotter)
     };
-    let text = render_to_text(&snap, &UiState::default(), &WorkerClock::default(), opts.cols, opts.rows);
+    let text = render_to_text(
+        &snap,
+        &UiState::default(),
+        &WorkerClock::default(),
+        opts.cols,
+        opts.rows,
+        opts.time,
+    );
     println!("{}", text);
     ExitCode::SUCCESS
 }
@@ -109,6 +118,8 @@ struct App {
     ui: UiState,
     clock: WorkerClock,
     last_refresh: Instant,
+    /// 앱 시작 시각 — `sim_time`(원본 `simTime`)의 단조 증가 원천.
+    started_at: Instant,
     quit: bool,
 }
 
@@ -133,6 +144,7 @@ impl App {
             ui: UiState::default(),
             clock: WorkerClock::default(),
             last_refresh: Instant::now() - Duration::from_millis(DEFAULT_POLL_MS),
+            started_at: Instant::now(),
             quit: false,
         }
     }
@@ -216,6 +228,11 @@ impl App {
             KeyCode::BackTab => {
                 self.ui.focused = self.ui.focused.prev();
             }
+            // 컴팩트 레이아웃의 탭 선택 — 원본의 [1:파이프라인]…[4:기록] 키 바인딩.
+            KeyCode::Char('1') => self.ui.compact_tab = 0,
+            KeyCode::Char('2') => self.ui.compact_tab = 1,
+            KeyCode::Char('3') => self.ui.compact_tab = 2,
+            KeyCode::Char('4') => self.ui.compact_tab = 3,
             _ => {}
         }
     }
@@ -248,8 +265,12 @@ fn run_interactive(opts: &TuiCliOptions) -> ExitCode {
         app.refresh_if_stale(false);
         let snap = app.snapshot.clone();
         let ui = app.ui.clone();
+        // 원본 `simTime` 미러 — 시작 이후 단조 경과 초를 모션 위상으로 쓴다.
+        let sim_time = app.started_at.elapsed().as_secs_f64();
         if let Some(snap) = &snap {
-            if let Err(e) = terminal.draw(|f| render_dashboard(f, snap, &ui, &app.clock)) {
+            if let Err(e) =
+                terminal.draw(|f| render_dashboard(f, snap, &ui, &app.clock, sim_time))
+            {
                 eprintln!("dgate-tui: 렌더 실패: {}", e);
                 exit = ExitCode::from(1);
                 break;

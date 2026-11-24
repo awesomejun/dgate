@@ -113,14 +113,16 @@ pub struct TuiSnapshot {
 
 impl TuiSnapshot {
     /// 표시 순서대로 펼친 워커 목록(←/→ 선택 인덱스 기준) —
-    /// `view::render_workers`와 동일 경로: 역할 분할 후 sub_workers만
-    /// 클러스터링해 "각 클러스터 소속 → 미소속" 순으로 나열한다.
+    /// `view::ordered_card_views`와 동일 경로: 역할 분할 후 sub_workers만
+    /// 클러스터링해 "각 클러스터(sublead → 소속 워커) → 미소속" 순으로 나열한다.
+    /// sublead는 클러스터 헤더 카드로 목록에 포함된다.
     /// lead·verifier·advisor는 역할 바라서 선택 목록에 들지 않는다.
     pub fn display_workers(&self) -> Vec<&LiveWorkerInfo> {
         let parts = partition_sessions_by_role(&self.roster.workers);
         let clustered = cluster_workers_by_sublead(parts.sub_workers.iter().copied());
         let mut out: Vec<&LiveWorkerInfo> = Vec::new();
         for c in &clustered.clusters {
+            out.push(c.sublead);
             out.extend(c.workers.iter().copied());
         }
         out.extend(clustered.unowned.iter().copied());
@@ -217,6 +219,44 @@ pub fn cluster_workers_by_sublead<'a>(
 /// 클러스터 헤더 1행 라벨(`sublead-auth · 2` — sublead 세션명은 `sublead-*` 규약).
 pub fn format_cluster_header_label(cluster: &SubleadCluster<'_>) -> String {
     format!("{} · {}", cluster.sublead.name, cluster.workers.len())
+}
+
+/// `liveWorkerSync.ts` `formatSubleadOwnerBadge` 미러 —
+/// sublead 카드명(`[repo] sublead · auth`·`sublead-auth` 등)을 짧은 소유 배지(`↳ sublead-auth`)로 정규화.
+pub fn format_sublead_owner_badge(sublead_name: &str) -> String {
+    // `[repo] ` 접두 제거
+    let no_bracket = if let Some(rest) = sublead_name.trim_start().strip_prefix('[') {
+        rest.split_once(']').map(|(_, tail)| tail).unwrap_or(sublead_name)
+    } else {
+        sublead_name
+    };
+    let mut clean = no_bracket.trim();
+    // `sublead · ` 접두 제거 (`·` 중간점 포함 표기들)
+    for prefix in ["sublead · ", "sublead·", "sublead ·", "sublead "] {
+        if let Some(rest) = clean
+            .to_ascii_lowercase()
+            .starts_with(&prefix.to_ascii_lowercase())
+            .then(|| &clean[prefix.len()..])
+        {
+            clean = rest;
+            break;
+        }
+    }
+    let clean = clean.trim();
+    if clean.is_empty() {
+        return "↳ sublead".to_string();
+    }
+    let lower = clean.to_ascii_lowercase();
+    if lower.starts_with("sublead-")
+        || lower.starts_with("sublead_")
+        || lower.starts_with("sub-")
+        || lower.starts_with("sub_")
+        || lower == "sublead"
+    {
+        format!("↳ {}", clean)
+    } else {
+        format!("↳ sublead-{}", clean)
+    }
 }
 
 /// 워커 카드 열 수 — `dgate-gui` 분할 규칙과 동일:
@@ -969,9 +1009,12 @@ mod tests {
         assert_eq!(parts.unowned.len(), 1, "미소속 sub_worker는 explore 1개");
         assert_eq!(snap.routes.len(), 4);
         assert!(snap.routes.iter().any(|r| r.forced_split));
-        // display_workers는 클러스터 소속 → 미소속 순.
+        // display_workers는 클러스터(sublead → 소속) → 미소속 순.
         let order: Vec<&str> = snap.display_workers().iter().map(|w| w.name.as_str()).collect();
-        assert_eq!(order, vec!["w-coder-1", "w-coder-2", "w-explore-1"]);
+        assert_eq!(
+            order,
+            vec!["sublead-auth", "w-coder-1", "w-coder-2", "w-explore-1"]
+        );
     }
 
     #[test]
@@ -1019,7 +1062,11 @@ mod tests {
             ],
         };
         let order: Vec<&str> = snap.display_workers().iter().map(|w| w.name.as_str()).collect();
-        assert_eq!(order, vec!["w-owned", "w-free"], "클러스터 소속이 미소속보다 먼저");
+        assert_eq!(
+            order,
+            vec!["sublead-x", "w-owned", "w-free"],
+            "클러스터 헤더(sublead) → 소속 → 미소속 순"
+        );
     }
 
     #[test]
