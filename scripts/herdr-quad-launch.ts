@@ -421,15 +421,25 @@ function checkContracts(repoDir: string): ContractCheck[] {
     const cfg = JSON.parse(fs.readFileSync(hooksPath, 'utf8')) as Record<string, any>;
     const g = cfg['dg-guard']?.PreToolUse?.[0];
     const c = cfg['dg-collect']?.PostToolUse?.[0];
+    // S2 v2 우선 형식(`dg hook` 우선 + node 폴백)과 이전 node 직접 호출 형식 둘 다 유효 —
+    // 과도기에 이미 설치된 node 전용 훅도 동작한다(S5 완전 제거 전 안전망).
+    const guardCmds = new Set([
+      'node hooks/dg-hook.ts --guard',
+      "sh -c 'if command -v dg >/dev/null 2>&1; then exec dg hook --guard; else exec node hooks/dg-hook.ts --guard; fi'",
+    ]);
+    const collectCmds = new Set([
+      'node hooks/dg-hook.ts --collect',
+      "sh -c 'if command -v dg >/dev/null 2>&1; then exec dg hook --collect; else exec node hooks/dg-hook.ts --collect; fi'",
+    ]);
     hooksOk =
       g?.matcher === '*' &&
       g?.hooks?.[0]?.timeout === 3 &&
-      g?.hooks?.[0]?.command === 'node hooks/dg-hook.ts --guard' &&
+      guardCmds.has(g?.hooks?.[0]?.command) &&
       c?.matcher === '*' &&
       c?.hooks?.[0]?.timeout === 3 &&
-      c?.hooks?.[0]?.command === 'node hooks/dg-hook.ts --collect';
+      collectCmds.has(c?.hooks?.[0]?.command);
     hooksDetail = hooksOk
-      ? 'dg-guard(PreToolUse)+dg-collect(PostToolUse), matcher *, timeout 3, node hooks/dg-hook.ts (N-NEW-1)'
+      ? 'dg-guard(PreToolUse)+dg-collect(PostToolUse), matcher *, timeout 3, dg hook 우선+node 폴백 (N-NEW-1, S2)'
       : 'schema/command mismatch';
   } catch (err) {
     hooksDetail = `parse error: ${(err as Error).message}`;

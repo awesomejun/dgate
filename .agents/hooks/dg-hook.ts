@@ -7,7 +7,8 @@
  * SQLite WAL SSOT에 기록한다.
  *
  * 외부 연결:
- * - `.agents/hooks.json`이 `node hooks/dg-hook.ts --guard|--collect`로 호출한다.
+ * - `.agents/hooks.json`이 `dg hook --guard|--collect`(네이티브 우선)를 호출하고,
+ *   `dg` 미설치 환경에서는 `node hooks/dg-hook.ts --guard|--collect` 폴백으로 호출한다.
  *   훅 cwd는 `hooks.json`이 위치한 디렉터리(`.agents/`)이므로(N-NEW-1) 이 파일의
  *   모듈 import는 `import.meta.url` 기준 상대경로로 해석돼 어떤 cwd에서도 동작한다.
  * - stdin: `{"toolCall":{"id","name","args"},"stepIdx","conversationId","cwd","transcriptPath"[,"error"]}`.

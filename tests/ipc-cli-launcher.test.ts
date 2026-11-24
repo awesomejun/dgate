@@ -289,24 +289,31 @@ test('8. checkHcNameCollisions 충돌 감지 (N12)', () => {
   assert.match(generateRunId(), /^[0-9a-f]{6}$/);
 });
 
-test('9. .agents/hooks.json 스펙 (N10 + N-NEW-1 경로 교정)', () => {
+test('9. .agents/hooks.json 스펙 (N10 + N-NEW-1 경로 교정 + S2 v2 우선)', () => {
   const cfg = JSON.parse(fs.readFileSync(HOOKS_JSON_PATH, 'utf8')) as Record<string, any>;
   assert.deepEqual(Object.keys(cfg).sort(), ['dg-collect', 'dg-guard']);
+  // S2: `dg` 네이티브 우선 + node 폴백(two-way) — 미설치 환경 회귀 방지
+  const expectedGuard =
+    "sh -c 'if command -v dg >/dev/null 2>&1; then exec dg hook --guard; else exec node hooks/dg-hook.ts --guard; fi'";
+  const expectedCollect =
+    "sh -c 'if command -v dg >/dev/null 2>&1; then exec dg hook --collect; else exec node hooks/dg-hook.ts --collect; fi'";
   const guard = cfg['dg-guard'].PreToolUse;
   assert.equal(guard.length, 1);
   assert.equal(guard[0].matcher, '*');
   assert.equal(guard[0].hooks.length, 1);
   assert.equal(guard[0].hooks[0].type, 'command');
   assert.equal(guard[0].hooks[0].timeout, 3);
-  assert.equal(guard[0].hooks[0].command, 'node hooks/dg-hook.ts --guard');
+  assert.equal(guard[0].hooks[0].command, expectedGuard);
   const collect = cfg['dg-collect'].PostToolUse;
   assert.equal(collect.length, 1);
   assert.equal(collect[0].matcher, '*');
   assert.equal(collect[0].hooks[0].type, 'command');
   assert.equal(collect[0].hooks[0].timeout, 3);
-  assert.equal(collect[0].hooks[0].command, 'node hooks/dg-hook.ts --collect');
+  assert.equal(collect[0].hooks[0].command, expectedCollect);
   // N-NEW-1: 훅 cwd는 .agents/ 이므로 command에 .agents/ 접두가 있으면 MODULE_NOT_FOUND
   for (const cmd of [guard[0].hooks[0].command, collect[0].hooks[0].command]) {
     assert.ok(!cmd.includes('.agents/'), `hook command must be relative to .agents/ cwd: ${cmd}`);
+    assert.ok(cmd.includes('dg hook'), `hook command must prefer native dg: ${cmd}`);
+    assert.ok(cmd.includes('node hooks/dg-hook.ts'), `hook command must keep node fallback: ${cmd}`);
   }
 });

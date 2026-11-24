@@ -4,7 +4,7 @@
       {
         "matcher": "*",
         "hooks": [
-          { "type": "command", "command": "node hooks/dg-hook.ts --guard", "timeout": 3 }
+          { "type": "command", "command": "sh -c 'if command -v dg >/dev/null 2>&1; then exec dg hook --guard; else exec node hooks/dg-hook.ts --guard; fi'", "timeout": 3 }
         ]
       }
     ]
@@ -14,7 +14,7 @@
       {
         "matcher": "*",
         "hooks": [
-          { "type": "command", "command": "node hooks/dg-hook.ts --collect", "timeout": 3 }
+          { "type": "command", "command": "sh -c 'if command -v dg >/dev/null 2>&1; then exec dg hook --collect; else exec node hooks/dg-hook.ts --collect; fi'", "timeout": 3 }
         ]
       }
     ]

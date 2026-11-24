@@ -23,6 +23,8 @@
 //!   opt-in 전용) argv 배열로만 실행한다 — 쉘 문자열 결합·쉘 실행은 절대 금지.
 //! - Rust 포팅 적응: TS의 Node 버전·`node:sqlite` 프로브는 런타임 주입값이 있을 때만
 //!   판정하고, 미주입 시 러스트 바이너리는 Node 불필요 → `ok = true`로 취급한다.
+//! - PATH에 실행 가능 `dg`가 있으면 Node/node:sqlite 미달도 `ok`를 유지한다
+//!   (네이티브 훅 경로가 살아 있으므로 node 폴백 부재는 실패 조건이 아니다).
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -702,8 +704,11 @@ pub fn detect_environment(deps: &DetectDeps) -> EnvironmentReport {
 
     let recommendation = recommend_roster_profile(&clis);
     let discovered_models = discover_available_models(&home_dir, &clis);
+    // 네이티브 `dg`(훅 커맨드의 `command -v dg`와 동일 의미론 — PATH만 탐색)가
+    // 실행 가능하면 Node/node:sqlite 미달만으로 전체 ok를 실패시키지 않는다.
+    let dg_native = find_on_path("dg", &path_dirs).is_some();
     let mut report = EnvironmentReport {
-        ok: node.ok && node_sqlite_ok && git.installed,
+        ok: git.installed && ((node.ok && node_sqlite_ok) || dg_native),
         node,
         node_sqlite_ok,
         git,
@@ -2385,6 +2390,8 @@ mod tests {
         let xdg = home.join("xdgconfig");
         std::fs::create_dir_all(xdg.join("herdr-quad")).unwrap();
         std::fs::write(xdg.join("herdr-quad").join("roster.json"), "{broken").unwrap();
+        // git만 존재(dg 부재) — !ok가 node 실패 때문임을 격리한다.
+        make_exec(&home.join("bin"), "git");
 
         let mut env = BTreeMap::new();
         env.insert("PATH".to_string(), home.join("bin").to_string_lossy().into_owned());
@@ -2401,7 +2408,7 @@ mod tests {
             orchestrator_root: None,
         };
         let report = detect_environment(&deps);
-        assert!(!report.ok, "node 미달 + nodeSqlite 실패");
+        assert!(!report.ok, "dg 부재에서 node 미달 + nodeSqlite 실패 → !ok");
         assert!(!report.node.ok);
         assert!(!report.node_sqlite_ok);
         assert!(report.roster.exists && !report.roster.valid_json);
@@ -2411,6 +2418,34 @@ mod tests {
         // hc 없음 → standalone
         assert_eq!(report.recommendation.mode, SetupMode::Standalone);
         assert_eq!(report.recommendation.profile_name, None);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn detect_environment_native_dg_relaxed_node_failure() {
+        // 네이티브 `dg`가 PATH에 실행 가능하면 Node/node:sqlite 미달만으로 ok가
+        // false가 되지 않는다(S3 — node 훅은 폴백). dg 부재 시 동일 조건은 여전히
+        // !ok다(broken_roster 테스트가 계약 유지).
+        let home = fake_home("detect-dg-native");
+        make_exec(&home.join("bin"), "git");
+        make_exec(&home.join("bin"), "dg");
+
+        let mut env = BTreeMap::new();
+        env.insert("PATH".to_string(), home.join("bin").to_string_lossy().into_owned());
+        let deps = DetectDeps {
+            env: Some(env),
+            home_dir: Some(home.clone()),
+            path_dirs: None,
+            system_dirs: Some(vec![home.join("sysbin")]),
+            node_version: Some("v20.0.0".to_string()),
+            node_sqlite_ok: Some(false),
+            repo_dir: None,
+            orchestrator_root: None,
+        };
+        let report = detect_environment(&deps);
+        assert!(report.ok, "dg 존재 시 node 미달·nodeSqlite 실패는 ok를 막지 않는다");
+        assert!(!report.node.ok);
+        assert!(!report.node_sqlite_ok);
         let _ = std::fs::remove_dir_all(&home);
     }
 

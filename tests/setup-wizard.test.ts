@@ -356,7 +356,7 @@ test('5. installRepoHooks — canonical hooks.json + dg-hook 심볼릭 링크 + 
     const srcAgents = path.join(orch, '.agents');
     fs.mkdirSync(path.join(srcAgents, 'hooks'), { recursive: true });
     const canonical = JSON.stringify(
-      { 'dg-guard': { PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: 'node hooks/dg-hook.ts --guard', timeout: 3 }] }] } },
+      { 'dg-guard': { PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: "sh -c 'if command -v dg >/dev/null 2>&1; then exec dg hook --guard; else exec node hooks/dg-hook.ts --guard; fi'", timeout: 3 }] }] } },
       null,
       2,
     );
