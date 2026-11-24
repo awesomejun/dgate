@@ -83,6 +83,9 @@ pub struct VerdictDocument {
     /// (`merge_danger_strict_violation` 게이트, UsageError exit 2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_danger: Option<MergeDanger>,
+    /// 선택 — verdict를 생산한 verifier 모델명(예: `glm-zcode/glm-5.3`). sublead backprop 이종 검증에 사용.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producer_model: Option<String>,
 }
 
 /// 검증 결과 — `valid: false`면 반드시 `effective_decision: Human`(fail-closed)
@@ -388,6 +391,12 @@ pub fn validate_verdict_data(raw: &Value, opts: &ValidateVerdictOptions) -> Verd
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|i| i.as_str().map(str::to_string)).collect()),
         merge_danger,
+        producer_model: doc
+            .get("producer_model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
     };
     VerdictValidationResult {
         valid: true,
@@ -459,6 +468,95 @@ pub fn merge_danger_strict_violation(
         "strict dispatch 모드: verdict에 merge_danger(door: one-way|two-way, blast_radius ≤500자)가 필수다 — 검증자 계약 .herdr/roles/verifier.md §4 (해제: dg dispatch-mode off)"
             .to_string(),
     )
+}
+
+/// 모델 문자열을 계열 토큰으로 정규화한다(sublead backprop 이종 검증용 — TS `normalizeModelFamily` 미러).
+pub fn normalize_model_family(model: Option<&str>) -> Option<String> {
+    let trimmed = model?.trim().to_lowercase();
+    if trimmed.is_empty() {
+        return None;
+    }
+    const KNOWN: [&str; 9] = [
+        "claude", "gemini", "gpt", "glm", "deepseek", "qwen", "llama", "mistral", "grok",
+    ];
+    for fam in KNOWN {
+        if trimmed.contains(fam) {
+            return Some(fam.to_string());
+        }
+    }
+    if trimmed.contains("devin") || trimmed.contains("swe-") {
+        return Some("swe".to_string());
+    }
+    let last_seg = trimmed
+        .split(['/', ':'])
+        .filter(|s| !s.is_empty())
+        .next_back()
+        .unwrap_or(trimmed.as_str());
+    let head = last_seg
+        .split(|c: char| c.is_whitespace() || c == '-' || c == '_')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(last_seg);
+    Some(head.to_string())
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SubleadBackpropCheck<'a> {
+    pub caller_role: Option<&'a str>,
+    pub caller_conversation: Option<&'a str>,
+    pub fork_conversation: Option<&'a str>,
+    pub caller_model: Option<&'a str>,
+    pub coder_model: Option<&'a str>,
+    pub producer_model: Option<&'a str>,
+    pub has_verdict: bool,
+}
+
+/// Sublead backprop 물리 권한 검증(docs/sublead-design.md 항목 5 — TS `subleadBackpropViolation` 미러).
+/// - 호출자가 `sublead`가 아니면 즉시 통과(`None`) — 최상위 리드·기존 경로 회귀 0.
+/// - ① 소유 검사: 호출자 `HERDR_CONVERSATION`과 대상 fork의 `conversation_id` 일치 필수.
+/// - ② 이종 검사(`has_verdict=true`): `producer_model` 명시 + sublead/coder 모델과 다른 계열 필수.
+pub fn sublead_backprop_violation(input: &SubleadBackpropCheck<'_>) -> Option<String> {
+    let role = input.caller_role.unwrap_or("").trim().to_lowercase();
+    if role != "sublead" {
+        return None;
+    }
+    let caller_conv = input.caller_conversation.unwrap_or("").trim();
+    let fork_conv = input.fork_conversation.unwrap_or("").trim();
+    if caller_conv.is_empty() {
+        return Some(
+            "sublead backprop 거부: HERDR_CONVERSATION이 설정되지 않았습니다 (소유 스코프 확인 불가)"
+                .to_string(),
+        );
+    }
+    if fork_conv.is_empty() || fork_conv != caller_conv {
+        let shown = if fork_conv.is_empty() { "none" } else { fork_conv };
+        return Some(format!(
+            "sublead backprop 거부: 대상 fork의 conversation_id({shown})가 호출자({caller_conv})와 일치하지 않습니다"
+        ));
+    }
+    if input.has_verdict {
+        let Some(prod_fam) = normalize_model_family(input.producer_model) else {
+            return Some(
+                "sublead backprop 거부: verdict producer_model(--producer-model 또는 verdict.producer_model)이 누락돼 이종 검증자 확인이 불가합니다"
+                    .to_string(),
+            );
+        };
+        if let Some(caller_fam) = normalize_model_family(input.caller_model) {
+            if caller_fam == prod_fam {
+                return Some(format!(
+                    "sublead backprop 거부: verdict 생산자({prod_fam})가 호출자 sublead 모델({caller_fam})과 동종입니다 (이종 verifier 필수)"
+                ));
+            }
+        }
+        if let Some(coder_fam) = normalize_model_family(input.coder_model) {
+            if coder_fam == prod_fam {
+                return Some(format!(
+                    "sublead backprop 거부: verdict 생산자({prod_fam})가 coder 모델({coder_fam})과 동종입니다 (이종 verifier 필수)"
+                ));
+            }
+        }
+    }
+    None
 }
 
 /// Verdict SSOT 경로 — 입·출력 계약이 `.herdr/verify/`에 쌍으로 결속된다
@@ -914,6 +1012,57 @@ mod tests {
         assert!(merge_danger_strict_violation("strict", &with).is_none());
         // 무효 verdict는 기존 exit 3 경로 — 게이트 통과
         assert!(merge_danger_strict_violation("strict", &invalid).is_none());
+    }
+
+    #[test]
+    fn sublead_backprop_ownership_and_heterogeneous_model_rules() {
+        assert_eq!(normalize_model_family(Some("opencodex/glm-zcode/glm-5.3")).as_deref(), Some("glm"));
+        assert_eq!(normalize_model_family(Some("devin/swe-2-max")).as_deref(), Some("swe"));
+        assert_eq!(normalize_model_family(Some("Claude Opus 5.5")).as_deref(), Some("claude"));
+
+        // 비-sublead는 회귀 0(항상 통과)
+        assert!(sublead_backprop_violation(&SubleadBackpropCheck {
+            caller_role: Some("lead"),
+            fork_conversation: Some("conv-other"),
+            has_verdict: true,
+            ..Default::default()
+        })
+        .is_none());
+
+        // sublead 소유 불일치 거부
+        assert!(sublead_backprop_violation(&SubleadBackpropCheck {
+            caller_role: Some("sublead"),
+            caller_conversation: Some("conv-a"),
+            fork_conversation: Some("conv-b"),
+            producer_model: Some("glm-5.3"),
+            has_verdict: true,
+            ..Default::default()
+        })
+        .is_some());
+
+        // sublead + 동종 producer 거부
+        assert!(sublead_backprop_violation(&SubleadBackpropCheck {
+            caller_role: Some("sublead"),
+            caller_conversation: Some("conv-a"),
+            fork_conversation: Some("conv-a"),
+            caller_model: Some("gemini-4-neon"),
+            coder_model: Some("devin/swe-2-max"),
+            producer_model: Some("swe-2-max"),
+            has_verdict: true,
+        })
+        .is_some());
+
+        // sublead + 소유 일치 + 이종 verifier 통과
+        assert!(sublead_backprop_violation(&SubleadBackpropCheck {
+            caller_role: Some("sublead"),
+            caller_conversation: Some("conv-a"),
+            fork_conversation: Some("conv-a"),
+            caller_model: Some("gemini-4-neon"),
+            coder_model: Some("devin/swe-2-max"),
+            producer_model: Some("glm-zcode/glm-5.3"),
+            has_verdict: true,
+        })
+        .is_none());
     }
 
     #[test]

@@ -62,6 +62,8 @@ export interface VerdictDocument {
    * strict dispatch 모드의 `dg backprop --verdict-file`은 유효한 verdict에 이 필드를
    * 필수로 요구한다(`mergeDangerStrictViolation` 게이트, UsageError exit 2). */
   merge_danger?: MergeDanger;
+  /** 선택 — verdict를 생산한 verifier 모델명(예: `glm-zcode/glm-5.3`). sublead backprop 이종 검증에 사용. */
+  producer_model?: string;
 }
 
 /** 검증 결과 — `valid:false`면 반드시 `effectiveDecision:'human'`(fail-closed) */
@@ -302,6 +304,9 @@ export function validateVerdictData(
   if (isStringArray(doc.checked_commands)) document.checked_commands = [...doc.checked_commands];
   if (isStringArray(doc.artifacts)) document.artifacts = [...doc.artifacts];
   if (mergeDanger !== undefined) document.merge_danger = mergeDanger;
+  if (typeof doc.producer_model === 'string' && doc.producer_model.trim().length > 0) {
+    document.producer_model = doc.producer_model.trim();
+  }
   return { valid: true, effectiveDecision: document.decision, errors: [], document };
 }
 
@@ -360,6 +365,70 @@ export function mergeDangerStrictViolation(
   if (mode !== 'strict' || !verdict.valid) return null;
   if (verdict.document?.merge_danger !== undefined) return null;
   return 'strict dispatch 모드: verdict에 merge_danger(door: one-way|two-way, blast_radius ≤500자)가 필수다 — 검증자 계약 .herdr/roles/verifier.md §4 (해제: dg dispatch-mode off)';
+}
+
+/**
+ * 모델 문자열을 계열 토큰으로 정규화한다(sublead backprop 이종 검증용 — Rust `normalize_model_family` 미러).
+ * 예: `opencodex/glm-zcode/glm-5.3`·`pi:glm-5.3` → `glm`, `devin/swe-2-max` → `swe`,
+ * `Claude Opus 5.5` → `claude`, `gemini-4-neon` → `gemini`, `gpt-6.2-sol` → `gpt`.
+ */
+export function normalizeModelFamily(model: string | null | undefined): string | null {
+  if (!model) return null;
+  const trimmed = model.trim().toLowerCase();
+  if (!trimmed) return null;
+  const known = ['claude', 'gemini', 'gpt', 'glm', 'deepseek', 'qwen', 'llama', 'mistral', 'grok'] as const;
+  for (const fam of known) {
+    if (trimmed.includes(fam)) return fam;
+  }
+  if (trimmed.includes('devin') || trimmed.includes('swe-')) return 'swe';
+  const lastSeg = trimmed.split(/[/:]/).filter(Boolean).pop() ?? trimmed;
+  return lastSeg.split(/[\s-_]+/)[0] || lastSeg;
+}
+
+export interface SubleadBackpropCheckInput {
+  callerRole?: string | null;
+  callerConversation?: string | null;
+  forkConversation?: string | null;
+  callerModel?: string | null;
+  coderModel?: string | null;
+  producerModel?: string | null;
+  hasVerdict: boolean;
+}
+
+/**
+ * Sublead backprop 물리 권한 검증(docs/sublead-design.md 항목 5 — Rust `sublead_backprop_violation` 미러).
+ * - 호출자가 `sublead`가 아니면 즉시 통과(`null`) — 최상위 리드·기존 경로 회귀 0.
+ * - ① 소유 검사: 호출자 `HERDR_CONVERSATION`과 대상 fork의 `conversation_id`가 비어 있지 않고 일치해야 한다.
+ * - ② 이종 검사(`hasVerdict=true`): `producerModel`이 명시돼야 하며, sublead(`callerModel`)·`coderModel`과 다른 모델 계열이어야 한다.
+ */
+export function subleadBackpropViolation(input: SubleadBackpropCheckInput): string | null {
+  const role = (input.callerRole ?? '').trim().toLowerCase();
+  if (role !== 'sublead') return null;
+
+  const callerConv = (input.callerConversation ?? '').trim();
+  const forkConv = (input.forkConversation ?? '').trim();
+  if (!callerConv) {
+    return 'sublead backprop 거부: HERDR_CONVERSATION이 설정되지 않았습니다 (소유 스코프 확인 불가)';
+  }
+  if (!forkConv || forkConv !== callerConv) {
+    return `sublead backprop 거부: 대상 fork의 conversation_id(${forkConv || 'none'})가 호출자(${callerConv})와 일치하지 않습니다`;
+  }
+
+  if (input.hasVerdict) {
+    const prodFam = normalizeModelFamily(input.producerModel);
+    if (!prodFam) {
+      return 'sublead backprop 거부: verdict producer_model(--producer-model 또는 verdict.producer_model)이 누락돼 이종 검증자 확인이 불가합니다';
+    }
+    const callerFam = normalizeModelFamily(input.callerModel);
+    if (callerFam && callerFam === prodFam) {
+      return `sublead backprop 거부: verdict 생산자(${prodFam})가 호출자 sublead 모델(${callerFam})과 동종입니다 (이종 verifier 필수)`;
+    }
+    const coderFam = normalizeModelFamily(input.coderModel);
+    if (coderFam && coderFam === prodFam) {
+      return `sublead backprop 거부: verdict 생산자(${prodFam})가 coder 모델(${coderFam})과 동종입니다 (이종 verifier 필수)`;
+    }
+  }
+  return null;
 }
 
 /** Verdict SSOT 경로 — 입·출력 계약이 `.herdr/verify/`에 쌍으로 결속된다 */

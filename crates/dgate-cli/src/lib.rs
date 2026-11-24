@@ -22,11 +22,11 @@ pub mod util;
 use args::ParsedArgs;
 use util::{eprint_line, CmdResult, DgError};
 
-/// 인식 가능한 명령 15종 + v2 신규 3종.
-pub const COMMANDS: [&str; 21] = [
+/// 인식 가능한 명령 15종 + v2 신규 명령.
+pub const COMMANDS: [&str; 22] = [
     "route", "gate", "close", "touch", "record", "backprop", "attempt", "retro",
     "settle-orphans", "wrap", "compact", "stats", "checkpoint", "worktree", "report",
-    "hook", "setup", "dispatch", "dispatch-mode", "send", "reap",
+    "hook", "setup", "dispatch", "dispatch-mode", "send", "reap", "suggest-sublead",
 ];
 
 const HELP: &str = "dg — decision gate CLI (plan-r2.1 §4.7, v2 native Rust)
@@ -55,7 +55,8 @@ const HELP: &str = "dg — decision gate CLI (plan-r2.1 §4.7, v2 native Rust)
   dg dispatch --task-kind <k> [--risk low|medium|high] [--repo <dir>] [--roster <path>] [--db <path>] [--run-id <id>] [--task-file <path>] [--idx <n>] [--active-explore <n>] [--active-coding <n>] [--dry-run] [--context <text>] [--decision-api <off|shadow|on>] [--api-eval] [--json]
   dg dispatch-mode [--set off|strict]   (strict: delegate_swarm wrap은 dispatch 발급 --fork만 허용)
   dg send <addr> <message…> [--attempts N]   (hc send + 전달 확인·재전송, 미확인 exit 1)
-  dg reap [--minutes 30] [--dry-run]   (종료 터미널 유휴 창 경과 후 자동 정리)
+  dg reap [--minutes 30] [--role <role>] [--owner <addr>] [--dry-run]   (종료 터미널 유휴 창 경과 후 자동 정리)
+  dg suggest-sublead [--project <dir>] [--db <path>] [--active-workers <n>] [--max-subleads <2..4>] [--json]   (3축 DB 신호 기반 sublead 분리 제안)
 
 라우트 r: file_select|tool_select|retry_or_abort|delegate_swarm
 공용: --db <path>는 DGATE_DB_PATH·DECISION_ORCHESTRATOR_DB_PATH·GEMINI_TRICK_DB_PATH보다 우선. --roster <path>/--profile <name> 명시 시
@@ -132,6 +133,7 @@ where
         "dispatch-mode" => commands::dispatch_mode::cmd_dispatch_mode(&parsed, json),
         "send" => commands::send::cmd_send(&parsed, json),
         "reap" => commands::reap::cmd_reap(&parsed, json),
+        "suggest-sublead" => commands::suggest_sublead::cmd_suggest_sublead(&parsed, json),
         _ => unreachable!("command list checked above"),
     };
 

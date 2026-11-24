@@ -70,6 +70,11 @@ function isMergePublishCommand(raw: string): boolean {
   return false;
 }
 
+/** sublead 기본 머지 금지 명령 패턴(docs/sublead-design.md 항목 8) — `git merge` 포함. */
+function isSubleadMergeCommand(raw: string): boolean {
+  return isMergePublishCommand(raw) || raw.includes('git merge');
+}
+
 /** cwd(및 상위 3단계)의 `.herdr/verify/advisor-pass*` 중 최신 것이 TTL 창 안이면 true. */
 function hasFreshAdvisorPass(cwd: string | undefined): boolean {
   if (!cwd) return false;
@@ -294,6 +299,20 @@ function runGuard(): void {
       }
       emit(allow());
       return;
+    }
+    // sublead 기본 머지 금지(docs/sublead-design.md 항목 8): HERDR_MERGE_GATE·advisor pass와 무관 차단
+    const subleadMode = (process.env.HERDR_ROLE ?? '').trim().toLowerCase() === 'sublead';
+    if (subleadMode && typeof name === 'string' && SHELL_EXEC_TOOL_NAMES.has(name)) {
+      const args = toolCall?.args ?? {};
+      const raw = args.CommandLine ?? args.command ?? args.cmd;
+      if (typeof raw === 'string' && isSubleadMergeCommand(String(raw))) {
+        emit(
+          deny(
+            'sublead merge guard: sublead 세션은 머지·main/master 푸시 금지 — 완료 보고는 READY_PR 핸드오프로 최상위 리드에 전달하세요'
+          )
+        );
+        return;
+      }
     }
     // 머지 게이트(완료 관문 집행): advisor pass 없는 병합·발행 명령 차단
     if (process.env.HERDR_MERGE_GATE === '1' && typeof name === 'string' && SHELL_EXEC_TOOL_NAMES.has(name)) {

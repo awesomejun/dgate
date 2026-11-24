@@ -3,22 +3,68 @@
 //! `finished` 상태가 유휴 창(기본 30분) 지난 터미널만 `hc rm`으로 정리한다.
 //! 살아있는 터미널은 절대 건드리지 않고, `keep` 표시가 된 터미널은 보존한다.
 //! `--dry-run`은 대상 목록만 출력한다.
+use std::collections::{HashMap, HashSet};
 use std::process::Command as ProcCommand;
 
 use serde_json::json;
 
-use crate::args::{parse_int_flag, ParsedArgs};
+use crate::args::{optional_flag, parse_int_flag, ParsedArgs, UsageError};
 use crate::util::prelude::*;
 
 const DEFAULT_IDLE_MINUTES: i64 = 30;
+const MAX_ANCESTOR_DEPTH: usize = 32;
+
+/// 터미널 `addr`의 `parent` 체인을 따라가 `owner_root`의 하위(진부분트리)인지 판정한다.
+/// 자기 자신(`addr == owner_root`)은 포함하지 않으며, 순환 참조는 depth/visited로 차단한다.
+fn is_descendant_of(
+    addr: &str,
+    owner_root: &str,
+    parent_map: &HashMap<String, String>,
+) -> bool {
+    if addr == owner_root {
+        return false;
+    }
+    let mut cur = addr;
+    let mut visited: HashSet<&str> = HashSet::new();
+    for _ in 0..MAX_ANCESTOR_DEPTH {
+        if !visited.insert(cur) {
+            return false;
+        }
+        let Some(parent) = parent_map.get(cur) else {
+            return false;
+        };
+        if parent == owner_root {
+            return true;
+        }
+        cur = parent.as_str();
+    }
+    false
+}
 
 /// 정리 대상 선별(순수 함수 — 테스트 대상): finished + keep 아님 + 유휴 창 경과.
-pub fn select_reap_candidates(
+/// `owner_root`가 `Some(addr)`이면 해당 주소의 조상 트리 하위 터미널만 선별한다(sublead 스코핑).
+pub fn select_reap_candidates_scoped(
     terminals: &[serde_json::Value],
     now_ms: i64,
     idle_minutes: i64,
+    owner_root: Option<&str>,
 ) -> Vec<(String, Option<String>)> {
     let window_ms = idle_minutes.saturating_mul(60_000);
+    let parent_map: HashMap<String, String> = if owner_root.is_some() {
+        terminals
+            .iter()
+            .filter_map(|t| {
+                let addr = t.get("address").and_then(|v| v.as_str())?;
+                let parent = t
+                    .get("parent")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())?;
+                Some((addr.to_string(), parent.to_string()))
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
     terminals
         .iter()
         .filter_map(|t| {
@@ -33,15 +79,51 @@ pub fn select_reap_candidates(
                 return None;
             }
             let address = t.get("address").and_then(|v| v.as_str())?.to_string();
+            if let Some(root) = owner_root {
+                if !is_descendant_of(&address, root, &parent_map) {
+                    return None;
+                }
+            }
             let name = t.get("name").and_then(|v| v.as_str()).map(str::to_string);
             Some((address, name))
         })
         .collect()
 }
 
+/// 정리 대상 선별(기존 전역 API 보존 — `owner_root = None`).
+pub fn select_reap_candidates(
+    terminals: &[serde_json::Value],
+    now_ms: i64,
+    idle_minutes: i64,
+) -> Vec<(String, Option<String>)> {
+    select_reap_candidates_scoped(terminals, now_ms, idle_minutes, None)
+}
+
 pub fn cmd_reap(args: &ParsedArgs, json: bool) -> CmdResult {
     let idle_minutes = parse_int_flag(args, "minutes", DEFAULT_IDLE_MINUTES)?.max(0);
     let dry_run = crate::args::bool_flag(args, "dry-run");
+    let role = optional_flag(args, "role")
+        .or_else(|| std::env::var("HERDR_ROLE").ok())
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
+    let owner_root: Option<String> = if role == "sublead" {
+        let owner = optional_flag(args, "owner")
+            .or_else(|| std::env::var("HC_TERMINAL_ID").ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let Some(root) = owner else {
+            return Err(DgError::Usage(UsageError(
+                "sublead reap 거부: --owner 또는 HC_TERMINAL_ID가 필요합니다 (전역 정리 차단)"
+                    .to_string(),
+            )));
+        };
+        Some(root)
+    } else {
+        optional_flag(args, "owner")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
     let hc = std::env::var("HC_BIN").unwrap_or_else(|_| "hc".to_string());
 
     let raw = ProcCommand::new(&hc)
@@ -57,7 +139,12 @@ pub fn cmd_reap(args: &ParsedArgs, json: bool) -> CmdResult {
         .unwrap_or_default();
 
     let now_ms = crate::util::now_ms();
-    let targets = select_reap_candidates(&terminals, now_ms, idle_minutes);
+    let targets = select_reap_candidates_scoped(
+        &terminals,
+        now_ms,
+        idle_minutes,
+        owner_root.as_deref(),
+    );
     let mut removed = 0usize;
     let mut failed: Vec<String> = Vec::new();
     if !dry_run {
@@ -130,5 +217,23 @@ mod reap_tests {
         let out0 = select_reap_candidates(&list, now, 0);
         assert!(out0.iter().any(|(a, _)| a == "t-fresh"));
         assert!(!out0.iter().any(|(a, _)| a == "t-nofin"));
+    }
+
+    #[test]
+    fn scoped_reap_only_touches_sublead_descendants() {
+        let now = 1_000_000i64;
+        let aged = now - 40 * 60_000;
+        let list = vec![
+            json!({"address": "t-subA", "state": "finished", "keep": false, "finished_ms": aged}),
+            json!({"address": "t-subA-child", "parent": "t-subA", "state": "finished", "keep": false, "finished_ms": aged}),
+            json!({"address": "t-subA-grand", "parent": "t-subA-child", "state": "finished", "keep": false, "finished_ms": aged}),
+            json!({"address": "t-subB-child", "parent": "t-subB", "state": "finished", "keep": false, "finished_ms": aged}),
+            json!({"address": "t-orphan", "state": "finished", "keep": false, "finished_ms": aged}),
+            json!({"address": "t-cyc1", "parent": "t-cyc2", "state": "finished", "keep": false, "finished_ms": aged}),
+            json!({"address": "t-cyc2", "parent": "t-cyc1", "state": "finished", "keep": false, "finished_ms": aged}),
+        ];
+        let out = select_reap_candidates_scoped(&list, now, 30, Some("t-subA"));
+        let addrs: Vec<&str> = out.iter().map(|(a, _)| a.as_str()).collect();
+        assert_eq!(addrs, vec!["t-subA-child", "t-subA-grand"]);
     }
 }

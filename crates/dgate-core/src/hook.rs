@@ -82,6 +82,13 @@ pub fn is_merge_publish_command(raw: &str) -> bool {
     false
 }
 
+/// sublead 기본 머지 금지 명령 패턴(docs/sublead-design.md 항목 8) —
+/// `gh pr merge`·main/master 직접 push 외에 `git merge`도 차단한다.
+/// 피처 브랜치 푸시(`git push -u origin feat/...`)는 허용해 READY_PR 핸드오프를 유지한다.
+pub fn is_sublead_merge_command(raw: &str) -> bool {
+    is_merge_publish_command(raw) || raw.contains("git merge")
+}
+
 /// cwd(및 상위 3단계)의 `.herdr/verify/advisor-pass*` 중 최신 것이 TTL 창 안이면 true.
 pub fn has_fresh_advisor_pass(cwd: Option<&str>) -> bool {
     let Some(cwd) = cwd.filter(|s| !s.is_empty()) else {
@@ -165,6 +172,29 @@ mod merge_gate_tests {
         std::fs::rename(verify.join("advisor-pass.json2"), verify.join("advisor-pass.json2.used")).unwrap();
         let out3 = run_hook_mode("--guard", &cmd_json_with_cwd("gh pr merge 839 --squash", tmp.to_str().unwrap()), &env);
         assert!(out3.contains("advisor pass"), ".used pass 무시: {out3}");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn sublead_blocks_merge_by_default_even_without_merge_gate_or_with_pass() {
+        let mut env = HookEnv::isolated();
+        env.set("HERDR_ROLE", "sublead");
+        let tmp = std::env::temp_dir().join(format!("dg-sub-mg-{}", std::process::id()));
+        let verify = tmp.join(".herdr").join("verify");
+        std::fs::create_dir_all(&verify).unwrap();
+        // fresh advisor pass가 있어도 sublead는 머지 금지(READY_PR 핸드오프 전용)
+        std::fs::write(verify.join("advisor-pass.json"), "{}").unwrap();
+        for cmd in ["gh pr merge 10 --squash", "git push origin main", "git merge feat/x"] {
+            let out = run_hook_mode("--guard", &cmd_json_with_cwd(cmd, tmp.to_str().unwrap()), &env);
+            assert!(out.contains("sublead merge guard"), "cmd={cmd} out={out}");
+        }
+        // 피처 브랜치 푸시는 허용
+        let allow_out = run_hook_mode(
+            "--guard",
+            &cmd_json_with_cwd("git push -u origin feat/sublead-track", tmp.to_str().unwrap()),
+            &env,
+        );
+        assert_eq!(allow_out, r#"{"decision":"allow"}"#);
         std::fs::remove_dir_all(&tmp).ok();
     }
 }
@@ -429,6 +459,10 @@ pub fn run_guard(stdin_json: &str, env: &HookEnv) -> GuardDecision {
     let delegate_hc = env.equals("HERDR_DELEGATE_MODE", "hc");
     let readonly_mode = env.equals("HERDR_READONLY", "1");
     let merge_gate = env.equals("HERDR_MERGE_GATE", "1");
+    let sublead_mode = env
+        .get("HERDR_ROLE")
+        .map(|v| v.trim().eq_ignore_ascii_case("sublead"))
+        .unwrap_or(false);
 
     let parsed: Option<Value> = serde_json::from_str(stdin_json).ok();
     let input = match parsed {
@@ -443,7 +477,7 @@ pub fn run_guard(stdin_json: &str, env: &HookEnv) -> GuardDecision {
         }
     };
 
-    let result = guard_logic(&input, delegate_hc, readonly_mode, merge_gate);
+    let result = guard_logic(&input, delegate_hc, readonly_mode, merge_gate, sublead_mode);
     match result {
         Some(decision) => decision,
         None => {
@@ -462,6 +496,7 @@ fn guard_logic(
     delegate_hc: bool,
     readonly_mode: bool,
     merge_gate: bool,
+    sublead_mode: bool,
 ) -> Option<GuardDecision> {
     let tool_call = input.get("toolCall").filter(|v| v.is_object());
     let name = tool_call.and_then(|tc| tc.get("name")).and_then(Value::as_str);
@@ -503,6 +538,27 @@ fn guard_logic(
             });
         }
         return Some(GuardDecision::allow());
+    }
+
+    // sublead 기본 머지 금지(docs/sublead-design.md 항목 8): HERDR_MERGE_GATE·advisor pass와
+    // 무관하게 sublead 세션의 머지·main/master 푸시를 차단한다(완료 신고는 READY_PR 핸드오프).
+    if sublead_mode {
+        if let (Some(n), Some(tc)) = (name, tool_call) {
+            if SHELL_EXEC_TOOL_NAMES.contains(&n) {
+                let raw = tc
+                    .get("args")
+                    .and_then(Value::as_object)
+                    .and_then(|a| first_non_null(a, &["CommandLine", "command", "cmd"]))
+                    .and_then(Value::as_str);
+                if let Some(raw_str) = raw {
+                    if is_sublead_merge_command(raw_str) {
+                        return Some(GuardDecision::deny(
+                            "sublead merge guard: sublead 세션은 머지·main/master 푸시 금지 — 완료 보고는 READY_PR 핸드오프로 최상위 리드에 전달하세요",
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     // 머지 게이트(완료 관문 집행): advisor pass 없는 병합·발행 명령 차단.

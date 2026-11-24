@@ -72,7 +72,86 @@ export const ORCHESTRATOR_ROOT = path.resolve(path.dirname(fileURLToPath(import.
 
 export const MAX_CONCURRENT_EXPLORE = 4;
 export const MAX_CONCURRENT_CODING = 2;
+/** sublead 동시 상한 기본값·허용 범위(docs/sublead-design.md 항목 6: 기본 2, 설정 2~4). */
+export const DEFAULT_MAX_CONCURRENT_SUBLEADS = 2;
+export const MIN_CONCURRENT_SUBLEADS = 2;
+export const MAX_CONCURRENT_SUBLEADS_LIMIT = 4;
 const HC_NAME_RE = /^[a-z0-9_-]{1,32}$/;
+
+/** sublead 동시 상한을 [2, 4] 범위로 클램프한다(미지정·비유한 값은 기본 2). */
+export function clampMaxSubleads(raw: number | undefined | null): number {
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return DEFAULT_MAX_CONCURRENT_SUBLEADS;
+  return Math.min(MAX_CONCURRENT_SUBLEADS_LIMIT, Math.max(MIN_CONCURRENT_SUBLEADS, Math.floor(raw)));
+}
+
+export interface ConcurrencyBudgetInput {
+  isSubleadRequest: boolean;
+  requiresWrite: boolean;
+  decision: 'sharp' | 'split';
+  activeExplore: number;
+  activeCoding: number;
+  /** 전체 트리 합산 active_coding(DB open write fork 수 등) — sublead 경로에서 전역 상한 집행. */
+  treeActiveCoding: number;
+  activeSubleads: number;
+  maxSubleads?: number;
+}
+
+export interface ConcurrencyBudgetResult {
+  deferred: boolean;
+  reason: string | null;
+  effectiveCoding: number;
+  maxSubleads: number;
+}
+
+/**
+ * 동시성 예산 판정(docs/sublead-design.md 항목 6 — Rust `evaluate_concurrency_budget` 미러).
+ * - sublead 요청(`isSubleadRequest=true`)은 coder 슬롯을 소모하지 않고 sublead 상한(2~4)만 검사.
+ * - 일반 워커 요청은 explore 상한 또는 전체 트리 합산 active_coding 상한(`max(activeCoding, treeActiveCoding)`)을 검사.
+ */
+export function evaluateConcurrencyBudget(input: ConcurrencyBudgetInput): ConcurrencyBudgetResult {
+  const maxSubleads = clampMaxSubleads(input.maxSubleads);
+  const effectiveCoding = Math.max(input.activeCoding, input.treeActiveCoding);
+  if (input.isSubleadRequest) {
+    if (input.activeSubleads >= maxSubleads) {
+      return {
+        deferred: true,
+        reason: `sublead concurrency cap (${maxSubleads}) reached`,
+        effectiveCoding,
+        maxSubleads,
+      };
+    }
+    return { deferred: false, reason: null, effectiveCoding, maxSubleads };
+  }
+  if (input.decision === 'sharp' && input.activeExplore >= MAX_CONCURRENT_EXPLORE) {
+    return {
+      deferred: true,
+      reason: `explore concurrency cap (${MAX_CONCURRENT_EXPLORE}) reached`,
+      effectiveCoding,
+      maxSubleads,
+    };
+  }
+  if (input.requiresWrite && effectiveCoding >= MAX_CONCURRENT_CODING) {
+    return {
+      deferred: true,
+      reason: `coding concurrency cap (${MAX_CONCURRENT_CODING}) reached`,
+      effectiveCoding,
+      maxSubleads,
+    };
+  }
+  return { deferred: false, reason: null, effectiveCoding, maxSubleads };
+}
+
+/** DB에서 전체 트리 합산 활성 코딩(open/rework + file_edit) fork 수를 조회한다(fail-open 0). */
+export function countTreeActiveCodingForks(db: DatabaseSync): number {
+  try {
+    const row = db
+      .prepare(`SELECT COUNT(*) AS n FROM forks WHERE status IN ('open', 'rework') AND tool_class = 'file_edit'`)
+      .get() as { n?: number } | undefined;
+    return Number(row?.n ?? 0);
+  } catch {
+    return 0;
+  }
+}
 
 // ---------- run id / session name (N-NEW-4·N12) ----------
 
@@ -158,6 +237,14 @@ export interface PlanDispatchInput {
   idx?: number;
   activeExplore?: number;
   activeCoding?: number;
+  /** 요청 역할 — `'sublead'`면 coder 슬롯을 소모하지 않고 sublead 동시 상한만 검사한다. */
+  role?: string | null;
+  /** 현재 활성 sublead 수(`--active-subleads`) */
+  activeSubleads?: number;
+  /** sublead 동시 상한(`--max-subleads`, 2~4 클램프, 기본 2) */
+  maxSubleads?: number;
+  /** 전체 트리 합산 활성 코딩 수(`--tree-active-coding`, 미지정 시 sublead 컨텍스트에서 DB 조회) */
+  treeActiveCoding?: number;
   /** `--roster` 명시 경로 (미지정 시 roster.ts 우선순위 탐색: env → project → global → 내장) */
   rosterPath?: string | null;
   /** 검증 통과한 검증자 브리프 경로(Change ①) — 워커 프롬프트 `{brief}`로 주입 */
@@ -385,17 +472,33 @@ function planDispatchInner(input: PlanDispatchInput, api: ApiOverride | null): D
   const idx = input.idx ?? 0;
   // 동시성 상한 (§6.4): 탐색 ≤4, 코딩 ≤2
   const expectedSession = decision === 'sharp' ? `exp-${idx}-${runId}` : `lead-${runId}`;
+  const isSubleadRequest = (input.role ?? '').trim().toLowerCase() === 'sublead';
+  const callerIsSublead = (process.env.HERDR_ROLE ?? '').trim().toLowerCase() === 'sublead';
+  const treeActiveCoding =
+    input.treeActiveCoding !== undefined
+      ? input.treeActiveCoding
+      : !dryRun && db && callerIsSublead
+        ? countTreeActiveCodingForks(db)
+        : 0;
+  const maxSubleadsEnv = process.env.DGATE_MAX_SUBLEADS ? Number(process.env.DGATE_MAX_SUBLEADS) : undefined;
+  const budget = evaluateConcurrencyBudget({
+    isSubleadRequest,
+    requiresWrite: spec.requiresWrite,
+    decision,
+    activeExplore: input.activeExplore ?? 0,
+    activeCoding: input.activeCoding ?? 0,
+    treeActiveCoding,
+    activeSubleads: input.activeSubleads ?? 0,
+    maxSubleads: input.maxSubleads ?? maxSubleadsEnv,
+  });
   let deferred = false;
   let reason: string | null = null;
   if (afterActive) {
     deferred = true;
     reason = `after_fork ${afterForkId} not closed (status=${afterStatus})`;
-  } else if (decision === 'sharp' && (input.activeExplore ?? 0) >= MAX_CONCURRENT_EXPLORE) {
+  } else if (budget.deferred) {
     deferred = true;
-    reason = `explore concurrency cap (${MAX_CONCURRENT_EXPLORE}) reached`;
-  } else if (spec.requiresWrite && (input.activeCoding ?? 0) >= MAX_CONCURRENT_CODING) {
-    deferred = true;
-    reason = `coding concurrency cap (${MAX_CONCURRENT_CODING}) reached`;
+    reason = budget.reason;
   }
   // PR-A2 Cooperative Lease (§2.4): 동일 repo_scope를 살아있는 세션이 점유 중이면
   // deferred — dry-run은 fork 미기록이므로 검사하지 않는다. hc 조회 실패는 fail-open.
@@ -869,6 +972,10 @@ if (isMainModule()) {
     idx: flags.idx !== undefined ? Number(flags.idx) : undefined,
     activeExplore: flags['active-explore'] !== undefined ? Number(flags['active-explore']) : undefined,
     activeCoding: flags['active-coding'] !== undefined ? Number(flags['active-coding']) : undefined,
+    role: flags.role,
+    activeSubleads: flags['active-subleads'] !== undefined ? Number(flags['active-subleads']) : undefined,
+    maxSubleads: flags['max-subleads'] !== undefined ? Number(flags['max-subleads']) : undefined,
+    treeActiveCoding: flags['tree-active-coding'] !== undefined ? Number(flags['tree-active-coding']) : undefined,
     rosterPath: flags.roster,
     briefFile: briefFile,
     afterFork: flags['after'],

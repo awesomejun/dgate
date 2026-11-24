@@ -89,7 +89,16 @@ import {
 } from './report.ts';
 import { loadRosterConfig, resolveRosterProfile } from './roster.ts';
 import { computeCostStats, computeDynamicSharpThreshold, computeTimingStats } from './stats.ts';
-import { buildRetroMarkdown, mergeDangerStrictViolation, validateVerdictFile } from './verdict.ts';
+import {
+  buildRetroMarkdown,
+  mergeDangerStrictViolation,
+  subleadBackpropViolation,
+  validateVerdictFile,
+} from './verdict.ts';
+import {
+  collectSubleadSignalsFromDb,
+  evaluateSubleadSuggestion,
+} from './suggestSublead.ts';
 
 class UsageError extends Error {}
 
@@ -690,6 +699,20 @@ function cmdBackprop(args: ParsedArgs, json: boolean): number | void {
     settleOrphans(db);
     const fork = getFork(db, forkId);
     if (!fork) throw new UsageError(`fork not found: ${forkId}`);
+    const callerRole = process.env.HERDR_ROLE ?? null;
+    const callerConversation = process.env.HERDR_CONVERSATION ?? null;
+    const callerModel = optionalFlag(args, 'caller-model') ?? process.env.HERDR_MODEL ?? null;
+    let coderModel = optionalFlag(args, 'coder-model') ?? process.env.HERDR_CODER_MODEL ?? null;
+    if (!coderModel && fork.metadata_json) {
+      try {
+        const meta = JSON.parse(fork.metadata_json) as Record<string, unknown>;
+        if (typeof meta.coder_model === 'string' && meta.coder_model.trim()) {
+          coderModel = meta.coder_model.trim();
+        }
+      } catch {
+        /* metadata 파싱 실패 시 무시 */
+      }
+    }
     if (verdictFile !== undefined) {
       const expectedHead = optionalFlag(args, 'expected-head');
       const maxReworks = parseIntFlag(args, 'max-reworks', 2);
@@ -701,6 +724,17 @@ function cmdBackprop(args: ParsedArgs, json: boolean): number | void {
       // 무효 verdict는 게이트를 통과해 기존 fail-closed(escalate_human exit 3) 경로를 그대로 탄다.
       const strictViolation = mergeDangerStrictViolation(readDispatchMode(), verdict);
       if (strictViolation !== null) throw new UsageError(strictViolation);
+      // sublead 물리 권한 검증(exit 2): ① 소유 conversation 일치 ② 이종 verdict 생산자
+      const subleadViolation = subleadBackpropViolation({
+        callerRole,
+        callerConversation,
+        forkConversation: fork.conversation_id,
+        callerModel,
+        coderModel,
+        producerModel: optionalFlag(args, 'producer-model') ?? verdict.document?.producer_model ?? null,
+        hasVerdict: true,
+      });
+      if (subleadViolation !== null) throw new UsageError(subleadViolation);
       try {
         const res = applyVerdictToFork(db, { forkId, verdict, maxReworks });
         emit(
@@ -753,6 +787,13 @@ function cmdBackprop(args: ParsedArgs, json: boolean): number | void {
         return 3;
       }
     }
+    const manualSubleadViolation = subleadBackpropViolation({
+      callerRole,
+      callerConversation,
+      forkConversation: fork.conversation_id,
+      hasVerdict: false,
+    });
+    if (manualSubleadViolation !== null) throw new UsageError(manualSubleadViolation);
     if (!isForkLiveStatus(fork.status) && fork.status !== 'ok') {
       throw new UsageError(`fork ${forkId} cannot backprop (status=${fork.status})`);
     }
@@ -1682,6 +1723,7 @@ const HELP = `dg — decision gate CLI (plan-r2.1 §4.7)
   dg checkpoint restore --dir <checkpointDir> --target <worktreeDir> [--json]
   dg worktree remove --worktree <path> [--repo <dir>] [--run-id <id>] [--name <wtName>] [--checkpoint-root <dir>] [--force] [--json]
   dg report [--days 14] [--project <dir>] [--out <path>] [--repo <dir>] [--db <path>] [--json]
+  dg suggest-sublead [--project <dir>] [--db <path>] [--active-workers <n>] [--max-subleads <2..4>] [--json]
 
 라우트 r: file_select|tool_select|retry_or_abort|delegate_swarm
 공용: --db <path>는 DGATE_DB_PATH·DECISION_ORCHESTRATOR_DB_PATH·GEMINI_TRICK_DB_PATH보다 우선. --roster <path>/--profile <name> 명시 시
@@ -1697,7 +1739,7 @@ async function main(): Promise<void> {
     process.exit(argv.length === 0 ? 2 : 0);
   }
   const cmd = argv[0]!;
-  if (!['route', 'gate', 'close', 'touch', 'record', 'backprop', 'attempt', 'retro', 'settle-orphans', 'wrap', 'compact', 'stats', 'checkpoint', 'worktree', 'report', 'dispatch-mode'].includes(cmd)) {
+  if (!['route', 'gate', 'close', 'touch', 'record', 'backprop', 'attempt', 'retro', 'settle-orphans', 'wrap', 'compact', 'stats', 'checkpoint', 'worktree', 'report', 'dispatch-mode', 'suggest-sublead'].includes(cmd)) {
     process.stderr.write(`unknown command: ${cmd}\n\n${HELP}\n`);
     process.exit(2);
   }
@@ -1738,6 +1780,45 @@ async function main(): Promise<void> {
       case 'settle-orphans':
         cmdSettleOrphans(args, json);
         break;
+      case 'suggest-sublead': {
+        const projectDir = optionalFlag(args, 'project');
+        const projectId = projectDir ? resolveProjectIdentity(projectDir).projectId : null;
+        const activeWorkersRaw = optionalFlag(args, 'active-workers');
+        const activeWorkersOverride =
+          activeWorkersRaw !== undefined && Number.isFinite(Number(activeWorkersRaw))
+            ? Number(activeWorkersRaw)
+            : undefined;
+        const maxSubRaw = optionalFlag(args, 'max-subleads') ?? process.env.DGATE_MAX_SUBLEADS;
+        const maxSubleadsCap =
+          maxSubRaw !== undefined && Number.isFinite(Number(maxSubRaw)) ? Number(maxSubRaw) : undefined;
+        const db = openDbSafe(dbFlag(args), { readOnly: true, busyTimeoutMs: 3000 });
+        const signals = db
+          ? (() => {
+              try {
+                return collectSubleadSignalsFromDb(db, {
+                  projectId,
+                  activeWorkersOverride,
+                  maxSubleadsCap,
+                });
+              } finally {
+                db.close();
+              }
+            })()
+          : {
+              activeForks: 0,
+              reworkOrBackpropCount: 0,
+              avgVerdictLatencyMs: 0,
+              activeWrapWorkers: activeWorkersOverride ?? 0,
+              activeScopes: [],
+              multiEditOrSwarmCount: 0,
+              maxGenerationOrAttempt: 1,
+              largeBlastCount: 0,
+              maxSubleadsCap,
+            };
+        const result = evaluateSubleadSuggestion(signals);
+        emit(json, () => `[suggest-sublead] ${result.summary}`, result);
+        break;
+      }
       case 'dispatch-mode': {
         const set = optionalFlag(args, 'set');
         if (set === undefined || set === '') {

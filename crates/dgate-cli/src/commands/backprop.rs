@@ -22,6 +22,20 @@ pub fn cmd_backprop(args: &ParsedArgs, json: bool) -> CmdResult {
         .map_err(DgError::Fatal)?
         .ok_or_else(|| DgError::Usage(crate::args::UsageError(format!("fork not found: {fork_id}"))))?;
 
+    let caller_role = std::env::var("HERDR_ROLE").ok();
+    let caller_conversation = std::env::var("HERDR_CONVERSATION").ok();
+    let caller_model = optional_flag(args, "caller-model")
+        .or_else(|| std::env::var("HERDR_MODEL").ok());
+    let coder_model = optional_flag(args, "coder-model")
+        .or_else(|| std::env::var("HERDR_CODER_MODEL").ok())
+        .or_else(|| {
+            fork.metadata_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                .and_then(|v| v.get("coder_model").and_then(Value::as_str).map(str::to_string))
+                .filter(|s| !s.trim().is_empty())
+        });
+
     if let Some(vf) = &verdict_file {
         let expected_head = optional_flag(args, "expected-head");
         let max_reworks = parse_int_flag(args, "max-reworks", 2)?;
@@ -36,6 +50,20 @@ pub fn cmd_backprop(args: &ParsedArgs, json: bool) -> CmdResult {
         // strict 게이트(exit 2): UsageError는 verdict pipeline 폴백(exit 3)으로 흡수하지 않는다.
         // 무효 verdict는 게이트를 통과해 기존 fail-closed(escalate_human exit 3) 경로를 그대로 탄다.
         if let Some(msg) = verdict::merge_danger_strict_violation(&engine::read_dispatch_mode(), &v) {
+            return Err(DgError::Usage(crate::args::UsageError(msg)));
+        }
+        // sublead 물리 권한 검증(exit 2): ① 소유 conversation 일치 ② 이종 verdict 생산자
+        let producer_model = optional_flag(args, "producer-model")
+            .or_else(|| v.document.as_ref().and_then(|d| d.producer_model.clone()));
+        if let Some(msg) = verdict::sublead_backprop_violation(&verdict::SubleadBackpropCheck {
+            caller_role: caller_role.as_deref(),
+            caller_conversation: caller_conversation.as_deref(),
+            fork_conversation: fork.conversation_id.as_deref(),
+            caller_model: caller_model.as_deref(),
+            coder_model: coder_model.as_deref(),
+            producer_model: producer_model.as_deref(),
+            has_verdict: true,
+        }) {
             return Err(DgError::Usage(crate::args::UsageError(msg)));
         }
         let merge_danger_json = match v.document.as_ref().and_then(|d| d.merge_danger.as_ref()) {
@@ -107,6 +135,15 @@ pub fn cmd_backprop(args: &ParsedArgs, json: bool) -> CmdResult {
             }
         }
     } else {
+        if let Some(msg) = verdict::sublead_backprop_violation(&verdict::SubleadBackpropCheck {
+            caller_role: caller_role.as_deref(),
+            caller_conversation: caller_conversation.as_deref(),
+            fork_conversation: fork.conversation_id.as_deref(),
+            has_verdict: false,
+            ..Default::default()
+        }) {
+            return Err(DgError::Usage(crate::args::UsageError(msg)));
+        }
         if !engine::is_fork_live_status(&fork.status) && fork.status != "ok" {
             return Err(DgError::Usage(crate::args::UsageError(format!(
                 "fork {fork_id} cannot backprop (status={})",

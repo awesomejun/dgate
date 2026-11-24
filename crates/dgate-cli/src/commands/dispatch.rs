@@ -25,6 +25,87 @@ use dgate_core::stats::{compute_dynamic_sharp_threshold, DynamicSharpThresholdIn
 
 pub const MAX_CONCURRENT_EXPLORE: i64 = 4;
 pub const MAX_CONCURRENT_CODING: i64 = 2;
+/// sublead 동시 상한 기본값·허용 범위(docs/sublead-design.md 항목 6: 기본 2, 설정 2~4).
+pub const DEFAULT_MAX_CONCURRENT_SUBLEADS: i64 = 2;
+pub const MIN_CONCURRENT_SUBLEADS: i64 = 2;
+pub const MAX_CONCURRENT_SUBLEADS_LIMIT: i64 = 4;
+
+pub fn clamp_max_subleads(raw: Option<i64>) -> i64 {
+    match raw {
+        Some(v) => v.clamp(MIN_CONCURRENT_SUBLEADS, MAX_CONCURRENT_SUBLEADS_LIMIT),
+        None => DEFAULT_MAX_CONCURRENT_SUBLEADS,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConcurrencyBudgetResult {
+    pub deferred: bool,
+    pub reason: Option<String>,
+    pub effective_coding: i64,
+    pub max_subleads: i64,
+}
+
+/// 동시성 예산 판정(docs/sublead-design.md 항목 6 — TS `evaluateConcurrencyBudget` 미러).
+pub fn evaluate_concurrency_budget(
+    is_sublead_request: bool,
+    requires_write: bool,
+    decision: &str,
+    active_explore: i64,
+    active_coding: i64,
+    tree_active_coding: i64,
+    active_subleads: i64,
+    max_subleads_opt: Option<i64>,
+) -> ConcurrencyBudgetResult {
+    let max_subleads = clamp_max_subleads(max_subleads_opt);
+    let effective_coding = active_coding.max(tree_active_coding);
+    if is_sublead_request {
+        if active_subleads >= max_subleads {
+            return ConcurrencyBudgetResult {
+                deferred: true,
+                reason: Some(format!("sublead concurrency cap ({max_subleads}) reached")),
+                effective_coding,
+                max_subleads,
+            };
+        }
+        return ConcurrencyBudgetResult {
+            deferred: false,
+            reason: None,
+            effective_coding,
+            max_subleads,
+        };
+    }
+    if decision == "sharp" && active_explore >= MAX_CONCURRENT_EXPLORE {
+        return ConcurrencyBudgetResult {
+            deferred: true,
+            reason: Some(format!("explore concurrency cap ({MAX_CONCURRENT_EXPLORE}) reached")),
+            effective_coding,
+            max_subleads,
+        };
+    }
+    if requires_write && effective_coding >= MAX_CONCURRENT_CODING {
+        return ConcurrencyBudgetResult {
+            deferred: true,
+            reason: Some(format!("coding concurrency cap ({MAX_CONCURRENT_CODING}) reached")),
+            effective_coding,
+            max_subleads,
+        };
+    }
+    ConcurrencyBudgetResult {
+        deferred: false,
+        reason: None,
+        effective_coding,
+        max_subleads,
+    }
+}
+
+fn count_tree_active_coding_forks(conn: &rusqlite::Connection) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM forks WHERE status IN ('open', 'rework') AND tool_class = 'file_edit'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+}
 
 /// `hc --name` 계약 — ^[a-z0-9_-]{1,32}$
 pub fn session_name_ok(name: &str) -> bool {
@@ -211,6 +292,10 @@ struct PlanInput {
     idx: i64,
     active_explore: i64,
     active_coding: i64,
+    role: Option<String>,
+    active_subleads: i64,
+    max_subleads: Option<i64>,
+    tree_active_coding: Option<i64>,
     roster_path: Option<String>,
     /// 검증 통과한 검증자 브리프 경로(Change ①) — 워커 프롬프트 `{brief}`로 주입
     brief_file: Option<String>,
@@ -427,6 +512,36 @@ fn plan_dispatch_inner(input: &PlanInput, api: Option<&ApiOverride>) -> Dispatch
     } else {
         format!("lead-{run_id}")
     };
+    let is_sublead_request = input
+        .role
+        .as_deref()
+        .map(|r| r.trim().eq_ignore_ascii_case("sublead"))
+        .unwrap_or(false);
+    let caller_is_sublead = std::env::var("HERDR_ROLE")
+        .ok()
+        .map(|r| r.trim().eq_ignore_ascii_case("sublead"))
+        .unwrap_or(false);
+    let tree_active_coding = match input.tree_active_coding {
+        Some(v) => v,
+        None if !input.dry_run && caller_is_sublead => conn
+            .as_ref()
+            .map(count_tree_active_coding_forks)
+            .unwrap_or(0),
+        None => 0,
+    };
+    let max_subleads_env = std::env::var("DGATE_MAX_SUBLEADS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok());
+    let budget = evaluate_concurrency_budget(
+        is_sublead_request,
+        spec.requires_write,
+        &decision,
+        input.active_explore,
+        input.active_coding,
+        tree_active_coding,
+        input.active_subleads,
+        input.max_subleads.or(max_subleads_env),
+    );
     let mut deferred = false;
     let mut reason: Option<String> = None;
     if after_active {
@@ -436,12 +551,9 @@ fn plan_dispatch_inner(input: &PlanInput, api: Option<&ApiOverride>) -> Dispatch
             after_fork_id.unwrap_or_default(),
             after_status.as_deref().unwrap_or_default()
         ));
-    } else if decision == "sharp" && input.active_explore >= MAX_CONCURRENT_EXPLORE {
+    } else if budget.deferred {
         deferred = true;
-        reason = Some(format!("explore concurrency cap ({MAX_CONCURRENT_EXPLORE}) reached"));
-    } else if spec.requires_write && input.active_coding >= MAX_CONCURRENT_CODING {
-        deferred = true;
-        reason = Some(format!("coding concurrency cap ({MAX_CONCURRENT_CODING}) reached"));
+        reason = budget.reason;
     }
     // PR-A2 Cooperative Lease — 동일 repo_scope 점유 시 deferred(fail-open)
     if !deferred && !input.dry_run {
@@ -841,6 +953,10 @@ pub fn cmd_dispatch(args: &ParsedArgs, json: bool) -> CmdResult {
         idx: flags.get("idx").and_then(|v| v.parse().ok()).unwrap_or(0),
         active_explore: flags.get("active-explore").and_then(|v| v.parse().ok()).unwrap_or(0),
         active_coding: flags.get("active-coding").and_then(|v| v.parse().ok()).unwrap_or(0),
+        role: flags.get("role").cloned(),
+        active_subleads: flags.get("active-subleads").and_then(|v| v.parse().ok()).unwrap_or(0),
+        max_subleads: flags.get("max-subleads").and_then(|v| v.parse().ok()),
+        tree_active_coding: flags.get("tree-active-coding").and_then(|v| v.parse().ok()),
         roster_path: flags.get("roster").cloned(),
         brief_file: brief_file.clone(),
         after_fork: flags.get("after").cloned(),
@@ -1071,6 +1187,10 @@ blast_radius: 테스트 경로 전반
             idx: 0,
             active_explore: 0,
             active_coding: 0,
+            role: None,
+            active_subleads: 0,
+            max_subleads: None,
+            tree_active_coding: None,
             roster_path: None,
             brief_file: None,
             after_fork: after.map(str::to_string),
@@ -1305,5 +1425,26 @@ blast_radius: 테스트 경로 전반
         assert_eq!(row.conversation_id.as_deref(), Some("conv-ut"));
         drop(conn);
         std::fs::remove_dir_all(db_path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn concurrency_budget_enforces_sublead_cap_and_whole_tree_coding_cap() {
+        // sublead는 coder 슬롯이 꽉 차도 소모하지 않으며, sublead 상한(2~4 클램프)만 집행
+        let ok_sub = evaluate_concurrency_budget(true, true, "split", 0, 2, 2, 1, None);
+        assert!(!ok_sub.deferred);
+        assert_eq!(ok_sub.max_subleads, 2);
+
+        let cap_sub = evaluate_concurrency_budget(true, true, "split", 0, 0, 0, 2, None);
+        assert!(cap_sub.deferred);
+        assert!(cap_sub.reason.as_deref().unwrap_or("").contains("sublead concurrency cap (2)"));
+
+        let custom_cap = evaluate_concurrency_budget(true, true, "split", 0, 0, 0, 3, Some(9));
+        assert!(!custom_cap.deferred);
+        assert_eq!(custom_cap.max_subleads, 4);
+
+        // 일반 write 워커는 active_coding=0이어도 tree_active_coding>=2면 차단
+        let tree_cap = evaluate_concurrency_budget(false, true, "split", 0, 0, 2, 0, None);
+        assert!(tree_cap.deferred);
+        assert!(tree_cap.reason.as_deref().unwrap_or("").contains("coding concurrency cap (2)"));
     }
 }
