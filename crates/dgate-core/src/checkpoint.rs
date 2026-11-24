@@ -748,14 +748,26 @@ pub fn restore_worktree_checkpoint(checkpoint_dir: &Path, target_worktree_dir: &
     let worktree_path = dir.join("worktree.patch");
     let index_size = fs::metadata(&index_path).map(|m| m.len()).unwrap_or(0);
     let worktree_size = fs::metadata(&worktree_path).map(|m| m.len()).unwrap_or(0);
+    let to_git_path = |p: &Path| -> String {
+        let s = p.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{rest}")
+        } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+            rest.to_string()
+        } else {
+            s.into_owned()
+        }
+    };
     if index_size > 0 {
-        let r = git_run(&target, &["apply", "--index", "--binary", &index_path.to_string_lossy()]);
+        let arg = to_git_path(&index_path);
+        let r = git_run(&target, &["apply", "--index", "--binary", &arg]);
         if !r.ok {
             return RestoreCheckpointResult { restored: false, errors: vec![format!("git apply --index failed: {}", r.stderr)] };
         }
     }
     if worktree_size > 0 {
-        let r = git_run(&target, &["apply", "--binary", &worktree_path.to_string_lossy()]);
+        let arg = to_git_path(&worktree_path);
+        let r = git_run(&target, &["apply", "--binary", &arg]);
         if !r.ok {
             return RestoreCheckpointResult { restored: false, errors: vec![format!("git apply failed: {}", r.stderr)] };
         }
