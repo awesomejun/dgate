@@ -1447,7 +1447,8 @@ mod run_tests {
         let joined = cmds.iter().map(|c| c.join(" ")).collect::<Vec<_>>().join("\n");
         assert!(cmds.iter().any(|c| c[0] == "hc" && c[1] == "run"));
         assert!(joined.contains("dg wrap") || joined.contains("dg\" wrap") || joined.contains(" wrap "));
-        assert!(joined.contains("devin") && joined.contains("</dev/null"));
+        let stdin_redir = if cfg!(windows) { "< NUL" } else { "</dev/null" };
+        assert!(joined.contains("devin") && joined.contains(stdin_redir));
         assert!(cmds.iter().any(|c| c[0] == "hc" && c[1] == "wait"));
         assert!(cmds.iter().any(|c| c[0] == "git" && c.join(" ").contains("rev-parse")));
 
