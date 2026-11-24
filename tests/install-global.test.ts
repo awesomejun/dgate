@@ -43,6 +43,11 @@ test('install creates 4 executable wrappers; dg --help and dgate-tui --help exit
     }
     const content = fs.readFileSync(file, 'utf8');
     assert.ok(content.split('\n')[1] === '# dgate-global-wrapper', `${name} missing marker`);
+    // v2 계약 — release → debug → 빌드 안내 + exit 1 (node/src 폴백 없음)
+    assert.ok(content.includes(`target/release/${name}`), `${name} release check`);
+    assert.ok(content.includes(`target/debug/${name}`), `${name} debug check`);
+    assert.ok(content.includes('exit 1'), `${name} exit 1 on missing binary`);
+    assert.ok(!content.includes('src/'), `${name} must not reference src/ fallback`);
   }
   if (process.platform === 'win32') {
     // win32 호스트 — POSIX sh 래퍼는 실행 불가: 같은 인스톨러로 .cmd 래퍼를 만들어 그것을 실행 검증한다.
@@ -103,17 +108,17 @@ test('win32: install creates 4 .cmd wrappers (@echo off + rem marker, no posix f
     assert.equal(lines[1], 'rem dgate-global-wrapper', `${name}.cmd marker on line 2`);
     assert.ok(!fs.existsSync(path.join(bin, name)), `posix wrapper ${name} must not be created on win32`);
   }
-  // gui 래퍼 — .exe 우선 + cargo run --release 폴백 계약
-  const gui = fs.readFileSync(path.join(bin, 'dgate-gui.cmd'), 'utf8');
-  assert.ok(gui.includes('target\\release\\dgate-gui.exe'), 'gui release .exe check');
-  assert.ok(gui.includes('cargo run --release'), 'gui cargo fallback');
-  // dg/dgate — .exe + node 폴백 계약
-  const dgw = fs.readFileSync(path.join(bin, 'dg.cmd'), 'utf8');
-  assert.ok(dgw.includes('target\\release\\dg.exe'), 'dg release .exe check');
-  assert.ok(dgw.includes('dg.ts'), 'dg node fallback');
-  const dgatew = fs.readFileSync(path.join(bin, 'dgate.cmd'), 'utf8');
-  assert.ok(dgatew.includes('target\\release\\dgate.exe'), 'dgate release .exe check');
-  assert.ok(dgatew.includes('cli.ts'), 'dgate node fallback');
+  // v2 계약 — 모든 래퍼는 release .exe → debug .exe → 빌드 안내 + exit /b 1.
+  // Node v1(src/*)·cargo run 폴백은 존재하지 않는다.
+  for (const name of WRAPPER_NAMES) {
+    const w = fs.readFileSync(path.join(bin, `${name}.cmd`), 'utf8');
+    assert.ok(w.includes(`target\\release\\${name}.exe`), `${name} release .exe check`);
+    assert.ok(w.includes(`target\\debug\\${name}.exe`), `${name} debug .exe check`);
+    assert.ok(w.includes('cargo build --release --workspace'), `${name} build hint`);
+    assert.ok(w.includes('exit /b 1'), `${name} exit /b 1 on missing binary`);
+    assert.ok(!w.includes('.ts'), `${name} must not reference node .ts fallback`);
+    assert.ok(!w.includes('cargo run'), `${name} must not fall back to cargo run`);
+  }
   fs.rmSync(bin, { recursive: true, force: true });
 });
 

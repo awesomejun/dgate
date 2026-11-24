@@ -128,7 +128,6 @@ fn report_json(rep: &setup::EnvironmentReport) -> Value {
             "repoDir": h.repo_dir,
             "repoDirExists": h.repo_dir_exists,
             "hooksJson": h.hooks_json,
-            "hookSymlink": h.hook_symlink,
             "excluded": h.excluded,
         })),
     })
@@ -214,7 +213,7 @@ fn run_wizard(rep: &setup::EnvironmentReport, yes: bool, repo: Option<&str>) {
 
     // 3) 타깃 프로젝트 훅 설치(opt-in, --repo 지정 시)
     if let Some(repo_dir) = repo {
-        let do_hooks = yes || prompt_yes(&format!("{repo_dir}에 훅(hooks.json + dg-hook)을 설치할까요?"), false);
+        let do_hooks = yes || prompt_yes(&format!("{repo_dir}에 훅(hooks.json)을 설치할까요?"), false);
         if do_hooks {
             let res = setup::install_repo_hooks(std::path::Path::new(repo_dir), None);
             let mut out = std::io::stdout().lock();

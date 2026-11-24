@@ -1,5 +1,17 @@
 # v2 단일 SSOT 전환 계획 — Node v1 동결 및 Rust v2 이관 로드맵
 
+> **상태 (2026-11-24, `v1-cleanup` 브리프 완료)**: S1·S2·S3·S5·S6·S7·S8 전부 **완료**. Rust v2(`crates/dgate-core`·`dgate-cli`·`dgate-tui`·`dgate-gui`)가 유일한 구현체다.
+>
+> | 단계 | 상태 | 비고 |
+> | --- | --- | --- |
+> | S1 동결 | ✅ 완료 | `src/decision/` 12파일 + `scripts/dispatch.ts` 동결 후 S5에서 제거 |
+> | S2 훅 v2 우선 전환 | ✅ 완료 | S5에서 node 폴백까지 제거 — `dg hook --guard\|--collect` 직접 실행 |
+> | S3 설치 v2 전환 | ✅ 완료 | `setup.rs`가 hooks.json만 배포·점검 (dg-hook.ts 심볼릭 링크 폐지) |
+> | S5 v1 제거 | ✅ 완료 | `src/` 전체, `scripts/dispatch.ts`·`setup.ts`·`herdr-quad-launch.ts`, `.agents/hooks/dg-hook.ts` 제거 |
+> | S6 테스트 정리 | ✅ 완료 | v1 import `tests/*.test.ts` 28개 제거, `node_rust_compat.rs` 제거, `install-global.test.ts` v2 계약으로 갱신 |
+> | S7 패키징·래퍼 | ✅ 완료 | `install-global.ts` Rust 바이너리 전용 래퍼, `package.json` bin/scripts 정비 |
+> | S8 문서 정합 | ✅ 완료 | 본 문서 상태 기록, `skills/dgate/SKILL.md`·`README.md`·`.herdr/roles/`·`docs/` v1 참조 갱신 |
+
 Rust v2(`crates/dgate-core`, `crates/dgate-cli`, `crates/dgate-gui`)를 dgate의 단일 SSOT(Single Source of Truth)로 삼는 전환 계획이다. Node v1 구현은 단계별로 동결·폐기하며, 각 단계는 `door`(되돌림 가능성)와 `blast_radius`(영향 범위)를 명시해 무중단으로 진행한다.
 
 ## S1 — 즉시 동결 대상

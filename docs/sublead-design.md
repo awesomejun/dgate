@@ -55,7 +55,7 @@ dgate 스킬 문서에 "리드가 병목을 체감할 때 호출" 가이드 추�
 
 ## 단계
 
-1. 슬롯 신원(Node types.ts + Rust live_sync.rs, wrap 검증)
+1. 슬롯 신원(`crates/dgate-core/src/live_sync.rs`, wrap 검증)
 2. fork 스코핑·손자 attribution
 3. 권한(backprop 물리 검증·reap 스코핑·머지 금지)
 4. 동시성 예산 캡
