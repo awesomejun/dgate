@@ -11,6 +11,7 @@
 
 - 하위 워커 기동·메시지는 **오직 `hc` CLI**로만 한다: `hc run --bg --name <w>-<RUN_ID> --cwd <dir> -- <cmd>`, `hc send`, `hc wait`, `hc read`, `hc kill`, `hc rm`.
 - 내장 서브에이전트 도구 **`invoke_subagent`·`manage_subagents`·`swarm`은 사용 금지**다. `.agents/hooks.json`의 `dg hook --guard`가 `HERDR_DELEGATE_MODE=hc` 세션에서 이 호출을 물리적으로 deny한다.
+- **자동 병렬 기본값 (Default-On Parallel)**: 파일 수정 범위가 겹치지 않는 독립 작업이 2개 이상이면 사용자가 명시하지 않아도 **기본으로 격리 `git worktree` + 병렬 워커(`dg dispatch` + `dg wrap`/`dg pipeline run`)를 동시 기동**한다. 직렬 실행은 동일 파일 충돌이 확실하거나 선후 의존(`--after`)이 있는 경우에만 예외로 적용한다. 착수 직전 대상 경로/영역 목록이 2개 이상이면 `dg suggest-sublead --scopes <p1,p2,...>`로 비겹침 그룹 수와 추천 병렬 배치(워커/sublead 수·상한)를 확인한다(DB 없이 즉시 판정). 단, §7 동시성 상한(코딩 워커 2·탐색 스웜 4)은 그대로 유지한다.
 
 ## 3. `dg` 게이트 호출 규칙 (§2.1 — 매 도구 `dg` 금지)
 

@@ -165,6 +165,64 @@ pub fn evaluate_sublead_suggestion(signals: SubleadSuggestSignals) -> SubleadSug
     }
 }
 
+/// 사전(proactive) 분해 판정 — fork가 DB에 쌓이기 전, 착수 직전의 대상 경로/영역
+/// 목록만으로 병렬 분리 여부를 판정한다(DB 접근 0회, 완전 순수).
+///
+/// 비겹침 그룹이 2개 이상이면 `recommended = true`이고 추천 수는
+/// `min(max_subleads_cap, 그룹 수)`로 상한 클램프된다. 1개 이하이면
+/// `recommended = false`(단일 트랙 유지 권장)다.
+pub fn evaluate_proactive_scopes(
+    scopes: &[String],
+    max_subleads_cap: Option<i64>,
+) -> SubleadSuggestResult {
+    let disjoint_groups = group_disjoint_scopes(scopes);
+    let separation_score = match disjoint_groups.len() {
+        0 => 0,
+        1 => 20,
+        2 => 75,
+        _ => 100,
+    };
+    let max_subleads_cap_i = clamp_cap(max_subleads_cap);
+    let recommended = disjoint_groups.len() >= 2;
+    let suggested_subleads = if recommended {
+        (disjoint_groups.len() as i64).min(max_subleads_cap_i)
+    } else {
+        0
+    };
+
+    let summary = if recommended {
+        format!(
+            "사전 분해 판정: 비겹침 영역 {}개 → 병렬 워커/sublead {}개 분리 권장 (상한 {}) — 영역: {}",
+            disjoint_groups.len(),
+            suggested_subleads,
+            max_subleads_cap_i,
+            disjoint_groups.join(", ")
+        )
+    } else {
+        format!(
+            "사전 분해 판정: 비겹침 영역 {}개 — 단일 트랙 유지 권장",
+            disjoint_groups.len()
+        )
+    };
+
+    SubleadSuggestResult {
+        recommended,
+        load_score: 0,
+        separation_score,
+        task_scope_score: 0,
+        overall_score: separation_score,
+        disjoint_groups,
+        suggested_subleads,
+        max_subleads_cap: max_subleads_cap_i,
+        summary,
+        signals: SubleadSuggestSignals {
+            active_scopes: scopes.to_vec(),
+            max_subleads_cap,
+            ..Default::default()
+        },
+    }
+}
+
 /// decision.db에서 3축 신호를 읽기전용 집계한다.
 pub fn collect_sublead_signals_from_db(
     conn: &Connection,
@@ -360,5 +418,38 @@ mod tests {
         assert!(multi.recommended);
         assert_eq!(multi.suggested_subleads, 3);
         assert_eq!(multi.disjoint_groups.len(), 3);
+    }
+
+    #[test]
+    fn evaluate_proactive_scopes_rejects_overlapping_only() {
+        let r = evaluate_proactive_scopes(
+            &["crates/a".to_string(), "crates/a/sub".to_string()],
+            None,
+        );
+        assert!(!r.recommended);
+        assert_eq!(r.suggested_subleads, 0);
+        assert_eq!(r.disjoint_groups.len(), 1);
+        assert!(r.summary.contains("단일 트랙 유지 권장"));
+    }
+
+    #[test]
+    fn evaluate_proactive_scopes_recommends_two_disjoint() {
+        let r = evaluate_proactive_scopes(
+            &["crates/core".to_string(), "crates/tui".to_string()],
+            None,
+        );
+        assert!(r.recommended);
+        assert_eq!(r.suggested_subleads, 2);
+        assert_eq!(r.disjoint_groups.len(), 2);
+    }
+
+    #[test]
+    fn evaluate_proactive_scopes_clamps_to_max_cap() {
+        let scopes: Vec<String> = (1..=5).map(|i| format!("crates/m{i}")).collect();
+        let r = evaluate_proactive_scopes(&scopes, Some(3));
+        assert!(r.recommended);
+        assert_eq!(r.disjoint_groups.len(), 5);
+        assert_eq!(r.suggested_subleads, 3);
+        assert_eq!(r.max_subleads_cap, 3);
     }
 }

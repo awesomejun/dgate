@@ -1,6 +1,7 @@
-<!-- dgate:begin v=2026-11-22 — dg setup가 관리하는 블록. 직접 수정 말 것, 갱신은 `dg setup`. -->
+<!-- dgate:begin v=2026-11-24 — dg setup가 관리하는 블록. 직접 수정 말 것, 갱신은 `dg setup`. -->
 ## dgate 오케스트레이션 계약 (요약)
 
+- **자동 병렬 기본값**: 겹치지 않는 독립 작업이 2개 이상이면 명시 요청 없이 격리 `git worktree` + 병렬 워커(`dg dispatch` + `dg wrap`/`dg pipeline run`)를 기본 동시 기동한다(직렬은 동일 파일 충돌·`--after` 의존만 예외). 착수 전 `dg suggest-sublead --scopes <p1,p2,...>`로 비겹침 그룹 수와 추천 병렬 배치를 확인.
 - **워커 실행**: `dg wrap --label <역할>-<주제> --fork <게이트발급>` 후 `hc run --bg`로 띄운다. `nohup`/`disown` 분리 금지, wrap 없는 직접 CLI 실행 금지(stall 감시·텔레메트리 누락).
 - **배차**: strict dispatch 모드에서 delegate_swarm wrap은 `dg dispatch`/`dg route`가 발급한 `--fork`로만 실행된다(게이트 자동 판정 경유).
 - **대기·보고**: 워커 대기는 `hc wait`(sleep·폴링 금지), 완료 보고는 `dg send $HC_TERMINAL_ID <내용>`(전달 확인·재전송 내장, 미확인 exit 1).

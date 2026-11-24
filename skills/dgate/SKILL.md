@@ -89,6 +89,8 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
 
 ## 3. 표준 실행 흐름 (5단계) — 에이전트 내부 실행 레퍼런스
 
+**자동 병렬 기본값 (Default-On Parallel)**: 작업 착수 시 파일 수정 범위가 겹치지 않는 독립 작업이 **2개 이상**이면 사용자가 "병렬로 해줘"라고 명시하지 않아도 **기본값으로 격리 `git worktree` + 병렬 워커(`dg dispatch` + `dg wrap`/`dg pipeline run`)를 동시 기동**한다. 직렬 실행은 동일 파일 충돌이 확실하거나 선후 의존(`--after`)이 있는 경우에만 예외로 적용한다. 착수 직전 대상 경로/영역 목록이 2개 이상이면 `dg suggest-sublead --scopes <path1,path2,...>`를 호출해 비겹침 그룹 수와 추천 병렬 배치(워커/sublead 수·상한)를 확인한다(DB 없이 즉시 판정).
+
 1. **착수 전 브리핑 (`mistology`)** *(선택 — 설치된 경우에만 실행, 없으면 스킵)* — 코드 수정/디버깅 전, 해당 저장소에 `mistology`가 있으면 1회 조회:
    ```bash
    mistology search -b "<대상 파일·심볼·작업 의도>"
@@ -121,7 +123,7 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
    - **대기·보고**: 워커 대기는 `hc wait`(sleep·폴링 금지), 워커 지시문에는 완료 보고 `hc send $HC_TERMINAL_ID`를 명시한다.
    - **장기 자율 실행**: 무인 루프는 done-means 술어·탈출구·결정 로그를 갖춘다 — `docs/autonomous-run-contract.md` 계약 따름.
    - **검증 역귀속**: 독립 검증 판정은 구조화 verdict 파일(`.herdr/verify/<fork_id>-verdict.json`)로 남기고 `dg backprop --verdict-file <path>`로 원본 fork에 반영한다(pass/rework/fail/human) — 검증 결과가 다음 배차 통계에 귀속된다. **`pass`도 반드시 적용한다**: PASS를 파일로만 남기면 fork가 `closed_by='verifier'`로 닫히지 않고 `neon_verdict`도 NULL이라 교차검증이 실제로 일어났는지 DB로 셀 수 없다.
-   - **Sublead 분리 제안**: 리드가 다중 트랙 조정 병목(재작업 반복·verdict 처리 지연·비겹침 영역 2개 이상)을 체감할 때 `dg suggest-sublead --project <TARGET_REPO>`로 3축 DB 신호(부하·영역 분리·작업 범위, LLM 호출 0) 기반 sublead 분리 여부·추천 수·상한을 판단한다. sublead 세션(`HERDR_ROLE=sublead`)은 머지·main 푸시가 기본 차단되며 완료 보고는 `READY_PR` 핸드오프로 최상위 리드에 전달한다.
+   - **Sublead 분리 제안**: 리드가 다중 트랙 조정 병목(재작업 반복·verdict 처리 지연·비겹침 영역 2개 이상)을 체감할 때 `dg suggest-sublead --project <TARGET_REPO>`로 3축 DB 신호(부하·영역 분리·작업 범위, LLM 호출 0) 기반 sublead 분리 여부·추천 수·상한을 판단한다. 착수 전 사전 판정은 `--scopes <p1,p2,...>`로 DB 없이 즉시 확인한다. sublead 세션(`HERDR_ROLE=sublead`)은 머지·main 푸시가 기본 차단되며 완료 보고는 `READY_PR` 핸드오프로 최상위 리드에 전달한다.
    - **검증 pi 워커 격리**: `pi --no-session` 검증 워커는 `PI_CODING_AGENT_DIR=~/.pi/agent-verify` 환경으로 실행한다(최소 확장 — dg-collect만 포함, SoL-Pi 등 세션 의존 확장 충돌 회피).
    - **자문 3관문 (Layer 4)**: ① 계획 확정 전(코더 투입 직전) ② 같은 오류 2회째(3회 재시도 전 — 연속 실패 split 강제 신호와 동일 트리거) ③ 최종 머지 전(완료 전) — 3곳에서만 자문 세션을 온디맨드로 띄운다. 호출: `hc run --bg --name advisor-g<N>-<주제>` + 로스터 advisor 모델, 자료만 제시하고 판정 마커 단일 응답(`[advisor:pass]` / `[advisor:challenge:<이유>]`), 판정 후 즉시 `hc kill; hc rm` 정리. 계획 관문 pass 전 코더 투입 금지, 완료 관문 pass 없이는 최종 머지 금지(pass는 `.herdr/verify/`에 기록해 검증 역귀속과 같은 흐름으로 남긴다). **완료 관문 물리 집행**: 리드 세션 생성 명령에 운영자가 직접 `HERDR_MERGE_GATE=1`을 박는다 — `hc run --bg --name lead-<미션> --cwd <레포> -- env HERDR_MERGE_GATE=1 <리드CLI> …`(리드 자발 부착 금지 — 소프트 한계). 그러면 가드가 `gh pr merge`·main/master 직접 push를 pass 없으면 차단한다(pass 파일명 `advisor-pass*`, 유효창 30분).
     - **워커 위임 원칙 (서브에이전트 금지)**: dgate로 진행하는 하위 작업(탐색·코딩·검증·자문)은 에이전트 내장 서브에이전트(`invoke_subagent` 등)로 위임하지 말고, 반드시 `dg wrap`으로 감싼 뒤 `hc run --bg`로 띄운 워커로 위임한다 — `dg wrap` 없이 CLI를 직접 `hc run`하는 것은 금지(stall 감시·텔레메트리 누락).

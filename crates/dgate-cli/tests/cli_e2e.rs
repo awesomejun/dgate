@@ -1044,3 +1044,38 @@ fn test_10_merge_train_guard_and_dry_run() {
 
     std::fs::remove_dir_all(&base).unwrap();
 }
+
+#[test]
+fn test_11_suggest_sublead_proactive_scopes() {
+    // --scopes 사전 분해: DB 없이 순수 판정 — 비겹침 2영역 → 병렬 2개 추천
+    let r = dg(
+        &["suggest-sublead", "--scopes", "crates/a,crates/b", "--json"],
+        &[],
+    );
+    assert_eq!(r.status, 0, "--scopes → exit 0 (stderr={})", r.stderr);
+    let v: Value = serde_json::from_str(r.stdout.trim().lines().last().unwrap()).unwrap();
+    assert_eq!(v["recommended"], true);
+    assert_eq!(v["suggested_subleads"], 2);
+    assert_eq!(v["disjoint_groups"].as_array().unwrap().len(), 2);
+
+    // 겹치는 경로만 → 단일 트랙 유지 권장
+    let r = dg(
+        &["suggest-sublead", "--scopes", "crates/a,crates/a/sub", "--json"],
+        &[],
+    );
+    assert_eq!(r.status, 0, "겹침 → exit 0 (stderr={})", r.stderr);
+    let v: Value = serde_json::from_str(r.stdout.trim().lines().last().unwrap()).unwrap();
+    assert_eq!(v["recommended"], false);
+    assert_eq!(v["suggested_subleads"], 0);
+
+    // --scopes 미지정 시 기존 DB 사후 집계 경로 유지(회귀 방지)
+    let base = temp_base("suggest-db");
+    let db = base.join("s.db");
+    let dbs = db.display().to_string();
+    let envs = [("DGATE_DB_PATH", dbs.as_str())];
+    let r = dg(&["suggest-sublead", "--json"], &envs);
+    assert_eq!(r.status, 0, "DB 경로 → exit 0 (stderr={})", r.stderr);
+    let v: Value = serde_json::from_str(r.stdout.trim().lines().last().unwrap()).unwrap();
+    assert_eq!(v["recommended"], false, "빈 DB → 추천 없음");
+    std::fs::remove_dir_all(&base).unwrap();
+}
