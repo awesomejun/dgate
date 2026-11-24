@@ -18,6 +18,7 @@
 - 입력은 `.herdr/verify/<fork_id>-brief.md`다 — 원래 요구사항, **`fork_id`**, diff 경로, 테스트 명령과 실행 결과가 담겨 있다. 파일명의 `fork_id`와 본문 기재 `fork_id`가 일치하는지 먼저 확인한다.
 - 판정 응답은 **첫머리가 반드시 `[PASS]` 또는 `[FAIL]`**이어야 하고, 본문에 **대상 `fork_id`를 명시**한다. 이 텍스트 판정은 요약 신호다 — 기계 판독 SSOT는 아래 §4의 구조화 verdict JSON이다.
 - `[FAIL]` 판정 근거에는 위반 기준·증거(파일:행, 실패 로그)를 붙인다. 모호하면 `[FAIL]`로 보수 판정한다.
+- 브리프 템플릿 경로: `docs/verifier-brief-template.md` — `dg dispatch --brief-file`가 기계 검증하는 표준 형식(`## Standards`·`## Spec`·`## Merge Danger` + `door:`·`blast_radius:`)이다.
 
 ## 4. 구조화 Verdict 산출 계약 (`.herdr/verify/<fork_id>-verdict.json`)
 
@@ -34,9 +35,11 @@
       { "severity": "P0 | P1 | P2 | info", "title": "제목 (1~500자)", "evidence": "파일:행 또는 실행 출력" }
     ],
     "checked_commands": ["node --test tests/"],
-    "artifacts": [".herdr/verify/fk_0123456789ab-brief.md"]
+    "artifacts": [".herdr/verify/fk_0123456789ab-brief.md"],
+    "merge_danger": { "door": "one-way | two-way", "blast_radius": "합류 위험 영향 요약 (1~500자)" }
   }
   ```
+- `merge_danger`(선택 top-level 필드) — 합류 위험 표기(mattpocock/skills `pr` 어휘): `door`는 `one-way`(되돌리기 어려운 변경 — 파괴적 마이그레이션·공개 API 제거 등) 또는 `two-way`(되돌리기 저렴한 변경), `blast_radius`는 변경이 틀렸을 때 깨질 수 있는 것(영향 반경 요약, 1~500자). 값이 있으면 스키마 검증돼 backprop 출력 JSON에 그대로 에코되고, strict dispatch 모드에서는 필수다(누락 시 exit 2 거부).
 - **모순 판정 불변식** — 위반 시 리드의 fail-closed 검증이 `effectiveDecision:'human'`으로 강등하므로 처음부터 지킨다:
   - `findings`에 `P0`/`P1`이 1건이라도 있으면 `decision`을 `pass`로 남기지 않는다(`P2`/`info`만 pass와 공존).
   - `fail`/`rework` 판정은 **비공백 `evidence`를 가진 finding을 1건 이상** 반드시 포함한다(근거 없는 FAIL 금지).

@@ -14,7 +14,7 @@ use rusqlite::{Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::db::{has_column, has_table, GLOBAL_PROJECT_ID};
+use crate::db::{has_column, has_table, open_db_safe, OpenDbOptions, GLOBAL_PROJECT_ID};
 use crate::redact::redact_secrets;
 use crate::roster::CostStatus;
 use crate::verdict::{VerdictDecision, VerdictValidationResult};
@@ -598,6 +598,38 @@ pub fn get_fork(db: &Connection, fork_id: &str) -> Result<Option<ForkRow>, Strin
 /// fork의 현재 gen/attempt (컬럼 우선, v1 메타 폴백) — 행이 없으면 None
 pub fn get_fork_gen_attempt(db: &Connection, fork_id: &str) -> Result<Option<(i64, i64)>, String> {
     Ok(query_fork(db, fork_id)?.map(|r| gen_attempt_of(&r)))
+}
+
+/// `--after <fork_id>` 조회 결과 — `exists:false`는 DB·테이블 부재·조회 실패 전부 포함(fail-closed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForkStatusLookup {
+    pub exists: bool,
+    pub status: Option<String>,
+}
+
+/// `--after <fork_id>` 종속 검사용 읽기 전용 조회(Change ③ ready-frontier) — 디스패처가
+/// 쓰는 것과 같은 db_path를 받아 fork 행 1건의 `status`만 읽는다. `:memory:` 리허설 DB에는
+/// fork 행이 없으므로 열지 않고 미발견을 반환한다(무오염 유지). DB 부재·열기 실패·조회
+/// 오류는 전부 `exists:false`로 통일해 호출자가 사용법 오류(exit 2)로 거부하게 한다.
+/// 활성(open·waiting_human) 여부 판정은 `is_fork_live_status`가 담당한다.
+pub fn read_fork_status(db_path: &str, fork_id: &str) -> ForkStatusLookup {
+    let missing = ForkStatusLookup { exists: false, status: None };
+    if db_path == ":memory:" {
+        return missing;
+    }
+    let Some(db) = open_db_safe(
+        Some(db_path),
+        OpenDbOptions { read_only: true, busy_timeout_ms: Some(1000) },
+    ) else {
+        return missing;
+    };
+    let status = db.query_row("SELECT status FROM forks WHERE fork_id = ?1", [fork_id], |r| {
+        r.get::<_, String>(0)
+    });
+    match status {
+        Ok(s) => ForkStatusLookup { exists: true, status: Some(s) },
+        Err(_) => missing,
+    }
 }
 
 // ---------------------------------------------------------------------------

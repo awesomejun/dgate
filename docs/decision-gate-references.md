@@ -31,3 +31,9 @@ dgate 게이트 설계(Neon §5)와 `DECISION_API` 평가에 가져올 것만 �
 ## 미채택
 - aptly의 내장 서브에이전트 후킹: dgate 계약(내장 서브에이전트 금지, 외부 워커만)과 충돌.
 - CAO 전면 도입: 결정 계층·로스터·TUI가 이중화됨. 참조 구현으로만 흡수.
+
+## mattpocock/skills · sdd-tool · Spec Kit 참조 (2026-11-24, 읽기 전용 조사)
+- mattpocock/skills(abeeaf9): `code-review` 두 축(Standards/Spec)·`triage/AGENT-BRIEF.md` → 검증자 브리프 템플릿(`docs/verifier-brief-template.md`) + `dg dispatch --brief-file` 형식 검증(strict에서 필수)으로 흡수. `pr`의 Merge Danger(일방향/양방향 문·폭발 반경) → verdict `merge_danger` 필드(strict 필수)로 흡수. `to-tickets`·`implement-spec`의 blocking edges·ready frontier → `dg dispatch --after <fork_id>`로 흡수.
+- sdd-tool(a3e3788): Small/Medium/Large 산출물 깊이 분류·`@spec` 역추적은 트랙 문서 작성 규칙 후보로만 참조(미구현). Pi 미지원·저작 계층만이라 통째 도입 안 함.
+- Spec Kit(a55782f): 고정 깊이 파이프라인이라 통째 도입 안 함(사용자 원칙: 모델·업무 수준에 맞춘 분해). 어휘만 참조.
+- 미채택: `to-spec`/`grilling`/`wayfinder`(경계 ① todo-flow·계획), `implement`/`tdd`(superpowers 중복), `misc/git-guardrails`(frozen 전체 push 차단 — dgate 가드가 더 정교), `software-factory`(어휘만).

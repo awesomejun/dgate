@@ -70,6 +70,37 @@ export function forkHasDispatchProvenance(db: DatabaseSync, forkId: string): boo
   }
 }
 
+/** `--after <fork_id>` 조회 결과 — `exists:false`면 DB·테이블 부재·조회 실�장 포함(fail-closed). */
+export interface ForkStatusLookup {
+  exists: boolean;
+  status: string | null;
+}
+
+/**
+ * `--after <fork_id>` 종속 검사용 읽기 전용 조회(Change ③ ready-frontier) — 디스패처가
+ * 쓰는 것과 같은 dbPath 해석 결과를 받아 fork 행 1건의 `status`만 읽는다.
+ * `:memory:` 리허설 DB에는 fork 행이 없으므로 열지 않고 미발견을 반환한다(무오염 유지).
+ * DB 부재·열기 실패·조회 오류는 전부 `exists:false`로 통일해 호출자가 exit 2로 거부하게 한다.
+ * 활성(open·waiting_human) 여부 판정은 `isForkLiveStatus`가 담당한다.
+ */
+export function readForkStatus(dbPath: string, forkId: string): ForkStatusLookup {
+  if (dbPath === ':memory:') return { exists: false, status: null };
+  const db = openDbSafe(dbPath, { readOnly: true, busyTimeoutMs: 1000 });
+  if (!db) return { exists: false, status: null };
+  try {
+    const row = db.prepare('SELECT status FROM forks WHERE fork_id = ?').get(forkId) as { status: string } | undefined;
+    return row ? { exists: true, status: row.status } : { exists: false, status: null };
+  } catch {
+    return { exists: false, status: null };
+  } finally {
+    try {
+      db.close();
+    } catch {
+      /* 무시 */
+    }
+  }
+}
+
 // ---------- 노력(effort) 권고 — CAO effort.route 흡수(자문 필드, 판정 무관) ----------
 
 export const EFFORT_HINT_MIN_SAMPLES = 5;
@@ -83,7 +114,7 @@ export function effortHintFromPosterior(
   if (p >= 0.6) return { effort: 'medium', basis: 'measured' };
   return { effort: 'high', basis: 'measured' };
 }
-import { GLOBAL_PROJECT_ID, hasColumn, hasTable } from './db.ts';
+import { GLOBAL_PROJECT_ID, hasColumn, hasTable, openDbSafe } from './db.ts';
 import { redactSecrets } from './redact.ts';
 import type { VerdictValidationResult } from './verdict.ts';
 

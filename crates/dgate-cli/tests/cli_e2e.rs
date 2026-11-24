@@ -359,7 +359,9 @@ fn test_02_backprop_verdict_pipeline_fail_closed() {
     let repo = init_repo(&base);
     let db = base.join("v.db");
     let dbs = db.display().to_string();
-    let envs = [("DGATE_DB_PATH", dbs.as_str())];
+    // XDG_STATE_HOME 격리 — 머신 전역 dispatch-mode(strict 포함)와 무관하게 off로 동작.
+    let xstate_off = base.join("xstate-off").display().to_string();
+    let envs = [("DGATE_DB_PATH", dbs.as_str()), ("XDG_STATE_HOME", xstate_off.as_str())];
     let repo_s = repo.display().to_string();
 
     let mk_verdict = |fork: &str, decision: &str, findings: Value, path: &str| {
@@ -436,6 +438,66 @@ fn test_02_backprop_verdict_pipeline_fail_closed() {
     // (f) 수동 backprop — backprop_fail 상태 재역귀속 거부(f1은 ok라 재개방 허용됨)
     let r = dg(&["backprop", "--fork", &f4, "--penalty", "2.0", "--json"], &envs);
     assert_eq!(r.status, 2, "backprop_fail 상태 재역귀속 → UsageError 2");
+
+    // (g) merge_danger 포함 pass verdict → exit 0 + 출력 JSON 에코(Change②)
+    let g5 = dg_json(&["gate", "--route", "file_select", "--tool-class", "file_edit", "--project", &repo_s], &envs);
+    let f5 = g5["fork_id"].as_str().unwrap().to_string();
+    let v5 = serde_json::json!({
+        "schema_version": 1,
+        "fork_id": f5,
+        "decision": "pass",
+        "reason": "e2e verdict",
+        "findings": [],
+        "merge_danger": { "door": "two-way", "blast_radius": "verdict.rs 검증 경로" },
+    });
+    let p5 = base.join("v-md.json");
+    std::fs::write(&p5, v5.to_string()).unwrap();
+    let r = dg(&["backprop", "--fork", &f5, "--verdict-file", &p5.display().to_string(), "--json"], &envs);
+    assert_eq!(r.status, 0, "merge_danger verdict → exit 0 (stderr={})", r.stderr);
+    let parsed: Value = serde_json::from_str(r.stdout.trim().lines().last().unwrap()).unwrap();
+    assert_eq!(parsed["merge_danger"]["door"], "two-way");
+    assert_eq!(parsed["merge_danger"]["blast_radius"], "verdict.rs 검증 경로");
+
+    // (h) strict 모드 — merge_danger 없으면 UsageError exit 2, 있으면 exit 0
+    let xstrict = base.join("xstate-strict");
+    std::fs::create_dir_all(xstrict.join("dgate")).unwrap();
+    std::fs::write(xstrict.join("dgate").join("dispatch-mode"), "strict\n").unwrap();
+    let xstrict_s = xstrict.display().to_string();
+    let strict_envs = [("DGATE_DB_PATH", dbs.as_str()), ("XDG_STATE_HOME", xstrict_s.as_str())];
+    let g6 = dg_json(&["gate", "--route", "file_select", "--tool-class", "file_edit", "--project", &repo_s], &strict_envs);
+    let f6 = g6["fork_id"].as_str().unwrap().to_string();
+    mk_verdict(&f6, "pass", serde_json::json!([]), &base.join("v-nomd.json").display().to_string());
+    let r = dg(
+        &["backprop", "--fork", &f6, "--verdict-file", &base.join("v-nomd.json").display().to_string(), "--json"],
+        &strict_envs,
+    );
+    assert_eq!(r.status, 2, "strict + merge_danger 부재 → UsageError 2");
+    assert!(r.stderr.contains("merge_danger"), "거부 사유에 merge_danger 언급: {}", r.stderr);
+    let p7 = base.join("v-md-strict.json");
+    std::fs::write(&p7, serde_json::json!({
+        "schema_version": 1,
+        "fork_id": f6,
+        "decision": "pass",
+        "reason": "e2e verdict",
+        "findings": [],
+        "merge_danger": { "door": "one-way", "blast_radius": "CLI backprop 게이트" },
+    }).to_string()).unwrap();
+    let r = dg(&["backprop", "--fork", &f6, "--verdict-file", &p7.display().to_string(), "--json"], &strict_envs);
+    assert_eq!(r.status, 0, "strict + merge_danger 있음 → exit 0 (stderr={})", r.stderr);
+    let parsed: Value = serde_json::from_str(r.stdout.trim().lines().last().unwrap()).unwrap();
+    assert_eq!(parsed["merge_danger"]["door"], "one-way");
+
+    // (i) strict 모드 + 무효 verdict(모순) → 게이트가 아닌 기존 fail-closed exit 3
+    let p8 = base.join("v-strict-bad.json");
+    std::fs::write(&p8, serde_json::json!({
+        "schema_version": 1,
+        "fork_id": f6,
+        "decision": "pass",
+        "reason": "e2e verdict",
+        "findings": [{ "severity": "P0", "title": "broken", "evidence": "hard fail" }],
+    }).to_string()).unwrap();
+    let r = dg(&["backprop", "--fork", &f6, "--verdict-file", &p8.display().to_string(), "--json"], &strict_envs);
+    assert_eq!(r.status, 3, "strict라도 무효 verdict는 escalate_human exit 3");
 
     std::fs::remove_dir_all(&base).unwrap();
 }
@@ -648,6 +710,121 @@ fn test_07_theta_and_exit_code_matrix() {
     // 무인자 exit 2 + help
     let out = Command::new(DG).output().unwrap();
     assert_eq!(out.status.code(), Some(2));
+
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn test_08_dispatch_brief_after_gates() {
+    let base = temp_base("dispatch");
+    let repo = init_repo(&base);
+    let db = base.join("d.db");
+    let dbs = db.display().to_string();
+    let repo_s = repo.display().to_string();
+    // XDG_STATE_HOME 격리 — 머신 전역 dispatch-mode(strict 포함)와 무관하게 off로 동작
+    let xstate_off = base.join("xstate-off").display().to_string();
+    let xstrict = base.join("xstate-strict");
+    std::fs::create_dir_all(xstrict.join("dgate")).unwrap();
+    std::fs::write(xstrict.join("dgate").join("dispatch-mode"), "strict\n").unwrap();
+    let xstrict_s = xstrict.display().to_string();
+    let off_envs = [("DGATE_DB_PATH", dbs.as_str()), ("XDG_STATE_HOME", xstate_off.as_str())];
+    let strict_envs = [("DGATE_DB_PATH", dbs.as_str()), ("XDG_STATE_HOME", xstrict_s.as_str())];
+
+    let valid_brief = base.join("brief-ok.md");
+    std::fs::write(
+        &valid_brief,
+        "# Verifier Brief\n\n## Standards\n\n- 없음\n\n## Spec\n\n- 충족\n\n## Merge Danger\n\ndoor: two-way\nblast_radius: e2e 경로\n",
+    )
+    .unwrap();
+    let valid_s = valid_brief.display().to_string();
+    let bad_brief = base.join("brief-bad.md");
+    std::fs::write(&bad_brief, "no headings here\n").unwrap();
+    let bad_s = bad_brief.display().to_string();
+
+    // (a) off + 브리프 부재 → 정상 진행(dry-run 리허설)
+    let r = dg(&["dispatch", "--task-kind", "explore_read", "--repo", &repo_s, "--dry-run", "--json"], &off_envs);
+    assert_eq!(r.status, 0, "off 부재 → exit 0 (stderr={})", r.stderr);
+    let plan: Value = serde_json::from_str(r.stdout.trim().lines().last().unwrap()).unwrap();
+    assert_eq!(plan["ok"], true);
+
+    // (b) strict + 브리프 부재 → UsageError exit 2(fail-closed)
+    let r = dg(&["dispatch", "--task-kind", "explore_read", "--repo", &repo_s, "--dry-run"], &strict_envs);
+    assert_eq!(r.status, 2, "strict 부재 → exit 2");
+    assert!(r.stderr.contains("strict 모드: --brief-file 필수"), "사유: {}", r.stderr);
+
+    // (b2) strict + --help → 게이트 이전에 도움말 exit 0 (TS와 동일 순서)
+    let r = dg(&["dispatch", "--help"], &strict_envs);
+    assert_eq!(r.status, 0, "strict + --help → exit 0 (stderr={})", r.stderr);
+    assert!(r.stdout.contains("--brief-file"), "도움말에 신규 플래그 포함: {}", r.stdout);
+
+    // (c) 무효 브리프 → off·strict 양 모드 exit 2 + 위반 나열
+    for envs in [&off_envs, &strict_envs] {
+        let r = dg(&["dispatch", "--task-kind", "explore_read", "--repo", &repo_s, "--dry-run", "--brief-file", &bad_s], envs);
+        assert_eq!(r.status, 2, "무효 브리프 → exit 2 (stderr={})", r.stderr);
+        assert!(r.stderr.contains("## Standards 헤딩 없음"), "위반 나열: {}", r.stderr);
+        assert!(r.stderr.contains("blast_radius"), "위반 나열: {}", r.stderr);
+    }
+    // 읽기 불가(부재 파일)도 exit 2
+    let r = dg(
+        &["dispatch", "--task-kind", "explore_read", "--repo", &repo_s, "--dry-run", "--brief-file", &base.join("nope.md").display().to_string()],
+        &off_envs,
+    );
+    assert_eq!(r.status, 2);
+    assert!(r.stderr.contains("읽기 실패"), "사유: {}", r.stderr);
+
+    // (d) 유효 브리프 e2e — exit 0 + 워커 프롬프트에 브리프 경로 문장 주입
+    let r = dg(
+        &["dispatch", "--task-kind", "explore_read", "--repo", &repo_s, "--dry-run", "--json", "--brief-file", &valid_s],
+        &strict_envs,
+    );
+    assert_eq!(r.status, 0, "strict 유효 브리프 → exit 0 (stderr={})", r.stderr);
+    let plan: Value = serde_json::from_str(r.stdout.trim().lines().last().unwrap()).unwrap();
+    assert_eq!(plan["decision"], "sharp");
+    let hc = plan["hcCommands"][0].as_array().unwrap();
+    let prompt = hc.last().unwrap().as_str().unwrap();
+    assert!(
+        prompt.ends_with(&format!(
+            "브리프 파일을 먼저 읽고 두 축(Standards/Spec)과 Merge Danger을 따르라: {valid_s}"
+        )),
+        "프롬프트 주입: {prompt}"
+    );
+    let hc_text: Vec<String> = hc.iter().map(|v| v.as_str().unwrap_or_default().to_string()).collect();
+    assert!(!hc_text.join(" ").contains("{brief}"), "플레이스홀더 잔존 금지");
+
+    // (e) --after 미발견 → exit 2
+    let r = dg(&["dispatch", "--task-kind", "single_edit", "--repo", &repo_s, "--db", &dbs, "--after", "fk_nope", "--json"], &off_envs);
+    assert_eq!(r.status, 2, "--after 미발견 → exit 2");
+    let plan: Value = serde_json::from_str(r.stdout.trim().lines().last().unwrap()).unwrap();
+    assert_eq!(plan["ok"], false);
+    assert_eq!(plan["reason"], "--after fork not found: fk_nope");
+
+    // (f) 살아 있는 fork → deferred, fork 미발행·커맨드 0
+    let g = dg_json(&["gate", "--route", "file_select", "--tool-class", "file_edit", "--project", &repo_s], &off_envs);
+    let fk = g["fork_id"].as_str().unwrap().to_string();
+    let r = dg(&["dispatch", "--task-kind", "single_edit", "--repo", &repo_s, "--db", &dbs, "--after", &fk, "--json"], &off_envs);
+    assert_eq!(r.status, 0, "active deferred → exit 0 (stderr={})", r.stderr);
+    let plan: Value = serde_json::from_str(r.stdout.trim().lines().last().unwrap()).unwrap();
+    assert_eq!(plan["ok"], true);
+    assert_eq!(plan["deferred"], true);
+    assert_eq!(plan["reason"], format!("after_fork {fk} not closed (status=open)"));
+    assert_eq!(plan["hcCommands"].as_array().map(Vec::len), Some(0));
+
+    // (g) 닫힌 fork → 정상 발행 + metadata.after_fork 스탬프
+    dg(&["close", "--fork", &fk, "--outcome", "ok", "--by", "dispatcher"], &off_envs);
+    let r = dg(&["dispatch", "--task-kind", "single_edit", "--repo", &repo_s, "--db", &dbs, "--after", &fk, "--json"], &off_envs);
+    assert_eq!(r.status, 0, "terminal → exit 0 (stderr={})", r.stderr);
+    let plan: Value = serde_json::from_str(r.stdout.trim().lines().last().unwrap()).unwrap();
+    assert_eq!(plan["ok"], true);
+    assert_eq!(plan["deferred"], false);
+    assert_eq!(plan["hcCommands"].as_array().map(Vec::len), Some(1));
+    let issued = plan["forkId"].as_str().unwrap();
+    let conn = rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let meta: Option<String> = conn
+        .query_row("SELECT metadata_json FROM forks WHERE fork_id = ?1", [issued], |row| row.get(0))
+        .unwrap();
+    let meta: Value = serde_json::from_str(meta.as_deref().unwrap()).unwrap();
+    assert_eq!(meta["after_fork"].as_str(), Some(fk.as_str()));
+    assert_eq!(meta["dispatch"].as_bool(), Some(true));
 
     std::fs::remove_dir_all(&base).unwrap();
 }

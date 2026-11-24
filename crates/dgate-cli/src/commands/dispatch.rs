@@ -3,6 +3,8 @@
 //! 태스크(task_kind 7종)를 엔진으로 평가해 sharp fast-path(읽기전용 탐색 워커
 //! 직행) 또는 split(리드 승격) 실행 계획을 산출한다. LLM 턴 0.
 //! `--dry-run`은 `:memory:` DB 리허설 — fork는 `fk_dry_*` 가명, 사용자 DB 미오염.
+//! `--brief-file`(Change ①)은 검증자 브리프 형식을 입구에서 검증해 워커 프롬프트에 주입하고,
+//! `--after <fork_id>`(Change ③)는 종속 fork가 닫히기 전까지 발행을 미룬다(ready-frontier).
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -39,6 +41,79 @@ pub fn generate_run_id() -> String {
     let mut buf = [0u8; 3];
     rand::thread_rng().fill_bytes(&mut buf);
     buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+// ---------- 브리프 파일 검증 (Change ① — mattpocock/skills code-review 두 축 + AGENT-BRIEF) ----------
+
+pub const BRIEF_FILE_MAX_BYTES: usize = 64 * 1024;
+pub const BLAST_RADIUS_MAX_CHARS: usize = 500;
+
+/// 검증자 브리프 본문 형식 검증 — 순수 함수(단위 테스트 대상). TS `validateBriefText`와 동일 규칙.
+/// 필수 요소: `## Standards`·`## Spec`·`## Merge Danger` 헤딩(두 축 + 합류 위험),
+/// `door: one-way|two-way` 행, 비어있지 않은 `blast_radius:` 행(값 ≤500자).
+/// 위반 목록(빈 벡터 = 통과)을 반환한다.
+pub fn validate_brief_text(text: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut has_standards = false;
+    let mut has_spec = false;
+    let mut has_merge_danger = false;
+    let mut door_ok = false;
+    let mut blast_radius_ok = false;
+    for raw_line in text.split('\n') {
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        if line.starts_with("## Standards") {
+            has_standards = true;
+        }
+        if line.starts_with("## Spec") {
+            has_spec = true;
+        }
+        if line.starts_with("## Merge Danger") {
+            has_merge_danger = true;
+        }
+        if let Some(rest) = line.trim_start().strip_prefix("door:") {
+            let value = rest.trim();
+            if value == "one-way" || value == "two-way" {
+                door_ok = true;
+            }
+        }
+        if let Some(rest) = line.trim_start().strip_prefix("blast_radius:") {
+            let value = rest.trim();
+            let len = value.chars().count();
+            if len > BLAST_RADIUS_MAX_CHARS {
+                violations.push(format!("blast_radius {len}자 — 최대 {BLAST_RADIUS_MAX_CHARS}자 초과"));
+            } else if !value.is_empty() {
+                blast_radius_ok = true;
+            }
+        }
+    }
+    if !has_standards {
+        violations.push("## Standards 헤딩 없음 (두 축 ① 기술 표준 위반 검토)".into());
+    }
+    if !has_spec {
+        violations.push("## Spec 헤딩 없음 (두 축 ② 요구사항 충실도 검토)".into());
+    }
+    if !has_merge_danger {
+        violations.push("## Merge Danger 헤딩 없음".into());
+    }
+    if !door_ok {
+        violations.push("door 필드 없음/무효 (door: one-way|two-way 형식 필요)".into());
+    }
+    if !blast_radius_ok && !violations.iter().any(|v| v.starts_with("blast_radius")) {
+        violations.push("blast_radius 필드 없음/빈값".into());
+    }
+    violations
+}
+
+/// 브리프 파일 원시 바이트 검증 — 64KB 상한 + UTF-8 유효성 우선 검사 후 본문 규칙을 적용한다.
+/// TS `validateBriefFileBytes`와 동일 규칙.
+pub fn validate_brief_bytes(bytes: &[u8]) -> Vec<String> {
+    if bytes.len() > BRIEF_FILE_MAX_BYTES {
+        return vec![format!("파일 크기 초과: {} > {BRIEF_FILE_MAX_BYTES} bytes (≤64KB)", bytes.len())];
+    }
+    match std::str::from_utf8(bytes) {
+        Err(_) => vec!["유효한 UTF-8 아님".into()],
+        Ok(text) => validate_brief_text(text),
+    }
 }
 
 /// `hc ls --json`에서 live 터미널 식별자 수집 — 실패 시 빈 목록(fail-open).
@@ -137,6 +212,10 @@ struct PlanInput {
     active_explore: i64,
     active_coding: i64,
     roster_path: Option<String>,
+    /// 검증 통과한 검증자 브리프 경로(Change ①) — 워커 프롬프트 `{brief}`로 주입
+    brief_file: Option<String>,
+    /// `--after <fork_id>`(Change ③) — 종속 fork가 닫힌 뒤에만 발행
+    after_fork: Option<String>,
 }
 
 /// Decision API 오버라이드 — on+applied 판정만 반영.
@@ -200,6 +279,26 @@ fn plan_dispatch_inner(input: &PlanInput, api: Option<&ApiOverride>) -> Dispatch
     };
     let mut risk = engine::escalate_risk(spec.default_risk, input.risk);
     let identity: ProjectIdentity = db::resolve_project_identity(&input.repo_dir);
+
+    // Change ③ — `--after <fork_id>` ready-frontier: 종속 fork는 읽기 전용 조회로 먼저 검증.
+    // 미발견·DB 부재는 fail-closed(ok:false → exit 2).
+    let after_fork_id: Option<&str> = input
+        .after_fork
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let mut after_active = false;
+    let mut after_status: Option<String> = None;
+    if let Some(af) = after_fork_id {
+        let lookup = engine::read_fork_status(&db_path, af);
+        if !lookup.exists {
+            plan.reason = Some(format!("--after fork not found: {af}"));
+            plan.target_repo = input.repo_dir.display().to_string();
+            return plan;
+        }
+        after_status = lookup.status;
+        after_active = after_status.as_deref().is_some_and(engine::is_fork_live_status);
+    }
 
     // W3.5 — roster에서 기본 프로필 해석
     let loaded_roster = roster::load_roster_config(
@@ -330,7 +429,14 @@ fn plan_dispatch_inner(input: &PlanInput, api: Option<&ApiOverride>) -> Dispatch
     };
     let mut deferred = false;
     let mut reason: Option<String> = None;
-    if decision == "sharp" && input.active_explore >= MAX_CONCURRENT_EXPLORE {
+    if after_active {
+        deferred = true;
+        reason = Some(format!(
+            "after_fork {} not closed (status={})",
+            after_fork_id.unwrap_or_default(),
+            after_status.as_deref().unwrap_or_default()
+        ));
+    } else if decision == "sharp" && input.active_explore >= MAX_CONCURRENT_EXPLORE {
         deferred = true;
         reason = Some(format!("explore concurrency cap ({MAX_CONCURRENT_EXPLORE}) reached"));
     } else if spec.requires_write && input.active_coding >= MAX_CONCURRENT_CODING {
@@ -360,7 +466,8 @@ fn plan_dispatch_inner(input: &PlanInput, api: Option<&ApiOverride>) -> Dispatch
     }
 
     let mut fork_id: Option<String> = None;
-    if !input.dry_run {
+    // after_fork deferred는 fork 미발행(ready-frontier) — 의존 fork가 닫힌 뒤 재디스패치된다
+    if !input.dry_run && !after_active {
         if let Some(db) = conn.as_ref() {
             // 리스는 실제 디스패치 때만 기록 — deferred fork는 스코프를 홀드하지 않는다
             let metadata: Option<Map<String, Value>> = if deferred && plan.decision_api.is_none() {
@@ -389,6 +496,13 @@ fn plan_dispatch_inner(input: &PlanInput, api: Option<&ApiOverride>) -> Dispatch
                     Some(m)
                 }
             };
+            // 종속 fork(종결 상태)를 metadata에 기록 — additive 키(parse_fork_metadata가 그대로 노출)
+            let metadata = metadata.map(|mut m| {
+                if let Some(af) = after_fork_id {
+                    m.insert("after_fork".into(), json!(af));
+                }
+                m
+            });
             let issue = engine::issue_fork(
                 db,
                 &engine::IssueForkInput {
@@ -418,11 +532,23 @@ fn plan_dispatch_inner(input: &PlanInput, api: Option<&ApiOverride>) -> Dispatch
     let mut hc_commands: Vec<Vec<String>> = Vec::new();
     let mut carbon_brief_path: Option<String> = None;
     let orch_root = orchestrator_root();
+    // Change ① — 브리프가 주어지면 `{brief}`(= role_brief_path 치환) 문장을 프롬프트 끝에 붙인다.
+    // TS scripts/dispatch.ts와 문장·치환 방식을 바이트 단위로 맞춘다.
+    let brief_path: Option<&str> = input
+        .brief_file
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let brief_note = if brief_path.is_some() {
+        " 브리프 파일을 먼저 읽고 두 축(Standards/Spec)과 Merge Danger을 따르라: {brief}"
+    } else {
+        ""
+    };
 
     if !deferred && decision == "sharp" {
         session_name = Some(expected_session.clone());
         let prompt = format!(
-            "임무파일 {} 를 읽고 조사 결과를 최종 메시지로 출력하라",
+            "임무파일 {} 를 읽고 조사 결과를 최종 메시지로 출력하라{brief_note}",
             input.task_file.clone().unwrap_or_else(|| "TASK.md".into())
         );
         // 네이티브 디스패처 — wrap은 node dg.ts 대신 자기 자신(네이티브 dg)을 쓴다
@@ -454,7 +580,7 @@ fn plan_dispatch_inner(input: &PlanInput, api: Option<&ApiOverride>) -> Dispatch
         if let Some(es) = explore_spec {
             argv.extend(roster::build_worker_command(
                 es,
-                &BuildWorkerCommandOptions { prompt: &prompt, role_brief_path: None, interactive: false },
+                &BuildWorkerCommandOptions { prompt: &prompt, role_brief_path: brief_path, interactive: false },
             ));
         }
         hc_commands.push(argv);
@@ -463,7 +589,7 @@ fn plan_dispatch_inner(input: &PlanInput, api: Option<&ApiOverride>) -> Dispatch
         session_name = Some(expected_session.clone());
         let lead_contract = resolve_role_contract_path(&input.repo_dir, &orch_root, "lead")
             .unwrap_or_else(|| ".herdr/roles/lead.md".to_string());
-        let prompt = format!("역할계약서 {lead_contract} 를 읽고 대기/수행하라");
+        let prompt = format!("역할계약서 {lead_contract} 를 읽고 대기/수행하라{brief_note}");
         if let Some(lead_spec) = roster_profile.roles.get(&RoleSlot::Lead) {
             let mut argv = vec![
                 "env".to_string(),
@@ -473,7 +599,7 @@ fn plan_dispatch_inner(input: &PlanInput, api: Option<&ApiOverride>) -> Dispatch
             ];
             argv.extend(roster::build_worker_command(
                 lead_spec,
-                &BuildWorkerCommandOptions { prompt: &prompt, role_brief_path: None, interactive: false },
+                &BuildWorkerCommandOptions { prompt: &prompt, role_brief_path: brief_path, interactive: false },
             ));
             hc_commands.push(argv);
         }
@@ -526,7 +652,7 @@ fn plan_dispatch_inner(input: &PlanInput, api: Option<&ApiOverride>) -> Dispatch
 }
 
 fn plan_to_json(plan: &DispatchPlan) -> Value {
-    json!({
+    let mut v = json!({
         "ok": plan.ok,
         "deferred": plan.deferred,
         "reason": plan.reason,
@@ -557,7 +683,14 @@ fn plan_to_json(plan: &DispatchPlan) -> Value {
         "roleSummary": plan.role_summary,
         "sharp_threshold": plan.sharp_threshold,
         "decision_api": plan.decision_api,
-    })
+    });
+    // TS DispatchPlan JSON 형상 정렬 — 감사가 없으면 키 자체를 생략한다(undefined 미직렬화).
+    if plan.decision_api.is_none() {
+        if let Some(m) = v.as_object_mut() {
+            m.remove("decision_api");
+        }
+    }
+    v
 }
 
 fn render_plan(plan: &DispatchPlan) {
@@ -632,6 +765,11 @@ fn render_plan(plan: &DispatchPlan) {
 
 pub fn cmd_dispatch(args: &ParsedArgs, json: bool) -> CmdResult {
     let flags = parse_cli_flags_from_parsed(args);
+    // 도움말은 모든 게이트(strict 브리프 포함)보다 먼저 — 도움말조차 못 보면 strict를 켠 사용자가 갇힌다.
+    if crate::args::bool_flag(args, "help") || crate::args::bool_flag(args, "h") {
+        println!("{}", dispatch_flags_help());
+        return Ok(0);
+    }
     let raw_mode = flags.get("decision-api").cloned();
     if let Some(m) = &raw_mode {
         if !adapter::is_decision_api_mode(m) {
@@ -654,6 +792,35 @@ pub fn cmd_dispatch(args: &ParsedArgs, json: bool) -> CmdResult {
             return Ok(2);
         }
     };
+    // Change ① — 브리프 게이트(입구, plan_dispatch_inner 이전): 명시적 입력은 양 모드에서
+    // 반드시 유효해야 하고, strict 모드에서는 필수다(fail-closed). TS scripts/dispatch.ts와 동일 순서.
+    let brief_file = flags.get("brief-file").cloned();
+    match brief_file.as_deref() {
+        Some(p) => match std::fs::read(p) {
+            Err(e) => {
+                return Err(DgError::Usage(crate::args::UsageError(format!(
+                    "--brief-file 읽기 실패 ({p}): {e}"
+                ))));
+            }
+            Ok(bytes) => {
+                let violations = validate_brief_bytes(&bytes);
+                if !violations.is_empty() {
+                    let mut msg = format!("--brief-file 검증 실패 ({p}):");
+                    for v in &violations {
+                        msg.push_str(&format!("\n  - {v}"));
+                    }
+                    return Err(DgError::Usage(crate::args::UsageError(msg)));
+                }
+            }
+        },
+        None => {
+            if engine::read_dispatch_mode() == "strict" {
+                return Err(DgError::Usage(crate::args::UsageError(
+                    "strict 모드: --brief-file 필수".into(),
+                )));
+            }
+        }
+    }
     let input = PlanInput {
         task_kind: flags.get("task-kind").cloned().unwrap_or_default(),
         risk,
@@ -672,6 +839,8 @@ pub fn cmd_dispatch(args: &ParsedArgs, json: bool) -> CmdResult {
         active_explore: flags.get("active-explore").and_then(|v| v.parse().ok()).unwrap_or(0),
         active_coding: flags.get("active-coding").and_then(|v| v.parse().ok()).unwrap_or(0),
         roster_path: flags.get("roster").cloned(),
+        brief_file: brief_file.clone(),
+        after_fork: flags.get("after").cloned(),
     };
 
     // Decision API — off는 plain planDispatch와 완전 동일, dry-run은 프로브 생략
@@ -843,5 +1012,259 @@ fn probe_dispatch_local(input: &PlanInput, _mode: DecisionApiMode) -> Option<Pro
 }
 
 pub fn dispatch_flags_help() -> &'static str {
-    "dg dispatch --task-kind <k> [--risk low|medium|high] [--repo <dir>] [--roster <path>] [--db <path>] [--run-id <id>] [--task-file <path>] [--idx <n>] [--active-explore <n>] [--active-coding <n>] [--dry-run] [--context <text>] [--decision-api off|shadow|on] [--api-eval] [--json]"
+    "dg dispatch --task-kind <k> [--risk low|medium|high] [--repo <dir>] [--roster <path>] [--db <path>] [--run-id <id>] [--task-file <path>] [--brief-file <path>] [--after <fork_id>] [--idx <n>] [--active-explore <n>] [--active-coding <n>] [--dry-run] [--context <text>] [--decision-api off|shadow|on] [--api-eval] [--json]"
+}
+
+// ---------------------------------------------------------------------------
+// 단위 테스트 — 브리프 검증기(Change ①)·`--after`(Change ③). CLI 게이트(strict 배선)
+// 와 e2e는 `crates/dgate-cli/tests/cli_e2e.rs`가 담당한다.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VALID_BRIEF: &str = "\
+# Verifier Brief — fk_test
+
+- fork_id: fk_test
+
+## Standards
+
+- 위반 없음
+
+## Spec
+
+- 요구사항 충족
+
+## Merge Danger
+
+door: two-way
+blast_radius: 테스트 경로 전반
+";
+
+    fn temp_db_path(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "dg-dispatch-ut-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("decision.db")
+    }
+
+    fn plan_input(db: &str, after: Option<&str>) -> PlanInput {
+        PlanInput {
+            task_kind: "single_edit".into(),
+            risk: Some(RiskLevel::High), // split 확정 — 리드 승격 경로
+            repo_dir: std::env::temp_dir(),
+            db_path: Some(db.to_string()),
+            run_id: Some("dead01".into()),
+            dry_run: false,
+            task_file: None,
+            idx: 0,
+            active_explore: 0,
+            active_coding: 0,
+            roster_path: None,
+            brief_file: None,
+            after_fork: after.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn brief_validator_accepts_valid_template() {
+        assert!(validate_brief_text(VALID_BRIEF).is_empty());
+        assert!(validate_brief_bytes(VALID_BRIEF.as_bytes()).is_empty());
+        // CRLF 허용 — 행 끝 \r 정규화
+        let crlf = VALID_BRIEF.replace('\n', "\r\n");
+        assert!(validate_brief_text(&crlf).is_empty());
+    }
+
+    #[test]
+    fn brief_validator_flags_missing_spec_heading() {
+        let bad = VALID_BRIEF.replace("## Spec\n", "");
+        let v = validate_brief_text(&bad);
+        assert_eq!(v.len(), 1);
+        assert!(v[0].contains("## Spec"));
+    }
+
+    #[test]
+    fn brief_validator_flags_bad_door() {
+        let bad = VALID_BRIEF.replace("door: two-way", "door: maybe");
+        let v = validate_brief_text(&bad);
+        assert_eq!(v.len(), 1);
+        assert!(v[0].contains("door"));
+    }
+
+    #[test]
+    fn brief_validator_flags_empty_and_oversized_blast_radius() {
+        let empty = VALID_BRIEF.replace("blast_radius: 테스트 경로 전반", "blast_radius:   ");
+        let v = validate_brief_text(&empty);
+        assert_eq!(v.len(), 1);
+        assert!(v[0].contains("blast_radius"));
+        let long = format!(
+            "## Standards\n## Spec\n## Merge Danger\ndoor: one-way\nblast_radius: {}\n",
+            "x".repeat(501)
+        );
+        let v = validate_brief_text(&long);
+        assert_eq!(v.len(), 1);
+        assert!(v[0].contains("500자"));
+    }
+
+    #[test]
+    fn brief_validator_flags_oversize_and_invalid_utf8() {
+        let big = vec![b'a'; BRIEF_FILE_MAX_BYTES + 1];
+        let v = validate_brief_bytes(&big);
+        assert_eq!(v.len(), 1);
+        assert!(v[0].contains("64KB"));
+        let bad_utf8 = vec![0xff, 0xfe, 0xfd];
+        assert_eq!(validate_brief_bytes(&bad_utf8), vec!["유효한 UTF-8 아님".to_string()]);
+    }
+
+    #[test]
+    fn after_not_found_is_usage_failure() {
+        let db = temp_db_path("after-nf");
+        // DB 파일 자체가 없어도 fail-closed — exists:false → ok:false(exit 2 상당)
+        let plan = plan_dispatch_inner(&plan_input(&db.display().to_string(), Some("fk_nope")), None);
+        assert!(!plan.ok);
+        assert_eq!(plan.reason.as_deref(), Some("--after fork not found: fk_nope"));
+        std::fs::remove_dir_all(db.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn after_active_fork_defers_without_issuing() {
+        let db_path = temp_db_path("after-active");
+        let dbs = db_path.display().to_string();
+        let conn = dgate_core::db::open_db_safe(
+            Some(&dbs),
+            OpenDbOptions { read_only: false, busy_timeout_ms: Some(5000) },
+        )
+        .unwrap();
+        let fk = engine::issue_fork(
+            &conn,
+            &engine::IssueForkInput {
+                project_id: "__GLOBAL__",
+                project_label: "ut",
+                route: dgate_core::engine::RouteId::FileSelect,
+                tool_class: "file_edit",
+                decision: "split",
+                p_at_gate: 0.5,
+                basis_at_gate: dgate_core::engine::DecisionBasis::Prior,
+                forced_split: false,
+                conversation_id: None,
+                ttl_ms: None,
+                title: None,
+                metadata: None,
+                now_ms: None,
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let plan = plan_dispatch_inner(&plan_input(&dbs, Some(&fk)), None);
+        assert!(plan.ok, "deferred도 ok:true(기존 지연 방출 형상)");
+        assert!(plan.deferred);
+        assert_eq!(
+            plan.reason.as_deref(),
+            Some(format!("after_fork {fk} not closed (status=open)").as_str())
+        );
+        assert!(plan.hc_commands.is_empty());
+        assert!(plan.worktree_commands.is_empty());
+        assert!(plan.session_name.is_none());
+        assert!(plan.fork_id.as_deref().unwrap_or_default().starts_with("fk_dry_"), "실제 fork는 미발행(가명만)");
+
+        let conn = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM forks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "DB에는 종속 fork 1건만 존재");
+        std::fs::remove_dir_all(db_path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn after_terminal_fork_proceeds_and_stamps_metadata() {
+        let db_path = temp_db_path("after-term");
+        let dbs = db_path.display().to_string();
+        let conn = dgate_core::db::open_db_safe(
+            Some(&dbs),
+            OpenDbOptions { read_only: false, busy_timeout_ms: Some(5000) },
+        )
+        .unwrap();
+        let fk = engine::issue_fork(
+            &conn,
+            &engine::IssueForkInput {
+                project_id: "__GLOBAL__",
+                project_label: "ut",
+                route: dgate_core::engine::RouteId::FileSelect,
+                tool_class: "file_edit",
+                decision: "split",
+                p_at_gate: 0.5,
+                basis_at_gate: dgate_core::engine::DecisionBasis::Prior,
+                forced_split: false,
+                conversation_id: None,
+                ttl_ms: None,
+                title: None,
+                metadata: None,
+                now_ms: None,
+            },
+        )
+        .unwrap();
+        engine::close_fork(&conn, &fk, "ok", "dispatcher", None, &engine::CloseForkOptions::default())
+            .unwrap();
+        drop(conn);
+
+        let plan = plan_dispatch_inner(&plan_input(&dbs, Some(&fk)), None);
+        assert!(plan.ok);
+        assert!(!plan.deferred);
+        assert_eq!(plan.hc_commands.len(), 1, "리드 승격 커맨드 1건");
+        assert!(plan.fork_id.as_deref().unwrap_or_default().starts_with("fk_"));
+
+        let conn = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let meta: Option<String> = conn
+            .query_row(
+                "SELECT metadata_json FROM forks WHERE fork_id = ?1",
+                [&plan.fork_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let meta: serde_json::Value = serde_json::from_str(meta.as_deref().unwrap()).unwrap();
+        assert_eq!(meta["after_fork"].as_str(), Some(fk.as_str()));
+        assert_eq!(meta["dispatch"].as_bool(), Some(true));
+        std::fs::remove_dir_all(db_path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn brief_file_injects_prompt_sentence_with_path_substitution() {
+        let db = temp_db_path("brief");
+        let brief = db.parent().unwrap().join("brief.md");
+        std::fs::write(&brief, VALID_BRIEF).unwrap();
+        let mut input = plan_input(&db.display().to_string(), None);
+        input.dry_run = true; // :memory: 리허설 — DB 파일 미생성
+        input.db_path = None;
+        input.brief_file = Some(brief.display().to_string());
+        let plan = plan_dispatch_inner(&input, None);
+        assert!(plan.ok);
+        assert_eq!(plan.hc_commands.len(), 1);
+        let prompt = plan.hc_commands[0].last().unwrap();
+        assert!(
+            prompt.ends_with(&format!(
+                "브리프 파일을 먼저 읽고 두 축(Standards/Spec)과 Merge Danger을 따르라: {}",
+                brief.display()
+            )),
+            "프롬프트 끝에 브리프=경로 문장 주입: {prompt}"
+        );
+        assert!(!plan.hc_commands[0].join(" ").contains("{brief}"), "플레이스홀더 잔존 금지");
+        std::fs::remove_dir_all(db.parent().unwrap()).ok();
+    }
 }

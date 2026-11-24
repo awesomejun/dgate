@@ -9,6 +9,8 @@
  * 실행: `node --test tests/verdict-retro.test.ts` (외부 의존성 0개, 임시 디렉터리 사용)
  *
  * 주의: 파일 크기·HEAD 결속 테스트는 실제 파일을 임시 디렉터리에 써서 검증한다.
+ * CLI E2E는 `XDG_STATE_HOME`을 임시 경로로 격리한다 — 머신 전역 dispatch-mode(strict 포함)와
+ * 무관하게 off로 동작해야 한다(strict merge_danger 게이트는 verdict-merge-danger.test.ts).
  */
 import assert from 'node:assert/strict';
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
@@ -430,7 +432,7 @@ function makeCliEnv(): CliEnv {
   const dbPath = path.join(base, 'decision.db');
   const projDir = path.join(base, 'proj');
   fs.mkdirSync(projDir, { recursive: true });
-  return { base, dbPath, projDir, env: { ...process.env, GEMINI_TRICK_DB_PATH: dbPath, DGATE_DB_PATH: undefined, DECISION_ORCHESTRATOR_DB_PATH: undefined } };
+  return { base, dbPath, projDir, env: { ...process.env, GEMINI_TRICK_DB_PATH: dbPath, DGATE_DB_PATH: undefined, DECISION_ORCHESTRATOR_DB_PATH: undefined, XDG_STATE_HOME: path.join(base, 'xstate-off') } };
 }
 
 function dgRun(e: CliEnv, args: string[]): SpawnSyncReturns<string> {

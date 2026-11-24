@@ -7,7 +7,7 @@
  * 실행 계획(`hc run`·`git worktree` argv)을 산출한다. LLM 턴을 쓰지 않는다.
  *
  * 외부 연결:
- * - CLI: `node ./scripts/dispatch.ts --task-kind <k> --repo <dir> [--roster <path>] [--db <path>] [--dry-run] [--json]`.
+ * - CLI: `node ./scripts/dispatch.ts --task-kind <k> --repo <dir> [--roster <path>] [--db <path>] [--brief-file <path>] [--after <fork_id>] [--dry-run] [--json]`.
  * - `herdr-quad-launch.ts --mode orchestrate`가 `planDispatch`·`checkHcNameCollisions`
  *   를 import해 dry-run 리허설과 N12 충돌 점검에 재사용한다.
  * - sharp 경로는 `dg wrap --fork <id> -- pi … --tools read,grep,find,ls --no-approve`
@@ -25,6 +25,7 @@
  */
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { DatabaseSync } from 'node:sqlite';
@@ -41,8 +42,11 @@ import {
   acquireScopeLease,
   escalateRisk,
   evaluateRoute,
+  isForkLiveStatus,
   issueFork,
   priorP0,
+  readDispatchMode,
+  readForkStatus,
   settleOrphans,
   SHARP_P_THRESHOLD,
   taskKindSpec,
@@ -147,6 +151,10 @@ export interface PlanDispatchInput {
   activeCoding?: number;
   /** `--roster` 명시 경로 (미지정 시 roster.ts 우선순위 탐색: env → project → global → 내장) */
   rosterPath?: string | null;
+  /** 검증 통과한 검증자 브리프 경로(Change ①) — 워커 프롬프트 `{brief}`로 주입 */
+  briefFile?: string | null;
+  /** `--after <fork_id>`(Change ③) — 종속 fork가 닫힌 뒤에만 발행 */
+  afterFork?: string | null;
 }
 
 export interface DispatchPlan {
@@ -276,6 +284,22 @@ function planDispatchInner(input: PlanDispatchInput, api: ApiOverride | null): D
   let risk = escalateRisk(spec.defaultRisk, input.risk);
   const identity = resolveProjectIdentity(repoDir);
 
+  // Change ③ — `--after <fork_id>` ready-frontier: 종속 fork는 읽기 전용 조회로
+  // 먼저 검증한다. 미발견·DB 부재는 fail-closed(ok:false → exit 2).
+  const afterForkId = input.afterFork?.trim() ? input.afterFork.trim() : null;
+  let afterActive = false;
+  let afterStatus: string | null = null;
+  if (afterForkId) {
+    const lookup = readForkStatus(dbPath, afterForkId);
+    if (!lookup.exists) {
+      plan.reason = `--after fork not found: ${afterForkId}`;
+      plan.targetRepo = repoDir;
+      return plan;
+    }
+    afterStatus = lookup.status;
+    afterActive = isForkLiveStatus(afterStatus ?? '');
+  }
+
   // W3.5 — 역할↔모델 바인딩을 roster.json에서 해석 (dispatch는 기본 프로필 사용)
   const loadedRoster = loadRosterConfig({ rosterPath: input.rosterPath, repoDir });
   const resolvedProfile = resolveRosterProfile(loadedRoster.config, loadedRoster.config.defaultProfile);
@@ -354,7 +378,10 @@ function planDispatchInner(input: PlanDispatchInput, api: ApiOverride | null): D
   const expectedSession = decision === 'sharp' ? `exp-${idx}-${runId}` : `lead-${runId}`;
   let deferred = false;
   let reason: string | null = null;
-  if (decision === 'sharp' && (input.activeExplore ?? 0) >= MAX_CONCURRENT_EXPLORE) {
+  if (afterActive) {
+    deferred = true;
+    reason = `after_fork ${afterForkId} not closed (status=${afterStatus})`;
+  } else if (decision === 'sharp' && (input.activeExplore ?? 0) >= MAX_CONCURRENT_EXPLORE) {
     deferred = true;
     reason = `explore concurrency cap (${MAX_CONCURRENT_EXPLORE}) reached`;
   } else if (spec.requiresWrite && (input.activeCoding ?? 0) >= MAX_CONCURRENT_CODING) {
@@ -379,7 +406,8 @@ function planDispatchInner(input: PlanDispatchInput, api: ApiOverride | null): D
     }
   }
 
-  if (!dryRun && db) {
+  // after_fork deferred는 fork 미발행(ready-frontier) — 의존 fork가 닫힌 뒤 재디스패치된다
+  if (!dryRun && db && !afterActive) {
     try {
       forkId = issueFork(db, {
         projectId: identity.projectId,
@@ -392,21 +420,20 @@ function planDispatchInner(input: PlanDispatchInput, api: ApiOverride | null): D
         forcedSplit: forced.forcedSplit,
         ttlMs: TTL_EXPLORE_MS,
         title: input.taskFile ?? null,
-        // 점유 리스는 실제 디스패치(비 deferred) 때만 기록 — deferred fork는 스코프를 홀드하지 않는다
-        metadata:
-          deferred && !api?.audit
-            ? undefined
+        // 점유 리스는 실제 디스패치(비 deferred) 때만 기록 — deferred fork는 스코프를
+        // 홀드하지 않는다. dispatch:true 표식은 Rust 구현과 동일하게 모든 fork에 찍는다.
+        metadata: {
+          ...(deferred
+            ? {}
             : {
-                ...(deferred
-                  ? {}
-                  : {
-                      repo_scope: repoDir,
-                      lease_owner: expectedSession,
-                      lease_until_ms: Date.now() + TTL_EXPLORE_MS,
-                    }),
-                ...(api?.audit ? { decision_api: api.audit } : {}),
-                dispatch: true,
-              },
+                repo_scope: repoDir,
+                lease_owner: expectedSession,
+                lease_until_ms: Date.now() + TTL_EXPLORE_MS,
+              }),
+          ...(api?.audit ? { decision_api: api.audit } : {}),
+          ...(afterForkId ? { after_fork: afterForkId } : {}),
+          dispatch: true,
+        },
       });
     } catch {
       forkId = null;
@@ -419,9 +446,14 @@ function planDispatchInner(input: PlanDispatchInput, api: ApiOverride | null): D
   const worktreeCommands: string[][] = [];
   let carbonBriefPath: string | null = null;
 
+  const briefPath = input.briefFile?.trim() ? input.briefFile!.trim() : null;
+  const briefNote = briefPath
+    ? ' 브리프 파일을 먼저 읽고 두 축(Standards/Spec)과 Merge Danger을 따르라: {brief}'
+    : '';
+
   if (!deferred && decision === 'sharp') {
     sessionName = expectedSession;
-    const prompt = `임무파일 ${input.taskFile ?? 'TASK.md'} 를 읽고 조사 결과를 최종 메시지로 출력하라`;
+    const prompt = `임무파일 ${input.taskFile ?? 'TASK.md'} 를 읽고 조사 결과를 최종 메시지로 출력하라${briefNote}`;
     hcCommands.push([
       'run',
       '--bg',
@@ -443,7 +475,7 @@ function planDispatchInner(input: PlanDispatchInput, api: ApiOverride | null): D
       '--stall-ms',
       '120000',
       '--',
-      ...buildWorkerCommand(rosterProfile.roles.explore, { prompt }),
+      ...buildWorkerCommand(rosterProfile.roles.explore, { prompt, roleBriefPath: briefPath ?? undefined }),
     ]);
   } else if (!deferred) {
     // split → 리드 승격 (§6.1 Layer 1) — 역할 계약서는 repo 우선, 없으면 오케스트레이터 폴백
@@ -462,7 +494,8 @@ function planDispatchInner(input: PlanDispatchInput, api: ApiOverride | null): D
       'HERDR_DELEGATE_MODE=hc',
       'HERDR_DB_WRITE=1',
       ...buildWorkerCommand(rosterProfile.roles.lead, {
-        prompt: `역할계약서 ${leadContract} 를 읽고 대기/수행하라`,
+        prompt: `역할계약서 ${leadContract} 를 읽고 대기/수행하라${briefNote}`,
+        roleBriefPath: briefPath ?? undefined,
       }),
     ]);
     if (forced.escalateCarbon) {
@@ -650,6 +683,78 @@ export async function planDispatchWithDecisionApi(input: PlanDispatchWithApiInpu
   return planDispatchInner(input, { decision: api.decision, p: api.p, risk: api.risk, audit: api.audit });
 }
 
+// ---------- 브리프 파일 검증 (Change ① — mattpocock/skills code-review 두 축 + AGENT-BRIEF) ----------
+
+export const BRIEF_FILE_MAX_BYTES = 64 * 1024;
+export const BLAST_RADIUS_MAX_CHARS = 500;
+
+/**
+ * 검증자 브리프 본문 형식 검증 — 순수 함수(단위 테스트 대상).
+ * 필수 요소: `## Standards`·`## Spec`·`## Merge Danger` 헤딩(두 축 + 합류 위험),
+ * `door: one-way|two-way` 행, 비어있지 않은 `blast_radius:` 행(값 ≤500자).
+ * 위반 목록(빈 배열 = 통과)을 반환한다. Rust `validate_brief_text`와 동일 규칙.
+ */
+export function validateBriefText(text: string): string[] {
+  const violations: string[] = [];
+  let hasStandards = false;
+  let hasSpec = false;
+  let hasMergeDanger = false;
+  let doorOk = false;
+  let blastRadiusOk = false;
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+    if (line.startsWith('## Standards')) hasStandards = true;
+    if (line.startsWith('## Spec')) hasSpec = true;
+    if (line.startsWith('## Merge Danger')) hasMergeDanger = true;
+    const doorMatch = /^(\s*)door:(.*)$/.exec(line);
+    if (doorMatch) {
+      const value = doorMatch[2]!.trim();
+      if (value === 'one-way' || value === 'two-way') doorOk = true;
+    }
+    const blastMatch = /^(\s*)blast_radius:(.*)$/.exec(line);
+    if (blastMatch) {
+      const value = blastMatch[2]!.trim();
+      if (value.length > BLAST_RADIUS_MAX_CHARS) {
+        violations.push(`blast_radius ${value.length}자 — 최대 ${BLAST_RADIUS_MAX_CHARS}자 초과`);
+      } else if (value !== '') {
+        blastRadiusOk = true;
+      }
+    }
+  }
+  if (!hasStandards) violations.push('## Standards 헤딩 없음 (두 축 ① 기술 표준 위반 검토)');
+  if (!hasSpec) violations.push('## Spec 헤딩 없음 (두 축 ② 요구사항 충실도 검토)');
+  if (!hasMergeDanger) violations.push('## Merge Danger 헤딩 없음');
+  if (!doorOk) violations.push('door 필드 없음/무효 (door: one-way|two-way 형식 필요)');
+  if (!blastRadiusOk && !violations.some((v) => v.startsWith('blast_radius'))) {
+    violations.push('blast_radius 필드 없음/빈값');
+  }
+  return violations;
+}
+
+/** 엄격 UTF-8 판정 — `TextDecoder(fatal)`은 무효 바이트에서 던진다(손실 복원 금지). */
+function isUtf8Bytes(bytes: Uint8Array): boolean {
+  try {
+    new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 브리프 파일 원시 바이트 검증 — 64KB 상한 + UTF-8 유효성 우선 검사 후
+ * 본문 규칙(`validateBriefText`)을 적용한다. Rust `validate_brief_bytes`와 동일 규칙.
+ */
+export function validateBriefFileBytes(bytes: Buffer): string[] {
+  if (bytes.length > BRIEF_FILE_MAX_BYTES) {
+    return [`파일 크기 초과: ${bytes.length} > ${BRIEF_FILE_MAX_BYTES} bytes (≤64KB)`];
+  }
+  if (!isUtf8Bytes(bytes)) {
+    return ['유효한 UTF-8 아님'];
+  }
+  return validateBriefText(bytes.toString('utf8'));
+}
+
 // ---------- CLI ----------
 
 function parseCli(argv: string[]): Record<string, string> {
@@ -671,6 +776,10 @@ function parseCli(argv: string[]): Record<string, string> {
   }
   return out;
 }
+
+// 도움말 본문 — Rust `dispatch_flags_help()`(commands/dispatch.rs)와 바이트 동일해야 한다.
+const DISPATCH_FLAGS_HELP =
+  'dg dispatch --task-kind <k> [--risk low|medium|high] [--repo <dir>] [--roster <path>] [--db <path>] [--run-id <id>] [--task-file <path>] [--brief-file <path>] [--after <fork_id>] [--idx <n>] [--active-explore <n>] [--active-coding <n>] [--dry-run] [--context <text>] [--decision-api off|shadow|on] [--api-eval] [--json]';
 
 function isMainModule(): boolean {
   const entry = process.argv[1];
@@ -708,9 +817,35 @@ function renderPlan(plan: DispatchPlan, flags: Record<string, string>): number {
 
 if (isMainModule()) {
   const flags = parseCli(process.argv.slice(2));
+  // 도움말은 모든 게이트(strict 브리프 포함)보다 먼저 — 도움말조차 못 보면 strict를 켠 사용자가 갇힌다.
+  if (flags.help !== undefined || flags.h !== undefined) {
+    process.stdout.write(`${DISPATCH_FLAGS_HELP}\n`);
+    process.exit(0);
+  }
   const rawMode = flags['decision-api'];
   if (rawMode !== undefined && !isDecisionApiMode(rawMode)) {
     process.stderr.write(`[dispatch] invalid --decision-api "${rawMode}" (allowed: off|shadow|on)\n`);
+    process.exit(2);
+  }
+  // Change ① — 브리프 게이트(입구, planDispatchWithDecisionApi 이전):
+  // 명시적 입력은 양 모드에서 반드시 유효해야 하고, strict 모드에서는 필수다(fail-closed).
+  const briefFile = flags['brief-file'];
+  if (briefFile !== undefined) {
+    let briefBytes: Buffer;
+    try {
+      briefBytes = fs.readFileSync(briefFile);
+    } catch (err) {
+      process.stderr.write(`[dispatch] --brief-file 읽기 실패 (${briefFile}): ${(err as Error).message}\n`);
+      process.exit(2);
+    }
+    const briefViolations = validateBriefFileBytes(briefBytes);
+    if (briefViolations.length > 0) {
+      process.stderr.write(`[dispatch] --brief-file 검증 실패 (${briefFile}):\n`);
+      for (const v of briefViolations) process.stderr.write(`  - ${v}\n`);
+      process.exit(2);
+    }
+  } else if (readDispatchMode() === 'strict') {
+    process.stderr.write('[dispatch] strict 모드: --brief-file 필수\n');
     process.exit(2);
   }
   const input: PlanDispatchWithApiInput = {
@@ -725,6 +860,8 @@ if (isMainModule()) {
     activeExplore: flags['active-explore'] !== undefined ? Number(flags['active-explore']) : undefined,
     activeCoding: flags['active-coding'] !== undefined ? Number(flags['active-coding']) : undefined,
     rosterPath: flags.roster,
+    briefFile: briefFile,
+    afterFork: flags['after'],
     decisionApi: rawMode as DecisionApiMode | undefined,
     context: flags.context,
     apiEval: flags['api-eval'] === '1',

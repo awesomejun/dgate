@@ -17,6 +17,9 @@ pub const VERDICT_DECISIONS: [&str; 4] = ["pass", "rework", "fail", "human"];
 /// finding 심각도 등급 — `P0`/`P1`은 pass 판정과 공존할 수 없다(불변식 3)
 pub const FINDING_SEVERITIES: [&str; 4] = ["P0", "P1", "P2", "info"];
 
+/// Merge Danger door 값 — mattpocock/skills `pr` 어휘 흡수(합류 방향성)
+pub const MERGE_DANGER_DOORS: [&str; 2] = ["one-way", "two-way"];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum VerdictDecision {
@@ -53,6 +56,13 @@ pub struct VerdictFinding {
     pub evidence: String,
 }
 
+/// 합류 위험 표기(선택) — 검증자가 merge 방향성·영향 반경을 판정과 함께 남긴다
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MergeDanger {
+    pub door: String,
+    pub blast_radius: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VerdictDocument {
     pub schema_version: i64,
@@ -68,6 +78,11 @@ pub struct VerdictDocument {
     pub checked_commands: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<Vec<String>>,
+    /// 선택 — 존재하면 door·blast_radius가 검증되고 backprop 출력에 에코된다.
+    /// strict dispatch 모드는 유효한 verdict에 이 필드를 필수로 요구한다
+    /// (`merge_danger_strict_violation` 게이트, UsageError exit 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_danger: Option<MergeDanger>,
 }
 
 /// 검증 결과 — `valid: false`면 반드시 `effective_decision: Human`(fail-closed)
@@ -92,6 +107,8 @@ pub const DEFAULT_VERDICT_MAX_BYTES: u64 = 65536;
 const MAX_REASON_LENGTH: usize = 4000;
 const MAX_ACTION_REQUIRED_LENGTH: usize = 4000;
 const MAX_FINDING_TITLE_LENGTH: usize = 500;
+/// merge_danger.blast_radius 상한(문자 수) — finding title과 같은 기준
+const MAX_BLAST_RADIUS_LENGTH: usize = 500;
 /// HEAD prefix 비교 최소 길이 — 그 미만 약칭은 모호해서 Stale Verdict로 거부
 const MIN_HEAD_PREFIX_LENGTH: usize = 7;
 /// retro 표 셀에 들어갈 오류 스니펫 상한(문자 수)
@@ -249,6 +266,42 @@ pub fn validate_verdict_data(raw: &Value, opts: &ValidateVerdictOptions) -> Verd
         }
     }
 
+    // --- merge_danger 스키마(선택): mattpocock/skills `pr` Merge Danger 어휘 흡수 ---
+    // 누락·null은 부재 취급(백워드 호환), 존재하면 door(one-way|two-way)·
+    // blast_radius(비공백 500자 이하)를 검증해 위반은 불변식 1 구조 위반으로 fail-closed한다.
+    let mut merge_danger: Option<MergeDanger> = None;
+    if let Some(raw_md) = doc.get("merge_danger").filter(|v| !v.is_null()) {
+        match raw_md.as_object() {
+            None => errors.push("merge_danger가 객체가 아닙니다".to_string()),
+            Some(md) => {
+                let door = md.get("door").and_then(|v| v.as_str());
+                let door_ok = door.is_some_and(|d| MERGE_DANGER_DOORS.contains(&d));
+                if !door_ok {
+                    errors.push(format!(
+                        "merge_danger.door가 허용 값(one-way|two-way)이 아닙니다: {}",
+                        stringify_jsonish(md.get("door"))
+                    ));
+                }
+                let blast = md.get("blast_radius").and_then(|v| v.as_str());
+                let blast_non_empty = blast.is_some_and(|b| !b.trim().is_empty());
+                if !blast_non_empty {
+                    errors.push("merge_danger.blast_radius가 빈 문자열이거나 누락됐습니다".to_string());
+                } else if let Some(b) = blast.filter(|b| b.chars().count() > MAX_BLAST_RADIUS_LENGTH) {
+                    errors.push(format!(
+                        "merge_danger.blast_radius가 {}자를 초과했습니다: {}자",
+                        MAX_BLAST_RADIUS_LENGTH,
+                        b.chars().count()
+                    ));
+                }
+                if let (Some(d), Some(b)) = (door, blast) {
+                    if door_ok && !b.trim().is_empty() && b.chars().count() <= MAX_BLAST_RADIUS_LENGTH {
+                        merge_danger = Some(MergeDanger { door: d.to_string(), blast_radius: b.to_string() });
+                    }
+                }
+            }
+        }
+    }
+
     // --- 불변식 2: Fork & HEAD 결속 (Replay·Stale 차단) ---
     let fork_id = doc.get("fork_id").and_then(|v| v.as_str());
     if fork_id != Some(opts.expected_fork_id.as_str()) {
@@ -334,6 +387,7 @@ pub fn validate_verdict_data(raw: &Value, opts: &ValidateVerdictOptions) -> Verd
             .filter(|v| is_string_array(Some(v)))
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|i| i.as_str().map(str::to_string)).collect()),
+        merge_danger,
     };
     VerdictValidationResult {
         valid: true,
@@ -379,6 +433,32 @@ pub fn validate_verdict_file_with_max(
         Ok(parsed) => validate_verdict_data(&parsed, opts),
         Err(e) => fail_closed(vec![format!("verdict JSON 파싱 실패: {}", e)]),
     }
+}
+
+/// strict dispatch 모드 게이트(집행 장치) — `dg backprop --verdict-file`이 유효한
+/// verdict에 `merge_danger`를 필수로 요구한다(mattpocock `pr` 어휘, verifier.md §4).
+/// 무효 verdict(valid=false)는 이 게이트가 아니라 기존 fail-closed 경로(escalate_human
+/// exit 3)가 처리하므로 여기선 통과시킨다. 위반 메시지를 반환하면 UsageError(exit 2)로
+/// 거부하고, `None`이면 통과한다. 모드 판정(`read_dispatch_mode`)은 호출자가 주입한다.
+pub fn merge_danger_strict_violation(
+    mode: &str,
+    verdict: &VerdictValidationResult,
+) -> Option<String> {
+    if mode != "strict" || !verdict.valid {
+        return None;
+    }
+    if verdict
+        .document
+        .as_ref()
+        .and_then(|d| d.merge_danger.as_ref())
+        .is_some()
+    {
+        return None;
+    }
+    Some(
+        "strict dispatch 모드: verdict에 merge_danger(door: one-way|two-way, blast_radius ≤500자)가 필수다 — 검증자 계약 .herdr/roles/verifier.md §4 (해제: dg dispatch-mode off)"
+            .to_string(),
+    )
 }
 
 /// Verdict SSOT 경로 — 입·출력 계약이 `.herdr/verify/`에 쌍으로 결속된다
@@ -757,6 +837,83 @@ mod tests {
         doc["schema_version"] = json!(1.0); // serde_json은 1.0을 f64로 유지
         let r = validate_verdict_data(&doc, &opts());
         assert!(r.valid, "JS 1.0 === 1 과 동일 취급: {:?}", r.errors);
+    }
+
+    // --- Change② merge_danger: (a) 유효·보존 (b) 무효 fail-closed (c) strict 게이트 (d) off 허용 ---
+
+    #[test]
+    fn merge_danger_valid_is_preserved_and_absent_is_backward_compatible() {
+        let mut doc = valid_pass_doc();
+        doc["merge_danger"] = json!({ "door": "two-way", "blast_radius": "engine.rs verdict 검증 경로 전체" });
+        let r = validate_verdict_data(&doc, &opts());
+        assert!(r.valid, "{:?}", r.errors);
+        let md = r.document.unwrap().merge_danger.expect("merge_danger 보존");
+        assert_eq!(md.door, "two-way");
+        assert_eq!(md.blast_radius, "engine.rs verdict 검증 경로 전체");
+        for door in ["one-way", "two-way"] {
+            let mut d = valid_pass_doc();
+            d["merge_danger"] = json!({ "door": door, "blast_radius": "x" });
+            assert!(validate_verdict_data(&d, &opts()).valid, "door={door}");
+        }
+        // 누락·null → 부재 취급(off 호환)
+        let r2 = validate_verdict_data(&valid_pass_doc(), &opts());
+        assert!(r2.valid);
+        assert!(r2.document.unwrap().merge_danger.is_none());
+        let mut d3 = valid_pass_doc();
+        d3["merge_danger"] = json!(null);
+        let r3 = validate_verdict_data(&d3, &opts());
+        assert!(r3.valid, "null은 부재 취급: {:?}", r3.errors);
+        assert!(r3.document.unwrap().merge_danger.is_none());
+    }
+
+    #[test]
+    fn merge_danger_invalid_fails_closed_as_human() {
+        let cases = [
+            json!({ "door": "three-way", "blast_radius": "x" }),
+            json!({ "door": "ONE-WAY", "blast_radius": "x" }),
+            json!({ "door": "one-way", "blast_radius": "" }),
+            json!({ "door": "one-way", "blast_radius": "   " }),
+            json!({ "door": "one-way" }),
+            json!({ "blast_radius": "x" }),
+            json!("nope"),
+            json!([1, 2]),
+        ];
+        for md in cases {
+            let mut doc = valid_pass_doc();
+            doc["merge_danger"] = md.clone();
+            let r = validate_verdict_data(&doc, &opts());
+            assert!(!r.valid, "must fail: {md}");
+            assert_eq!(r.effective_decision, VerdictDecision::Human);
+            assert!(r.document.is_none());
+        }
+        // 길이 경계: 501자 거부(진단 포함), 500자 허용
+        let mut long = valid_pass_doc();
+        long["merge_danger"] = json!({ "door": "one-way", "blast_radius": "b".repeat(501) });
+        let r = validate_verdict_data(&long, &opts());
+        assert!(!r.valid);
+        assert!(r.errors.iter().any(|e| e.contains("blast_radius가 500자를 초과")));
+        let mut edge = valid_pass_doc();
+        edge["merge_danger"] = json!({ "door": "one-way", "blast_radius": "b".repeat(500) });
+        assert!(validate_verdict_data(&edge, &opts()).valid);
+    }
+
+    #[test]
+    fn merge_danger_strict_gate_rules() {
+        let mut with = valid_pass_doc();
+        with["merge_danger"] = json!({ "door": "one-way", "blast_radius": "x" });
+        let with = validate_verdict_data(&with, &opts());
+        let without = validate_verdict_data(&valid_pass_doc(), &opts());
+        let mut bad = valid_pass_doc();
+        bad["decision"] = json!("yolo");
+        let invalid = validate_verdict_data(&bad, &opts());
+        // (d) off: 언제나 통과
+        assert!(merge_danger_strict_violation("off", &without).is_none());
+        assert!(merge_danger_strict_violation("off", &invalid).is_none());
+        // (c) strict: 유효 verdict에 merge_danger 없으면 위반, 있으면 통과
+        assert!(merge_danger_strict_violation("strict", &without).is_some());
+        assert!(merge_danger_strict_violation("strict", &with).is_none());
+        // 무효 verdict는 기존 exit 3 경로 — 게이트 통과
+        assert!(merge_danger_strict_violation("strict", &invalid).is_none());
     }
 
     #[test]

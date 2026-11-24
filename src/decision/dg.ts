@@ -88,7 +88,7 @@ import {
 } from './report.ts';
 import { loadRosterConfig, resolveRosterProfile } from './roster.ts';
 import { computeCostStats, computeDynamicSharpThreshold, computeTimingStats } from './stats.ts';
-import { buildRetroMarkdown, validateVerdictFile } from './verdict.ts';
+import { buildRetroMarkdown, mergeDangerStrictViolation, validateVerdictFile } from './verdict.ts';
 
 class UsageError extends Error {}
 
@@ -676,8 +676,8 @@ function cmdRecord(args: ParsedArgs, json: boolean): void {
  * `dg backprop` 두 모드:
  * - `--verdict-file` 부재: 기존 수동 역귀속(exit 0, UsageError=2).
  * - `--verdict-file <p>` 존재: PR-A3 fail-closed verdict 파이프라인 —
- *   `validateVerdictFile` → `applyVerdictToFork` → exit code는 결과의
- *   `exitCode`(0 pass/backprop_fail/rework, 3 escalate_human)를 그대로 반환.
+ *   `validateVerdictFile` → (strict 모드 merge_danger 게이트) → `applyVerdictToFork` →
+ *   exit code는 결과의 `exitCode`(0 pass/backprop_fail/rework, 3 escalate_human)를 그대로 반환.
  */
 function cmdBackprop(args: ParsedArgs, json: boolean): number | void {
   const forkId = requireFlag(args, 'fork');
@@ -690,13 +690,17 @@ function cmdBackprop(args: ParsedArgs, json: boolean): number | void {
     const fork = getFork(db, forkId);
     if (!fork) throw new UsageError(`fork not found: ${forkId}`);
     if (verdictFile !== undefined) {
+      const expectedHead = optionalFlag(args, 'expected-head');
+      const maxReworks = parseIntFlag(args, 'max-reworks', 2);
+      const verdict = validateVerdictFile(verdictFile, {
+        expectedForkId: forkId,
+        expectedHead,
+      });
+      // strict 게이트(exit 2): UsageError는 아래 verdict pipeline 폴백(exit 3)으로 흡수하지 않는다.
+      // 무효 verdict는 게이트를 통과해 기존 fail-closed(escalate_human exit 3) 경로를 그대로 탄다.
+      const strictViolation = mergeDangerStrictViolation(readDispatchMode(), verdict);
+      if (strictViolation !== null) throw new UsageError(strictViolation);
       try {
-        const expectedHead = optionalFlag(args, 'expected-head');
-        const maxReworks = parseIntFlag(args, 'max-reworks', 2);
-        const verdict = validateVerdictFile(verdictFile, {
-          expectedForkId: forkId,
-          expectedHead,
-        });
         const res = applyVerdictToFork(db, { forkId, verdict, maxReworks });
         emit(
           json,
@@ -712,6 +716,7 @@ function cmdBackprop(args: ParsedArgs, json: boolean): number | void {
             reason: res.reason ?? null,
             waiting_human: res.waitingHuman ?? false,
             p_after: res.pAfter ?? null,
+            merge_danger: verdict.document?.merge_danger ?? null,
           }
         );
         return res.exitCode;
@@ -741,6 +746,7 @@ function cmdBackprop(args: ParsedArgs, json: boolean): number | void {
             reason: message,
             waiting_human: waitingHuman,
             p_after: null,
+            merge_danger: verdict.document?.merge_danger ?? null,
           }
         );
         return 3;

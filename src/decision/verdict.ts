@@ -6,6 +6,8 @@
  * ① 파일·크기·JSON 파싱 ② fork_id/target_head 결속 ③ 모순 판정 3중 불변식으로
  * 검증해, 검증 불가 상태가 절대 통과(pass)로 해석되지 않게 한다 — 모든 거부는
  * `effectiveDecision:'human'` 폴백(fail-closed)이다.
+ * 선택 top-level `merge_danger`(door·blast_radius, mattpocock/skills `pr` 어휘)는
+ * 존재 시 스키마 검증돼 문서에 보존되고, strict 모드 backprop 게이트가 필수 검사한다.
  *
  * 외부 연결:
  * - `dg.ts backprop --verdict-file`(Stage 2 배선): `validateVerdictFile`로 판정 파일을
@@ -30,10 +32,20 @@ export type VerdictDecision = (typeof VERDICT_DECISIONS)[number];
 export const FINDING_SEVERITIES = ['P0', 'P1', 'P2', 'info'] as const;
 export type FindingSeverity = (typeof FINDING_SEVERITIES)[number];
 
+/** Merge Danger door 값 — mattpocock/skills `pr` 어휘 흡수(합류 방향성) */
+export const MERGE_DANGER_DOORS = ['one-way', 'two-way'] as const;
+export type MergeDangerDoor = (typeof MERGE_DANGER_DOORS)[number];
+
 export interface VerdictFinding {
   severity: FindingSeverity;
   title: string;
   evidence: string;
+}
+
+/** 합류 위험 표기(선택) — 검증자가 merge 방향성·영향 반경을 판정과 함께 남긴다 */
+export interface MergeDanger {
+  door: MergeDangerDoor;
+  blast_radius: string;
 }
 
 export interface VerdictDocument {
@@ -46,6 +58,10 @@ export interface VerdictDocument {
   findings: VerdictFinding[];
   checked_commands?: string[];
   artifacts?: string[];
+  /** 선택 — 존재하면 door·blast_radius가 검증되고 backprop 출력에 에코된다.
+   * strict dispatch 모드의 `dg backprop --verdict-file`은 유효한 verdict에 이 필드를
+   * 필수로 요구한다(`mergeDangerStrictViolation` 게이트, UsageError exit 2). */
+  merge_danger?: MergeDanger;
 }
 
 /** 검증 결과 — `valid:false`면 반드시 `effectiveDecision:'human'`(fail-closed) */
@@ -72,6 +88,8 @@ export const DEFAULT_VERDICT_MAX_BYTES = 65536;
 const MAX_REASON_LENGTH = 4000;
 const MAX_ACTION_REQUIRED_LENGTH = 4000;
 const MAX_FINDING_TITLE_LENGTH = 500;
+/** merge_danger.blast_radius 상한(문자 수) — finding title과 같은 기준 */
+const MAX_BLAST_RADIUS_LENGTH = 500;
 /** HEAD prefix 비교 최소 길이 — 그 미만 약칭은 모호해서 Stale Verdict로 거부 */
 const MIN_HEAD_PREFIX_LENGTH = 7;
 /** retro 표 셀에 들어갈 오류 스니펫 상한(문자 수) */
@@ -191,6 +209,39 @@ export function validateVerdictData(
     errors.push('artifacts가 문자열 배열이 아닙니다');
   }
 
+  // --- merge_danger 스키마(선택): mattpocock/skills `pr` Merge Danger 어휘 흡수 —
+  // 누락·null은 부재 취급(백워드 호환), 존재하면 door(one-way|two-way)·
+  // blast_radius(비공백 500자 이하)를 검증해 위반은 불변식 1 구조 위반으로 fail-closed한다 ---
+  let mergeDanger: MergeDanger | undefined;
+  const rawMergeDanger: unknown = doc.merge_danger;
+  if (rawMergeDanger !== undefined && rawMergeDanger !== null) {
+    if (typeof rawMergeDanger !== 'object' || Array.isArray(rawMergeDanger)) {
+      errors.push('merge_danger가 객체가 아닙니다');
+    } else {
+      const md = rawMergeDanger as Record<string, unknown>;
+      const doorOk =
+        typeof md.door === 'string' &&
+        (MERGE_DANGER_DOORS as readonly string[]).includes(md.door);
+      if (!doorOk) {
+        errors.push(
+          `merge_danger.door가 허용 값(one-way|two-way)이 아닙니다: ${JSON.stringify(md.door)}`,
+        );
+      }
+      const blast = md.blast_radius;
+      const blastNonEmpty = typeof blast === 'string' && blast.trim().length > 0;
+      if (!blastNonEmpty) {
+        errors.push('merge_danger.blast_radius가 빈 문자열이거나 누락됐습니다');
+      } else if (blast.length > MAX_BLAST_RADIUS_LENGTH) {
+        errors.push(
+          `merge_danger.blast_radius가 ${MAX_BLAST_RADIUS_LENGTH}자를 초과했습니다: ${blast.length}자`,
+        );
+      }
+      if (doorOk && blastNonEmpty && (blast as string).length <= MAX_BLAST_RADIUS_LENGTH) {
+        mergeDanger = { door: md.door as MergeDangerDoor, blast_radius: blast as string };
+      }
+    }
+  }
+
   // --- 불변식 2: Fork & HEAD 결속 (Replay·Stale 차단) ---
   if (typeof doc.fork_id !== 'string' || doc.fork_id !== opts.expectedForkId) {
     errors.push(
@@ -250,6 +301,7 @@ export function validateVerdictData(
   if (typeof doc.action_required === 'string') document.action_required = doc.action_required;
   if (isStringArray(doc.checked_commands)) document.checked_commands = [...doc.checked_commands];
   if (isStringArray(doc.artifacts)) document.artifacts = [...doc.artifacts];
+  if (mergeDanger !== undefined) document.merge_danger = mergeDanger;
   return { valid: true, effectiveDecision: document.decision, errors: [], document };
 }
 
@@ -294,6 +346,20 @@ export function validateVerdictFile(
     ]);
   }
   return validateVerdictData(parsed, opts);
+}
+
+/** strict dispatch 모드 게이트(집행 장치) — `dg backprop --verdict-file`이 유효한
+ * verdict에 `merge_danger`를 필수로 요구한다(mattpocock `pr` 어휘, verifier.md §4).
+ * 무효 verdict(valid:false)는 이 게이트가 아니라 기존 fail-closed 경로(escalate_human
+ * exit 3)가 처리하므로 여기선 통과시킨다. 위반 메시지를 반환하면 UsageError(exit 2)로
+ * 거부하고, `null`이면 통과한다. 모드 판정(readDispatchMode)은 호출자가 주입한다. */
+export function mergeDangerStrictViolation(
+  mode: 'off' | 'strict',
+  verdict: VerdictValidationResult,
+): string | null {
+  if (mode !== 'strict' || !verdict.valid) return null;
+  if (verdict.document?.merge_danger !== undefined) return null;
+  return 'strict dispatch 모드: verdict에 merge_danger(door: one-way|two-way, blast_radius ≤500자)가 필수다 — 검증자 계약 .herdr/roles/verifier.md §4 (해제: dg dispatch-mode off)';
 }
 
 /** Verdict SSOT 경로 — 입·출력 계약이 `.herdr/verify/`에 쌍으로 결속된다 */

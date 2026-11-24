@@ -332,3 +332,80 @@ fn test_project_id_hash_algorithm_identity() {
 
     std::fs::remove_dir_all(&base).unwrap();
 }
+
+/// Node `scripts/dispatch.ts` ↔ Rust `dg dispatch` DispatchPlan JSON 필드 핀(Change ①·③).
+/// dry-run 리허설(`:memory:`)로 양쪽을 동일 입력·동일 격리 환경(XDG_STATE_HOME off·
+/// XDG_CONFIG_HOME 빈 디렉터리 → 내장 roster)에서 실행해 ① 최상위 키 집합 일치,
+/// ② 판정 필수 필드 equality, ③ 워커 프롬프트 바이트 동등(`{brief}`→경로 치환 포함)을 단언한다.
+#[test]
+fn test_dispatch_plan_json_field_parity() {
+    const NODE_DISPATCH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/dispatch.ts");
+    let base = temp_base();
+    let proj = base.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    let brief = base.join("brief.md");
+    std::fs::write(
+        &brief,
+        "# Verifier Brief\n\n## Standards\n\n- 없음\n\n## Spec\n\n- 충족\n\n## Merge Danger\n\ndoor: two-way\nblast_radius: compat 경로\n",
+    )
+    .unwrap();
+    let xstate = base.join("xstate-off");
+    let xconfig = base.join("xconfig");
+    std::fs::create_dir_all(&xconfig).unwrap();
+    let args = ["--task-kind", "single_edit", "--repo", &proj.display().to_string(), "--dry-run", "--json", "--brief-file", &brief.display().to_string()];
+
+    let run = |program: &str, prefix: Option<&[&str]>, script: Option<&str>| -> Value {
+        let mut cmd = Command::new(program);
+        if let Some(s) = script {
+            cmd.arg(s);
+        }
+        if let Some(pre) = prefix {
+            cmd.args(pre);
+        }
+        let out = cmd
+            .args(args)
+            .env_remove("DGATE_DB_PATH")
+            .env_remove("DECISION_ORCHESTRATOR_DB_PATH")
+            .env_remove("GEMINI_TRICK_DB_PATH")
+            .env_remove("HERDR_ROSTER_PATH")
+            .env("XDG_STATE_HOME", &xstate)
+            .env("XDG_CONFIG_HOME", &xconfig)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("dispatch spawn");
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert_eq!(out.status.code(), Some(0), "{} stderr={}", program, String::from_utf8_lossy(&out.stderr));
+        last_json(&stdout)
+    };
+    let node = run(node_path(), None, Some(NODE_DISPATCH));
+    let rust = run(DG, Some(&["dispatch"]), None);
+
+    // ① 필드 핀 — 최상위 키 집합 완전 일치(양쪽에 새 필드를 넣으면 이 테스트가 먼저 깨진다)
+    let mut nk: Vec<String> = node.as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
+    let mut rk: Vec<String> = rust.as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
+    nk.sort();
+    rk.sort();
+    assert_eq!(nk, rk, "DispatchPlan 최상위 키 불일치");
+    let expected_keys = [
+        "basis", "carbonBriefPath", "consecutiveErrors", "dbPath", "decision", "deferred", "escalateCarbon",
+        "forcedSplit", "forkId", "hcCommands", "ok", "p", "reason", "requiresWrite", "riskLevel", "roleSummary", "rosterSource",
+        "rosterSourcePath", "rosterWarnings", "route", "runId", "samples", "sessionName", "sharp_threshold", "targetRepo", "taskKind",
+        "toolClass", "ttlMs", "worktreeCommands",
+    ];
+    assert_eq!(nk, expected_keys.map(String::from).to_vec(), "DispatchPlan 키 집합 고정값 drift");
+
+    // ② 판정 필드 equality — runId·forkId·sessionName(난수/파생)만 제외
+    for k in ["ok", "deferred", "reason", "taskKind", "route", "toolClass", "requiresWrite", "riskLevel", "p", "basis", "samples",
+        "consecutiveErrors", "decision", "forcedSplit", "escalateCarbon", "ttlMs", "dbPath", "targetRepo", "rosterSource", "rosterSourcePath",
+        "rosterWarnings", "roleSummary", "sharp_threshold", "carbonBriefPath"] {
+        assert_eq!(node[k], rust[k], "필드 {k} 불일치");
+    }
+    assert_eq!(rust["sessionName"], format!("lead-{}", rust["runId"].as_str().unwrap()));
+    assert_eq!(node["sessionName"], format!("lead-{}", node["runId"].as_str().unwrap()));
+
+    // ③ 워커 프롬프트 바이트 동등 — 브리프 문장 + `{brief}`→경로 치환까지 TS/Rust 동일
+    let prompt_of = |v: &Value| v["hcCommands"][0].as_array().unwrap().last().unwrap().as_str().unwrap().to_string();
+    assert_eq!(prompt_of(&node), prompt_of(&rust));
+    assert!(prompt_of(&rust).ends_with(&format!("Merge Danger을 따르라: {}", brief.display())));
+}

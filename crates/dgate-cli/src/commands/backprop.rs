@@ -1,8 +1,9 @@
 //! `dg backprop` — 수동 역귀속 + fail-closed verdict 파이프라인(dg.ts cmdBackprop 대응).
 //!
 //! - `--verdict-file` 부재: 기존 수동 역귀속(exit 0, UsageError=2).
-//! - `--verdict-file <p>` 존재: validate → apply → 결과 exitCode(0 또는 3) 반환.
-//!   verdict 경로의 내부 오류는 §3.5 DB 폴백으로 흡수하지 않고 exit 3을 유지한다.
+//! - `--verdict-file <p>` 존재: validate → (strict 모드 merge_danger 게이트) → apply →
+//!   결과 exitCode(0 또는 3) 반환. verdict 경로의 내부 오류는 §3.5 DB 폴백으로 흡수하지
+//!   않고 exit 3을 유지한다.
 use serde_json::{json, Value};
 
 use crate::args::{optional_flag, parse_float_flag, parse_int_flag, require_flag, ParsedArgs};
@@ -32,6 +33,15 @@ pub fn cmd_backprop(args: &ParsedArgs, json: bool) -> CmdResult {
                 expected_head,
             },
         );
+        // strict 게이트(exit 2): UsageError는 verdict pipeline 폴백(exit 3)으로 흡수하지 않는다.
+        // 무효 verdict는 게이트를 통과해 기존 fail-closed(escalate_human exit 3) 경로를 그대로 탄다.
+        if let Some(msg) = verdict::merge_danger_strict_violation(&engine::read_dispatch_mode(), &v) {
+            return Err(DgError::Usage(crate::args::UsageError(msg)));
+        }
+        let merge_danger_json = match v.document.as_ref().and_then(|d| d.merge_danger.as_ref()) {
+            Some(md) => serde_json::to_value(md).unwrap_or(Value::Null),
+            None => Value::Null,
+        };
         match engine::apply_verdict_to_fork(&db, &fork_id, &v, Some(max_reworks), None) {
             Ok(res) => {
                 let human = format!(
@@ -54,6 +64,7 @@ pub fn cmd_backprop(args: &ParsedArgs, json: bool) -> CmdResult {
                         "reason": res.reason,
                         "waiting_human": res.waiting_human.unwrap_or(false),
                         "p_after": res.p_after,
+                        "merge_danger": merge_danger_json,
                     }),
                 );
                 Ok(res.exit_code)
@@ -89,6 +100,7 @@ pub fn cmd_backprop(args: &ParsedArgs, json: bool) -> CmdResult {
                         "reason": message,
                         "waiting_human": waiting_human,
                         "p_after": Value::Null,
+                        "merge_danger": merge_danger_json,
                     }),
                 );
                 Ok(3)

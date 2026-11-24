@@ -233,8 +233,13 @@ cp .herdr/roster.example.json ~/.config/herdr-quad/roster.json
 node ./scripts/herdr-quad-launch.ts --repo /path/to/your-project --mode orchestrate --dry-run
 ```
 
+### 디스패처 게이트 — `--brief-file` · `--after <fork_id>`
+
+- **`--brief-file <path>`(검증자 브리프)** — 디스패처(`dg dispatch`·`scripts/dispatch.ts` 공통)가 입구에서 브리프 형식을 기계 검증한다: `## Standards`·`## Spec`·`## Merge Danger` 헤딩 3종, `door: one-way|two-way`, 비어있지 않은 `blast_radius:`(≤500자), ≤64KB·UTF-8. 위반·읽기 실패는 UsageError `exit 2`로 나열 거부하고, strict dispatch 모드(`dg dispatch-mode strict`)에서는 브리프 자체가 필수다(fail-closed). 유효 브리프는 워커 프롬프트 끝에 "브리프 파일을 먼저 읽고 두 축(Standards/Spec)과 Merge Danger을 따르라: <경로>" 한 문장으로 주입된다. 템플릿: [docs/verifier-brief-template.md](docs/verifier-brief-template.md).
+- **`--after <fork_id>`(fork 의존성 ready-frontier)** — 종속 fork가 살아 있으면(`open`·`waiting_human`) 디스패처는 `ok:true, deferred:true, reason:"after_fork <id> not closed (status=<s>)"`로 발행을 미루고(코맨드 0·fork 미발행), 닫힌 상태(terminal)면 정상 발행하며 새 fork의 `metadata_json.after_fork`에 의존 fork를 기록한다. 없는 fork면 UsageError `exit 2`.
+
 <details>
-<summary><b><code>dg</code> 서브커맨드 15종 전체 참조</b></summary>
+<summary><b><code>dg</code> 서브커맨드 21종 전체 참조</b></summary>
 
 ```bash
 node ./src/decision/dg.ts <command> [flags]
@@ -257,6 +262,12 @@ node ./src/decision/dg.ts <command> [flags]
 | `worktree` | `worktree remove` — 체크포인트 검증 통과 전 삭제 물리 차단 (`exit 4`, 우회 불가) |
 | `report` | 읽기전용 규칙 후보 리포트 (`--days`·`--out`) — `--out`은 `<repo>/.herdr/report/` 또는 저장소 외부만 허용 |
 | `compact` | 결정 DB 압축·통계 정리 |
+| `hook` | `--guard`(stdin JSON → deny/allow, fail-closed 읽기전용 가드) · `--collect`(PostToolUse 텔레메트리, fail-open) |
+| `setup` | `--check`·`--json`·`--repo <dir>` — 설치·훅 상태 점검 |
+| `dispatch` | `--task-kind <k>` 판정으로 fork 발급(`dispatch:true` 메타데이터) + 워커 커맨드 생성. `--brief-file <p>`·`--after <fork_id>` 게이트 (§4) |
+| `dispatch-mode` | `--set off\|strict` — strict: delegate_swarm wrap은 dispatch 발급 `--fork`만 허용 |
+| `send` | `<addr> <message…>` — hc send + 전달 확인·재전송, 미확인 exit 1 |
+| `reap` | `--minutes 30`·`--dry-run` — 종료 터미널 유휴 창 경과 후 자동 정리 |
 
 </details>
 
@@ -286,6 +297,7 @@ node ./src/decision/dg.ts <command> [flags]
 
 - **`.herdr/verify/<fork_id>-verdict.json`** — 검증자가 남기는 SSOT 판정 문서(`schema_version: 1`). `decision`은 `pass|rework|fail|human` 4종, `findings[].severity`는 `P0|P1|P2|info`. `dg backprop --verdict-file <path> [--expected-head <sha>] [--max-reworks 2]`가 3중 불변식(스키마·fork_id/HEAD 결속·모순 판정)으로 검증해 fork에 반영한다 — `pass`는 fork→`ok`, `fail`은 역전파, `rework`는 재작업 카운트+w1.0 페널티, `human`/무효·누락·Stale·Replay는 전부 `exit 3` + `waiting_human` 파킹이다. pass에 P0/P1 finding이 있거나 fail/rework에 비공백 evidence가 없으면 모순으로 거부된다.
 - **`dg retro --fork <id> [--out <path>]`** — fork의 상태·원인·시도·재작업 횟수·실패 도구 상위 5건·다음 시도 권고를 리덕션된 마크다운으로 생성해 다음 워커 브리프에 주입한다(opt-in — 자동 생성하지 않는다).
+- **`merge_danger`(선택 top-level 필드)** — mattpocock/skills `pr`의 Merge Danger 어휘 흡수: `{"door":"one-way|two-way","blast_radius":"영향 요약 ≤500자"}`. `door` `one-way`는 되돌리기 어려운 변경, `two-way`는 되돌리기 저렴한 변경이다. 값이 있으면 스키마 검증돼(위반 = 구조 fail-closed → `human`) backprop 출력 JSON에 에코되고, strict dispatch 모드(`dg dispatch-mode strict`)에서는 유효한 verdict에 필수다 — 부재 시 UsageError `exit 2`로 거부한다(off 모드는 백워드 호환).
 
 </details>
 

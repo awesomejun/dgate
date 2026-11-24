@@ -57,6 +57,9 @@ function makeEnv(withGit = false): TestEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   env.GEMINI_TRICK_DB_PATH = neverDb;
   env.XDG_CONFIG_HOME = xdg;
+  // 디스패처 --brief-file 게이트(Change ①)가 읽는 머신 전역 dispatch-mode(strict 포함)와
+  // 무관하게 off로 동작시킨다 — CLI 스폰 테스트는 상태 파일을 임시 경로로 격리한다.
+  env.XDG_STATE_HOME = path.join(base, 'xstate-off');
   delete env.DGATE_DB_PATH;
   delete env.DECISION_ORCHESTRATOR_DB_PATH;
   delete env.HERDR_ROSTER_PATH;
