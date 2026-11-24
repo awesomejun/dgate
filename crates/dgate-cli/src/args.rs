@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 /// 값 없이 단독으로 쓰는 불리언 플래그 — dg.ts `BOOL_FLAGS` + v2 신규
 /// `hook`/`setup`/`dispatch` 전용 플래그(TS dg.ts에는 없는 명령들).
-pub const BOOL_FLAGS: [&str; 16] = [
+pub const BOOL_FLAGS: [&str; 17] = [
     "json",
     "is-retry",
     "require-stdout-nonempty",
@@ -25,6 +25,7 @@ pub const BOOL_FLAGS: [&str; 16] = [
     "yes",
     "dry-run",
     "help",
+    "stalled",
 ];
 
 /// 사용법 오류 — main에서 exit 2로 변환한다.

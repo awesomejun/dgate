@@ -1,7 +1,7 @@
 //! dgate-core: 결정 엔진 코어 라이브러리 (v2 Rust).
 //!
 //! 전체 코어 모듈: `redact` · `db` · `engine` · `verdict` · `telemetry` · `roster` ·
-//! `stats` · `checkpoint` · `report` · `adapter` · `hook` · `live_sync` · `setup`.
+//! `stats` · `checkpoint` · `report` · `adapter` · `hook` · `live_sync` · `setup` · `pipeline`.
 
 pub mod adapter;
 pub mod checkpoint;
@@ -9,6 +9,7 @@ pub mod db;
 pub mod engine;
 pub mod hook;
 pub mod live_sync;
+pub mod pipeline;
 pub mod redact;
 pub mod report;
 pub mod roster;

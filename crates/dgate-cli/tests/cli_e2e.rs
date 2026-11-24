@@ -828,3 +828,164 @@ fn test_08_dispatch_brief_after_gates() {
 
     std::fs::remove_dir_all(&base).unwrap();
 }
+
+#[test]
+fn test_09_pipeline_init_step_status_lifecycle() {
+    let base = temp_base("pipeline");
+    let state_dir = base.join("pipes");
+    let sd = state_dir.display().to_string();
+    let envs: [(&str, &str); 0] = [];
+
+    let brief = base.join("brief.md");
+    std::fs::write(&brief, "# brief\n\n## Spec\n- x\n").unwrap();
+    let brief_s = brief.display().to_string();
+
+    // ---------- init → SpawnCoder + 상태 파일 생성 ----------
+    let init = dg_json(
+        &[
+            "pipeline", "init", "--fork", "fk_pipe1", "--brief", &brief_s,
+            "--branch", "feat/pipe", "--worktree", &base.join("wt").display().to_string(),
+            "--scope", "crates/*", "--coder-model", "codex-gpt5", "--verifier-model", "glm-5.3",
+            "--state-dir", &sd,
+        ],
+        &envs,
+    );
+    assert_eq!(init["action"], "init");
+    assert_eq!(init["phase"], "coder_running");
+    assert_eq!(init["next_action"]["kind"], "spawn_coder");
+    assert_eq!(init["next_action"]["attempt"], 0);
+    // 브리프/워크트리가 crates/* 도메인 밖 → scope_warnings에 경고
+    let warns = init["scope_warnings"].as_array().unwrap();
+    assert!(warns.iter().any(|w| w.as_str().unwrap().contains("brief.md")), "scope 경고: {warns:?}");
+    let state_file = state_dir.join("fk_pipe1.json");
+    assert!(state_file.exists(), "상태 파일 생성");
+
+    // ---------- coder-ok → 이종 모델 → SpawnVerifier ----------
+    let step = dg_json(
+        &[
+            "pipeline", "step", "--fork", "fk_pipe1", "--event", "coder-ok",
+            "--head", "abc1234def", "--state-dir", &sd,
+        ],
+        &envs,
+    );
+    assert_eq!(step["phase"], "verifier_running");
+    assert_eq!(step["next_action"]["kind"], "spawn_verifier");
+    assert_eq!(step["next_action"]["verifier_model"], "glm-5.3");
+    assert_eq!(step["next_action"]["head_sha"], "abc1234def");
+
+    // ---------- verdict pass → SpawnAdvisorG3 ----------
+    let verdict_path = base.join("v-pass.json");
+    std::fs::write(
+        &verdict_path,
+        serde_json::json!({
+            "schema_version": 1,
+            "fork_id": "fk_pipe1",
+            "target_head": "abc1234def",
+            "decision": "pass",
+            "reason": "e2e ok",
+            "findings": [],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let step = dg_json(
+        &[
+            "pipeline", "step", "--fork", "fk_pipe1", "--event", "verdict",
+            "--verdict-file", &verdict_path.display().to_string(), "--state-dir", &sd,
+        ],
+        &envs,
+    );
+    assert_eq!(step["phase"], "advisor_g3_running");
+    assert_eq!(step["next_action"]["kind"], "spawn_advisor_g3");
+    assert_eq!(step["verdict_errors"].as_array().unwrap().len(), 0);
+
+    // ---------- g3-pass → ReadyPr + READY_PR 신호 ----------
+    let step = dg_json(
+        &[
+            "pipeline", "step", "--fork", "fk_pipe1", "--event", "g3-pass",
+            "--pr", "42", "--state-dir", &sd,
+        ],
+        &envs,
+    );
+    assert_eq!(step["phase"], "ready_pr");
+    assert_eq!(step["next_action"]["kind"], "emit_ready_pr");
+    assert_eq!(step["ready_pr_signal"], "READY_PR=42 HEAD=abc1234def G3=PASS");
+
+    // ---------- status — 읽기 전용 조회 ----------
+    let status = dg_json(
+        &["pipeline", "status", "--fork", "fk_pipe1", "--state-dir", &sd],
+        &envs,
+    );
+    assert_eq!(status["state"]["phase"], "ready_pr");
+    assert_eq!(status["state"]["pr_number"], 42);
+    assert_eq!(
+        status["state"]["history"].as_array().unwrap().len(),
+        4, // init + coder_exited + verdict_received + advisor_g3_result
+    );
+
+    // ---------- 재작업 루프 → 에스컬레이션 exit 3 ----------
+    dg_json(
+        &[
+            "pipeline", "init", "--fork", "fk_pipe2", "--brief", &brief_s,
+            "--branch", "feat/p2", "--coder-model", "codex", "--verifier-model", "glm",
+            "--state-dir", &sd,
+        ],
+        &envs,
+    );
+    for (i, phase) in ["rework_pending", "rework_pending"].iter().enumerate() {
+        let step = dg_json(
+            &[
+                "pipeline", "step", "--fork", "fk_pipe2", "--event", "coder-fail",
+                "--state-dir", &sd,
+            ],
+            &envs,
+        );
+        assert_eq!(step["phase"], *phase, "{}번째 실패", i + 1);
+        assert_eq!(step["next_action"]["kind"], "spawn_coder");
+        assert_eq!(step["attempt"], (i + 1) as i64);
+    }
+    // max_reworks 소진 → Escalated + exit 3
+    let r = dg(
+        &[
+            "pipeline", "step", "--fork", "fk_pipe2", "--event", "coder-fail",
+            "--stalled", "--state-dir", &sd, "--json",
+        ],
+        &envs,
+    );
+    assert_eq!(r.status, 3, "재시도 소진 → 에스컬레이션 exit 3 (stderr={})", r.stderr);
+    let parsed: Value = serde_json::from_str(r.stdout.trim().lines().last().unwrap()).unwrap();
+    assert_eq!(parsed["phase"], "escalated");
+    assert_eq!(parsed["next_action"]["kind"], "wake_sublead_escalation");
+
+    // ---------- 동종 모델 → fail-closed 에스컬레이션 ----------
+    // gpt-4o/gpt-5 모두 normalize_model_family → "gpt" (동종 → 이종 불변식 위반)
+    dg_json(
+        &[
+            "pipeline", "init", "--fork", "fk_pipe3", "--brief", &brief_s,
+            "--branch", "feat/p3", "--coder-model", "gpt-4o", "--verifier-model", "gpt-5",
+            "--state-dir", &sd,
+        ],
+        &envs,
+    );
+    let r = dg(
+        &[
+            "pipeline", "step", "--fork", "fk_pipe3", "--event", "coder-ok",
+            "--state-dir", &sd, "--json",
+        ],
+        &envs,
+    );
+    assert_eq!(r.status, 3, "동종 모델 → fail-closed exit 3");
+    let parsed: Value = serde_json::from_str(r.stdout.trim().lines().last().unwrap()).unwrap();
+    assert_eq!(parsed["phase"], "escalated");
+    assert!(parsed["escalation_reason"].as_str().unwrap().contains("이종 불변식"));
+
+    // ---------- 사용법 오류 ----------
+    let r = dg(&["pipeline", "bogus"], &envs);
+    assert_eq!(r.status, 2, "알 수 없는 서브커맨드 → exit 2");
+    let r = dg(&["pipeline", "status", "--fork", "fk_none", "--state-dir", &sd], &envs);
+    assert_eq!(r.status, 2, "미존재 상태 파일 → exit 2");
+    let r = dg(&["pipeline", "step", "--fork", "fk_pipe1", "--event", "bogus", "--state-dir", &sd], &envs);
+    assert_eq!(r.status, 2, "알 수 없는 이벤트 → exit 2");
+
+    std::fs::remove_dir_all(&base).unwrap();
+}
