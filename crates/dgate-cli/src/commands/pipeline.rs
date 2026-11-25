@@ -616,7 +616,8 @@ fn wrap_spawn_argv(
     cfg: &ExecConfig,
     sess: &str,
     role: &str,
-    fork_id: &str,
+    tool_class: &str,
+    fork_id: Option<&str>,
     require_artifact: Option<&Path>,
     inner: &[String],
 ) -> Vec<String> {
@@ -626,20 +627,24 @@ fn wrap_spawn_argv(
         "--route".to_string(),
         "file_select".to_string(),
         "--tool-class".to_string(),
-        "file_edit".to_string(),
+        tool_class.to_string(),
         "--role".to_string(),
         role.to_string(),
         "--label".to_string(),
         sess.to_string(),
-        "--fork".to_string(),
-        fork_id.to_string(),
+    ];
+    if let Some(fk) = fork_id {
+        argv.push("--fork".to_string());
+        argv.push(fk.to_string());
+    }
+    argv.extend([
         "--project".to_string(),
         cfg.repo_dir.display().to_string(),
         "--stall-ms".to_string(),
         WRAP_STALL_MS.to_string(),
         "--max-ms".to_string(),
         WRAP_MAX_MS.to_string(),
-    ];
+    ]);
     if let Some(art) = require_artifact {
         argv.push("--require-artifact".to_string());
         argv.push(art.display().to_string());
@@ -675,7 +680,10 @@ fn coder_commands(
     let sess = session_name("coder", &state.fork_id, Some(attempt));
     let cwd = worker_cwd(cfg, state);
     let inner = coder_inner_argv(state, attempt, feedback, verdict_path);
-    let spawn = wrap_spawn_argv(cfg, &sess, "coder", &state.fork_id, None, &inner);
+    // attempt 0만 파이프라인 루트 fork에 결속하고, rework(attempt>0)는 이미 닫힌 루트 fork
+    // 재사용 오류(`fork not open`)를 막기 위해 `dg wrap`이 새 스텝 fork를 자동 발급하게 둔다.
+    let step_fork = (attempt == 0).then_some(state.fork_id.as_str());
+    let spawn = wrap_spawn_argv(cfg, &sess, "coder", "file_edit", step_fork, None, &inner);
     vec![
         hc_run_argv(cfg, &sess, &cwd, &spawn),
         vec![cfg.hc_bin.clone(), "wait".to_string(), sess.clone(), "--json".to_string()],
@@ -728,7 +736,9 @@ fn plan_commands(
             let sess = session_name("verifier", fork_id, Some(state.attempt));
             let vp = verdict::resolve_verdict_path(&cfg.repo_dir, fork_id);
             let inner = verifier_inner_argv(state, &vp);
-            let spawn = wrap_spawn_argv(cfg, &sess, "verifier", fork_id, Some(&vp), &inner);
+            // coder(a0)가 종료되며 루트 fork를 닫으므로 verifier는 --fork 없이 자체 스텝 fork를 연다.
+            // verdict JSON 내부 fork_id는 여전히 state.fork_id에 결속된다.
+            let spawn = wrap_spawn_argv(cfg, &sess, "verifier", "file_read", None, Some(&vp), &inner);
             vec![
                 hc_run_argv(cfg, &sess, &cwd, &spawn),
                 vec![cfg.hc_bin.clone(), "wait".to_string(), sess.clone(), "--json".to_string()],
@@ -739,7 +749,7 @@ fn plan_commands(
         PipelineAction::SpawnAdvisorG3 { fork_id, .. } => {
             let sess = session_name("advisor-g3", fork_id, None);
             let inner = advisor_inner_argv(cfg, state);
-            let spawn = wrap_spawn_argv(cfg, &sess, "advisor", fork_id, None, &inner);
+            let spawn = wrap_spawn_argv(cfg, &sess, "advisor", "file_read", None, None, &inner);
             vec![
                 hc_run_argv(cfg, &sess, &cwd, &spawn),
                 vec![cfg.hc_bin.clone(), "wait".to_string(), sess.clone(), "--json".to_string()],
@@ -949,7 +959,8 @@ impl RealPipelineExecutor {
         let sess = session_name("coder", &state.fork_id, Some(attempt));
         let cwd = worker_cwd(&self.cfg, state);
         let inner = coder_inner_argv(state, attempt, feedback, verdict_path);
-        let argv = wrap_spawn_argv(&self.cfg, &sess, "coder", &state.fork_id, None, &inner);
+        let step_fork = (attempt == 0).then_some(state.fork_id.as_str());
+        let argv = wrap_spawn_argv(&self.cfg, &sess, "coder", "file_edit", step_fork, None, &inner);
         let info = hc_run_to_exit(&self.cfg.hc_bin, &sess, &cwd, &argv)?;
         let mut event = coder_event_from_session(&self.cfg.hc_bin, &sess, &info);
         if let PipelineEvent::CoderExited { ref mut head_sha, .. } = event {
@@ -969,7 +980,7 @@ impl RealPipelineExecutor {
             let _ = std::fs::create_dir_all(dir);
         }
         let inner = verifier_inner_argv(state, &vp);
-        let argv = wrap_spawn_argv(&self.cfg, &sess, "verifier", &state.fork_id, Some(&vp), &inner);
+        let argv = wrap_spawn_argv(&self.cfg, &sess, "verifier", "file_read", None, Some(&vp), &inner);
         let _info = hc_run_to_exit(&self.cfg.hc_bin, &sess, &cwd, &argv)?;
         hc_rm(&self.cfg.hc_bin, &sess);
         let v = verdict::validate_verdict_file(
@@ -992,7 +1003,7 @@ impl RealPipelineExecutor {
         let sess = session_name("advisor-g3", &state.fork_id, None);
         let cwd = worker_cwd(&self.cfg, state);
         let inner = advisor_inner_argv(&self.cfg, state);
-        let argv = wrap_spawn_argv(&self.cfg, &sess, "advisor", &state.fork_id, None, &inner);
+        let argv = wrap_spawn_argv(&self.cfg, &sess, "advisor", "file_read", None, None, &inner);
         let _info = hc_run_to_exit(&self.cfg.hc_bin, &sess, &cwd, &argv)?;
         let screen = hc_read(&self.cfg.hc_bin, &sess, ADVISOR_READ_LINES);
         hc_rm(&self.cfg.hc_bin, &sess);
@@ -1477,6 +1488,8 @@ mod run_tests {
         let cmds = plan_commands(&action, &s2, &cfg);
         let joined = cmds.iter().map(|c| c.join(" ")).collect::<Vec<_>>().join("\n");
         assert!(joined.contains("--role verifier"));
+        assert!(joined.contains("--tool-class file_read"));
+        assert!(!joined.contains("--fork fk_r"));
         assert!(joined.contains("opencodex") && joined.contains("glm-5.3"));
         assert!(joined.contains("--no-session"));
         assert!(joined.contains("-p"));
@@ -1490,9 +1503,11 @@ mod run_tests {
         let cmds = plan_commands(&action, &s3, &cfg);
         let joined = cmds.iter().map(|c| c.join(" ")).collect::<Vec<_>>().join("\n");
         assert!(joined.contains("--role advisor"));
+        assert!(joined.contains("--tool-class file_read"));
+        assert!(!joined.contains("--fork fk_r"));
         assert!(cmds.iter().any(|c| c[0] == "gh" && c.join(" ").contains("pr create")));
 
-        // backprop 경유 rework_pending — dg backprop --verdict-file 선행
+        // backprop 경유 rework_pending — dg backprop --verdict-file 선행, rework 코더는 닫힌 루트 --fork 미재사용
         let mut s4 = state.clone();
         s4.phase = PipelinePhase::ReworkPending;
         s4.attempt = 1;
@@ -1510,6 +1525,7 @@ mod run_tests {
         assert_eq!(cmds[0][0], "dg");
         assert_eq!(cmds[0][1], "backprop");
         assert!(cmds[0].join(" ").contains("--verdict-file"));
+        assert!(!cmds[1].join(" ").contains("--fork fk_r"));
     }
 
     // 부록) 유틸 — 세션명 계약·마커·PR 번호 파싱
