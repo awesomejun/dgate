@@ -43,7 +43,7 @@ const HELP: &str = "dg — decision gate CLI (plan-r2.1 §4.7, v2 native Rust)
   dg attempt --fork <id> [--bump-gen] [--json]
   dg retro --fork <id> [--out <path>] [--json]
   dg settle-orphans [--json]
-  dg wrap --route <r> --tool-class <c> [--fork <id>] [--source wrap] [--require-artifact <path>] [--require-nonempty] [--require-stdout-nonempty] [--stall-ms 120000] [--max-ms 1200000] [--heartbeat-ms 60000] [--kill-grace-ms 1000] [--expected-gen <n>] [--expected-attempt <n>] [--sanitize-env] [--allow-env K1,K2] [--json] -- <cmd…>
+  dg wrap --route <r> --tool-class <c> [--fork <id>] [--source wrap] [--require-artifact <path>] [--require-nonempty] [--require-stdout-nonempty] [--stall-ms 300000] [--stall-action kill|warn] [--max-ms 1200000] [--heartbeat-ms 60000] [--kill-grace-ms 1000] [--expected-gen <n>] [--expected-attempt <n>] [--sanitize-env] [--allow-env K1,K2] [--json] -- <cmd…>
   dg compact [--max-events 50000] [--days 30] [--json]
   dg stats [--cost] [--timing] [--project <dir>] [--fork <id>] [--days 14] [--db <path>] [--json]
   dg checkpoint create --worktree <path> --run-id <id> [--repo <dir>] [--name <wtName>] [--checkpoint-root <dir>] [--json]

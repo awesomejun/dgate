@@ -134,10 +134,38 @@ struct WrapRunResult {
     tail_lines: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StallAction {
+    Kill,
+    Warn,
+}
+
+fn parse_stall_action(args: &ParsedArgs) -> Result<StallAction, DgError> {
+    let raw = optional_flag(args, "stall-action")
+        .or_else(|| std::env::var("DGATE_STALL_ACTION").ok().filter(|s| !s.trim().is_empty()))
+        .unwrap_or_else(|| "kill".to_string());
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "kill" => Ok(StallAction::Kill),
+        "warn" => Ok(StallAction::Warn),
+        other => Err(DgError::Usage(crate::args::UsageError(format!(
+            "invalid --stall-action \"{other}\" (expected kill|warn)"
+        )))),
+    }
+}
+
+fn default_stall_ms() -> i64 {
+    std::env::var("DGATE_STALL_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|&v| v >= 0)
+        .unwrap_or(300_000)
+}
+
 fn run_wrapped_child(
     command: &[String],
     env: Option<BTreeMap<String, String>>,
     stall_ms: i64,
+    stall_action: StallAction,
     max_ms: i64,
     heartbeat_ms: i64,
     kill_grace_ms: i64,
@@ -264,6 +292,7 @@ fn run_wrapped_child(
     let wd_fork = fork_id.clone();
     let watchdog = std::thread::spawn(move || {
         let mut last_touch_ms = 0i64;
+        let mut stall_warned = false;
         loop {
             if wd_state.settled.load(std::sync::atomic::Ordering::SeqCst) {
                 return;
@@ -287,13 +316,27 @@ fn run_wrapped_child(
             let now = crate::util::now_ms();
             let last_output = wd_state.last_output_ms.load(std::sync::atomic::Ordering::SeqCst);
             if stall_ms > 0 && now - last_output >= stall_ms {
-                wd_state.stalled.store(true, std::sync::atomic::Ordering::SeqCst);
-                wd_state.kill_sent.store(true, std::sync::atomic::Ordering::SeqCst);
-                #[cfg(unix)]
-                unsafe { libc::kill(-(child_pid as i32), libc::SIGTERM) };
-                #[cfg(windows)]
-                kill_process_tree_hard(child_pid);
-                continue;
+                match stall_action {
+                    StallAction::Kill => {
+                        wd_state.stalled.store(true, std::sync::atomic::Ordering::SeqCst);
+                        wd_state.kill_sent.store(true, std::sync::atomic::Ordering::SeqCst);
+                        #[cfg(unix)]
+                        unsafe { libc::kill(-(child_pid as i32), libc::SIGTERM) };
+                        #[cfg(windows)]
+                        kill_process_tree_hard(child_pid);
+                        continue;
+                    }
+                    StallAction::Warn => {
+                        if !stall_warned {
+                            stall_warned = true;
+                            crate::util::eprint_line(&format!(
+                                "[dg wrap] stall warning: no output for {stall_ms}ms (action=warn, process kept alive)"
+                            ));
+                        }
+                    }
+                }
+            } else {
+                stall_warned = false;
             }
             if max_ms > 0 && now - started_epoch_ms >= max_ms {
                 wd_state.timed_out.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -411,7 +454,8 @@ pub fn cmd_wrap(args: &ParsedArgs, json: bool) -> CmdResult {
     let require_artifact = optional_flag(args, "require-artifact");
     let require_nonempty = crate::args::bool_flag(args, "require-nonempty");
     let require_stdout = crate::args::bool_flag(args, "require-stdout-nonempty");
-    let stall_ms = parse_int_flag(args, "stall-ms", 120_000)?;
+    let stall_ms = parse_int_flag(args, "stall-ms", default_stall_ms())?;
+    let stall_action = parse_stall_action(args)?;
     let max_ms = parse_int_flag(args, "max-ms", 1_200_000)?;
     let heartbeat_ms = parse_int_flag(args, "heartbeat-ms", 60_000)?;
     let kill_grace_ms = parse_int_flag(args, "kill-grace-ms", 1_000)?;
@@ -571,6 +615,7 @@ pub fn cmd_wrap(args: &ParsedArgs, json: bool) -> CmdResult {
         &command,
         child_env,
         stall_ms,
+        stall_action,
         max_ms,
         heartbeat_ms,
         kill_grace_ms,

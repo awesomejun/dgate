@@ -1607,6 +1607,132 @@ pub fn infer_live_worker_slot(
 // dg wrap 프로세스 워커 (hc 터미널이 아닌 자식 프로세스)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// herdr agent list 어댑터 (상주 AI 좌석 관제 — "화면만 쓰기" 지원, fail-open)
+// ---------------------------------------------------------------------------
+
+/// `herdr agent list --json` 1항목 요약 — 외부 `herdr` 상주 AI 좌석 어댑터용.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HerdrAgentSeat {
+    pub id: String,
+    pub name: String,
+    pub role: Option<String>,
+    pub cli: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub status: Option<String>,
+    pub cwd: Option<String>,
+    pub activity: Option<String>,
+    pub parent: Option<String>,
+    pub turn: Option<u64>,
+}
+
+fn json_first_str(obj: &Value, keys: &[&str]) -> Option<String> {
+    for k in keys {
+        if let Some(s) = obj.get(*k).and_then(Value::as_str) {
+            let t = s.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// `herdr agent list --json` 응답 파싱 — 배열 `[...]` 또는 `{agents|seats|items|data: [...]}`
+/// 양쪽을 모두 수용한다. 파싱 실패 시 빈 Vec 반환(fail-open).
+pub fn parse_herdr_agent_list(raw: &str) -> Vec<HerdrAgentSeat> {
+    let Ok(v) = serde_json::from_str::<Value>(raw) else {
+        return Vec::new();
+    };
+    let arr = v
+        .as_array()
+        .or_else(|| v.get("agents").and_then(Value::as_array))
+        .or_else(|| v.get("seats").and_then(Value::as_array))
+        .or_else(|| v.get("items").and_then(Value::as_array))
+        .or_else(|| v.get("data").and_then(Value::as_array));
+    let Some(items) = arr else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in items {
+        let Some(id) = json_first_str(item, &["id", "address", "seat_id", "agent_id", "name"])
+        else {
+            continue;
+        };
+        let name = json_first_str(item, &["name", "label", "seat", "title"])
+            .unwrap_or_else(|| id.clone());
+        out.push(HerdrAgentSeat {
+            id,
+            name,
+            role: json_first_str(item, &["role", "slot"]),
+            cli: json_first_str(item, &["cli", "agent", "provider", "tool", "runtime"]),
+            model: json_first_str(item, &["model", "model_name"]),
+            effort: json_first_str(item, &["effort", "thinking"]),
+            status: json_first_str(item, &["status", "state"]),
+            cwd: json_first_str(item, &["cwd", "repo", "workdir", "project_path"]),
+            activity: json_first_str(item, &["activity", "task", "summary", "current_task"]),
+            parent: json_first_str(item, &["parent", "owner", "owner_address", "sublead"]),
+            turn: item
+                .get("turn")
+                .or_else(|| item.get("turns"))
+                .and_then(Value::as_u64),
+        });
+    }
+    out
+}
+
+fn herdr_seat_is_inactive(status: Option<&str>) -> bool {
+    matches!(
+        status.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("stopped" | "dead" | "exited" | "terminated" | "offline" | "closed" | "removed")
+    )
+}
+
+/// `HerdrAgentSeat` → `LiveWorkerInfo` 변환. 종료/오프라인 좌석은 제외한다.
+pub fn herdr_seat_to_worker(seat: &HerdrAgentSeat) -> Option<LiveWorkerInfo> {
+    if herdr_seat_is_inactive(seat.status.as_deref()) {
+        return None;
+    }
+    let slot = seat
+        .role
+        .as_deref()
+        .and_then(LiveWorkerSlot::parse)
+        .or_else(|| LiveWorkerSlot::infer_from_name(&seat.name))
+        .unwrap_or(LiveWorkerSlot::Coder);
+    let cli = seat.cli.clone().unwrap_or_else(|| "herdr".to_string());
+    let short_model = format_role_badge(&cli, seat.model.as_deref());
+    let model_name = seat.model.clone().unwrap_or_else(|| cli.clone());
+    let status = seat
+        .status
+        .clone()
+        .unwrap_or_else(|| "working".to_string());
+    let activity = seat
+        .activity
+        .clone()
+        .unwrap_or_else(|| format!("herdr 좌석 · {status}"));
+    Some(LiveWorkerInfo {
+        slot,
+        badge: format!("{short_model} ({status})"),
+        short_model,
+        model_name,
+        address: format!("herdr:{}", seat.id),
+        owner_address: seat.parent.clone(),
+        name: seat.name.clone(),
+        cwd: seat.cwd.clone(),
+        repo_tag: extract_repo_tag(seat.cwd.as_deref()),
+        activity,
+        status: Some(status),
+        turn: seat.turn,
+        cli,
+        model: seat.model.clone(),
+        effort: seat.effort.clone(),
+        subagent_warning: None,
+        recent_io: Vec::new(),
+        recent_output: Vec::new(),
+    })
+}
+
 /// `ps` 한 줄 — pid·ppid·전체 커맨드.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PsRow {
@@ -2638,6 +2764,29 @@ impl LiveSyncSnapshotter {
                             }
                         }
                         workers.push(worker);
+                    }
+                }
+            }
+            // 3.6) `herdr agent list --json` 어댑터 — 상주 AI 좌석 병합(fail-open: 미설치·오류 시 무시).
+            let herdr_bin = std::env::var("HERDR_BIN")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "herdr".to_string());
+            if let Ok(raw_seats) =
+                self.runner
+                    .exec(&herdr_bin, &["agent", "list", "--json"], HC_LS_TIMEOUT_MS)
+            {
+                let repo_scope = self.repo_filter_dir.as_deref().and_then(|p| p.to_str());
+                let mut seen: HashSet<String> =
+                    workers.iter().map(|w| w.address.clone()).collect();
+                for seat in parse_herdr_agent_list(&raw_seats) {
+                    if !matches_repo_scope(seat.cwd.as_deref(), repo_scope) {
+                        continue;
+                    }
+                    if let Some(worker) = herdr_seat_to_worker(&seat) {
+                        if seen.insert(worker.address.clone()) {
+                            workers.push(worker);
+                        }
                     }
                 }
             }
@@ -4428,6 +4577,95 @@ mod tests {
             Some("tSub"),
             "direct-exec hc run --bg child coder (wrap_pid == terminal.pid) must attach to parent sublead"
         );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn parse_herdr_agent_list_handles_wrapped_and_filters_stopped() {
+        let wrapped = serde_json::json!({
+            "agents": [
+                {
+                    "id": "seat-01",
+                    "name": "devin-01",
+                    "role": "coder",
+                    "cli": "devin",
+                    "model": "swe-2-1-high",
+                    "status": "working",
+                    "cwd": "/tmp/repo-a",
+                    "task": "PR #101 구현",
+                    "turn": 4
+                },
+                {
+                    "id": "seat-02",
+                    "name": "stopped-seat",
+                    "role": "coder",
+                    "status": "stopped",
+                    "cwd": "/tmp/repo-a"
+                }
+            ]
+        })
+        .to_string();
+        let seats = parse_herdr_agent_list(&wrapped);
+        assert_eq!(seats.len(), 2);
+        let active: Vec<LiveWorkerInfo> =
+            seats.iter().filter_map(herdr_seat_to_worker).collect();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].address, "herdr:seat-01");
+        assert_eq!(active[0].slot, LiveWorkerSlot::Coder);
+        assert_eq!(active[0].cli, "devin");
+        assert_eq!(active[0].model.as_deref(), Some("swe-2-1-high"));
+        assert_eq!(active[0].turn, Some(4));
+        assert!(active[0].activity.contains("PR #101"));
+    }
+
+    #[test]
+    fn snapshotter_merges_herdr_agent_seats_when_hc_has_zero_workers() {
+        let _g: MutexGuard<'_, ()> = env_lock();
+        let tmp = temp_dir("live-herdr-seats");
+        std::fs::create_dir_all(&tmp).unwrap();
+        isolate_env(&tmp);
+
+        struct HerdrOnlyMock {
+            seats_json: String,
+        }
+        impl HcExecRunner for HerdrOnlyMock {
+            fn exec(&self, bin: &str, args: &[&str], _timeout_ms: u64) -> Result<String, String> {
+                if bin == "herdr" && args == ["agent", "list", "--json"] {
+                    return Ok(self.seats_json.clone());
+                }
+                if args.first().copied() == Some("ls") {
+                    return Ok(r#"{"terminals":[]}"#.to_string());
+                }
+                Err("not mocked".to_string())
+            }
+        }
+
+        let mut agents = Vec::new();
+        for i in 1..=28 {
+            agents.push(serde_json::json!({
+                "id": format!("s{i:02}"),
+                "name": format!("devin-seat-{i:02}"),
+                "cli": "devin",
+                "model": "swe-2-1-high",
+                "status": if i % 2 == 0 { "working" } else { "idle" },
+                "cwd": "/tmp/repo-a"
+            }));
+        }
+        let mock = Arc::new(HerdrOnlyMock {
+            seats_json: serde_json::json!({ "agents": agents }).to_string(),
+        });
+        let mut snap = LiveSyncSnapshotter::new(LiveSyncOptions {
+            repo_dir: tmp.clone(),
+            repo_filter_dir: None,
+            hc_bin: "hc".to_string(),
+            exec_runner: mock,
+            get_watched_lead: None,
+            proc_lister: Arc::new(|| None),
+            on_update: None,
+        });
+        let merged = snap.tick_now();
+        assert_eq!(merged.workers.len(), 28, "28개 herdr 좌석이 hc 0개 환경에서도 전부 노출");
+        assert_eq!(merged.workers[0].address, "herdr:s01");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

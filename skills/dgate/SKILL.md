@@ -12,6 +12,10 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
 - **네이티브 `dg` 실행 원칙**: 워커 실행·배차·통계 명령은 Rust v2 네이티브 바이너리(`dg`, PATH 설치 또는 `target/release/dg`)로 실행한다 — 동일 SQLite DB·roster.json SSOT 공유, 기동 ~3ms. Node v1 폴백은 없다 — 바이너리가 없으면 `npm run build`(`cargo build --release --workspace`)로 빌드한다. **git pull 후에도 `npm run build`로 바이너리를 갱신한다**(스테일 바이너리 방지).
 - **데스크톱 모니터(GPUI 앱)**: 사용자가 *"데스크톱 모니터 열어줘"*, *"GPUI 앱 열어줘"*라고 하면 `cargo run -p dgate-gui -- [--repo <dir>]`로 기동한다(빌드돼 있으면 `target/debug/dgate-gui` 또는 `target/release/dgate-gui`를 직접 실행). 편의 스크립트: `npm run dgate-gui -- --repo <dir>`.
 
+- **3개 독립 모듈 선택 도입 (무침습 기본)**: `dgate`는 전면 도입을 강제하지 않는다. 이미 자체 오케스트레이터나 상주 좌석(`herdr agent`)을 쓰는 팀은 필요한 모듈만 골라 쓴다:
+  1. **모니터 단독**: `dgate-tui` / `dgate-gui` (`hc ls` + `herdr agent list` 읽기전용 관제 — 대상 레포 파일 수정 0건)
+  2. **라우터 단독**: `dg route` / `dg stats` (EWMA 성공률 기반 저비용 자동 배정 판정기만 CLI/JSON 호출)
+  3. **풀 오케스트레이터**: `dg dispatch` / `dg pipeline` (격리 worktree 병렬 코딩 + 이종 검증 + 0토큰 상태머신)
 - **필수 요구사항은 Rust toolchain + 이 저장소뿐이다.** `cargo build --release --workspace` 한 번이면 `dg` 전 기능이 동작한다. (`scripts/install-global.ts` 전역 래퍼 설치에만 Node.js >= 22.6 필요 — npm 의존성 0개.)
 - 이 문서에 등장하는 모든 외부 도구·서비스는 **전부 선택(OPTIONAL)**이다: `todo-flow`, `mistology`, `effort-router`, `neverstuck`, `GEMINI_DECISION_API_KEY`(Decision API), `hc`/멀티 CLI 워커. **설치돼 있지 않으면 해당 단계를 조용히 스킵한다** — 없다고 실패하거나 중단하지 않는다.
 - 워커 CLI는 `roster.json`에서 자유롭게 교체한다. `claude`/`codex`/`gemini`/`pi`/`devin` 등 로컬에 있는 아무 CLI나 바인딩할 수 있고, 하나도 없으면 `--dry-run` 리허설과 `dg stats`/`report` 같은 로컬 전용 기능만 사용한다.
@@ -31,7 +35,9 @@ description: Use when dispatching multi-CLI workers (pi/devin/agy via hc), runni
    - **배차 모드 선선택(무조건)**: 새 워커(`dg wrap`/`hc run`)를 띄우기 직전에 소프트/하드가 아직 선택되지 않았으면 **어떤 경로로든 반드시 먼저 묻고 답을 받을 때까지 워커를 띄우지 않는다** — "현재 작업 dgate로 진행해" 같은 이어가기 요청, 이미 진행 중인 파이프라인의 검증·수정 워커 포함. 통계·모니터 조회 같은 읽기 요청에는 묻지 않는다.
    - **버전 점검**: `git -C $DGATE_ROOT fetch -q` 후 `git -C $DGATE_ROOT rev-list --count HEAD..origin/main`이 0보다 크면 "dgate 업데이트 있음 — `git pull` + `npm run build` 권장"을 한 줄 보고한다(pull은 사용자 승인 후).
    - **자동 수집(판단 루프, CLI 무관)**: pi 세션은 전역 확장(`~/.pi/agent/extensions/dg-collect.ts`, 원본 `scripts/pi-extensions/`)이 `dg hook --collect`로 자동 기록한다(source=hook·멱등). agy/gemini·claude/codex 리드용 트랜스크립트 수집기(v1 `--watch-dir`)는 아직 v2 이관 대상이다 — 현재는 pi 확장 경로만 자동 수집된다.
-2. **안전장치 자동 연결 (무음)** — 대상 저장소에 `.agents/hooks.json`이 없으면 `dg setup --repo <대상 저장소>`의 훅 설치(`install_repo_hooks`)로 연결한다 (`.git/info/exclude`까지 처리해 `git status`가 깨끗하게 유지된다). 사용자에게 설치 여부를 묻거나 "hook"이라는 단어 자체를 꺼내지 않는다. 같은 단계에서 대상 레포 `AGENTS.md`에 dgate 계약 블록(`skills/dgate/AGENTS-BLOCK.md`)을 멱등 설치·갱신한다 — 첫 설치·업데이트 사용자가 리드에게 계약을 수동 전달할 필요가 없다.
+2. **안전장치 선택 연결 (무침습 기본 · 명시 동의 opt-in)** — 대상 저장소의 파일(`.agents/hooks.json`, `AGENTS.md`)을 **절대 묻지 않고 자동 수정하지 않는다**.
+   - 모니터 단독(`dgate-tui`/`dgate-gui`)이나 라우터 단독(`dg route`/`dg stats`) 사용 시에는 저장소 파일을 0건 수정한다.
+   - 풀 오케스트레이션에서 읽기전용 가드 훅과 계약 블록을 연결하려면, 먼저 사용자에게 변경될 파일 2개(`.agents/hooks.json`, `AGENTS.md`)를 안내하고 **명시적 동의를 받은 경우에만** `dg setup --repo <대상 저장소>`를 실행한다. 사용자가 거절하면 저장소 수정 없이 그대로 진행한다.
 3. **상황에 맞춘 분기** —
    - 사용자가 구체 작업을 함께 줬다면(예: *"결제 버그 고쳐줘"*) → 아래 **5번(실행 전 배차안·모니터 여부 승인)**을 먼저 거친 뒤 라우팅 → 워커 실행 → 독립 교차 검증까지 진행하고 결과를 쉬운 한국어로 보고한다.
    - 작업 없이 *"오케스트레이터 적용해줘"*만 했다면 → 위 점검을 마친 뒤 `hc`가 있으면 백그라운드 `dg-monitor` 세션을 띄워 두고, **아래 3줄 안내만** 보여준다 (CLI 명령 나열 금지):

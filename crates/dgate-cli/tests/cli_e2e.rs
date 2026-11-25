@@ -275,6 +275,32 @@ fn test_01_route_wrap_lifecycle_stats_report_readonly() {
         );
     }
 
+    // ---------- wrap --stall-action warn: 무출력 임계 초과 시 경고만 출력하고 킬 금지 ----------
+    let gate_warn = dg_json(&["gate", "--route", "tool_select", "--tool-class", "shell_exec", "--project", &repo_s], &envs);
+    let fork_warn = gate_warn["fork_id"].as_str().unwrap().to_string();
+    let warn_script = if cfg!(windows) {
+        "ping -n 2 127.0.0.1 > NUL & echo ok-after-silence"
+    } else {
+        "sleep 0.6; echo ok-after-silence"
+    };
+    let mut warn_args: Vec<String> = [
+        "wrap", "--route", "tool_select", "--tool-class", "shell_exec",
+        "--fork", &fork_warn, "--project", &repo_s,
+        "--stall-ms", "200", "--stall-action", "warn", "--max-ms", "15000",
+        "--",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    warn_args.extend(shell_command(warn_script));
+    let rw = dg(&strs(&warn_args), &envs);
+    assert_eq!(rw.status, 0, "warn 모드는 자식을 끊지 않고 완주: {}", rw.stderr);
+    assert!(rw.stdout.contains("ok-after-silence"));
+    assert!(rw.stderr.contains("stall warning"), "경고 로그 출력: {}", rw.stderr);
+    let summary_w: Value = serde_json::from_str(rw.stderr.trim().lines().last().unwrap()).unwrap();
+    assert_eq!(summary_w["outcome"], "ok");
+    assert_eq!(summary_w["stalled"], false);
+
     // ---------- wrap 산출물 누락 → fail 기록(exit은 자식 종료코드) ----------
     let gate3 = dg_json(&["gate", "--route", "file_select", "--tool-class", "file_edit", "--project", &repo_s], &envs);
     let fork3 = gate3["fork_id"].as_str().unwrap().to_string();
