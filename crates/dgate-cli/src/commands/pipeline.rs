@@ -470,7 +470,8 @@ fn verifier_prompt(state: &PipelineState, verdict_path: &Path) -> String {
         "fork {fk} 구현(HEAD {head})을 브리프 {brief}의 Standards/Spec 두 축과 Merge Danger으로 \
          검증하라. verdict JSON(schema_version 1, fork_id \"{fk}\", target_head \"{head}\", \
          decision pass|rework|fail|human, reason, findings, merge_danger)을 {vp} 에 기록하라 \
-         (디렉터리가 없으면 생성)",
+         (디렉터리가 없으면 생성). 엄격 스키마: findings[].severity는 반드시 P0|P1|P2|info 4종만 \
+         사용(low/medium/high 금지), merge_danger는 {{\"door\":\"one-way|two-way\",\"blast_radius\":\"<=500자\"}} 형식 준수",
         fk = state.fork_id,
         head = head,
         brief = state.brief_path,
@@ -1036,6 +1037,25 @@ impl RealPipelineExecutor {
                 expected_head: state.head_sha.clone(),
             },
         );
+        // PASS 판정도 decision.db에 자동 역귀속(closed_by='verifier', neon_verdict='pass')해
+        // 교차검증 실적이 누락되지 않게 보장한다(rework는 BackpropAndRespawnCoder에서 처리).
+        if matches!(v.effective_decision, dgate_core::verdict::VerdictDecision::Pass) {
+            let mut bp_args = vec![
+                "backprop".to_string(),
+                "--fork".to_string(),
+                state.fork_id.clone(),
+                "--verdict-file".to_string(),
+                vp.display().to_string(),
+            ];
+            if let Some(h) = &state.head_sha {
+                bp_args.push("--expected-head".to_string());
+                bp_args.push(h.clone());
+            }
+            let _ = ProcCommand::new(&self.cfg.dg_bin)
+                .args(&bp_args)
+                .current_dir(&self.cfg.repo_dir)
+                .output();
+        }
         Ok(Some(PipelineEvent::VerdictReceived {
             decision: v.effective_decision,
             verdict_path: vp.display().to_string(),

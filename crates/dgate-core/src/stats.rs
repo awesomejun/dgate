@@ -612,18 +612,19 @@ impl ForkOutcomeCounts {
 }
 
 /// `forks` 테이블에서 검증 결과 집계를 읽는다(읽기전용 — 오류·테이블 부재 시 0 반환).
+/// 실제 스키마 컬럼(`status`, `attempt`, `neon_verdict`)을 기준으로 집계한다.
 pub fn fetch_fork_outcome_counts(conn: &Connection, project_id: Option<&str>) -> ForkOutcomeCounts {
     let sql = if project_id.is_some() {
         "SELECT \
-            COALESCE(SUM(CASE WHEN status = 'ok' AND COALESCE(rework_count, 0) = 0 THEN 1 ELSE 0 END), 0), \
-            COALESCE(SUM(CASE WHEN COALESCE(rework_count, 0) > 0 THEN 1 ELSE 0 END), 0), \
+            COALESCE(SUM(CASE WHEN status = 'ok' AND COALESCE(attempt, 1) <= 1 AND COALESCE(neon_verdict, '') != 'rework' THEN 1 ELSE 0 END), 0), \
+            COALESCE(SUM(CASE WHEN COALESCE(neon_verdict, '') = 'rework' OR (status = 'ok' AND COALESCE(attempt, 1) > 1) THEN 1 ELSE 0 END), 0), \
             COALESCE(SUM(CASE WHEN status IN ('fail', 'abandoned') THEN 1 ELSE 0 END), 0), \
             COALESCE(SUM(CASE WHEN status = 'waiting_human' THEN 1 ELSE 0 END), 0) \
          FROM forks WHERE project_id = ?1"
     } else {
         "SELECT \
-            COALESCE(SUM(CASE WHEN status = 'ok' AND COALESCE(rework_count, 0) = 0 THEN 1 ELSE 0 END), 0), \
-            COALESCE(SUM(CASE WHEN COALESCE(rework_count, 0) > 0 THEN 1 ELSE 0 END), 0), \
+            COALESCE(SUM(CASE WHEN status = 'ok' AND COALESCE(attempt, 1) <= 1 AND COALESCE(neon_verdict, '') != 'rework' THEN 1 ELSE 0 END), 0), \
+            COALESCE(SUM(CASE WHEN COALESCE(neon_verdict, '') = 'rework' OR (status = 'ok' AND COALESCE(attempt, 1) > 1) THEN 1 ELSE 0 END), 0), \
             COALESCE(SUM(CASE WHEN status IN ('fail', 'abandoned') THEN 1 ELSE 0 END), 0), \
             COALESCE(SUM(CASE WHEN status = 'waiting_human' THEN 1 ELSE 0 END), 0) \
          FROM forks"

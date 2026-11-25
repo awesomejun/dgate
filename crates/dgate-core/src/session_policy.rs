@@ -207,30 +207,43 @@ pub fn evaluate_session_policy(input: &SessionPolicyInput) -> SessionPolicyVerdi
     }
 }
 
-/// `decision.db`에서 최근 종료된 코딩/스웜 fork 20건의 1차 통과율과 최근 연속 실패 수를 읽는다(읽기전용).
+/// `decision.db`에서 최근 종료된 fork 20건의 1차 통과율과 최근 연속 실패 수를 읽는다(읽기전용).
+/// 실제 `forks` 스키마(`status`, `attempt`, `neon_verdict`, `created_at_ms`)를 사용한다.
 pub fn collect_session_metrics_from_db(
     conn: &Connection,
     project_id: Option<&str>,
 ) -> (Option<f64>, usize, usize) {
-    let sql_scoped = "SELECT status, COALESCE(rework_count, 0) FROM forks \
+    let sql_scoped = "SELECT status, COALESCE(attempt, 1), COALESCE(neon_verdict, '') FROM forks \
                       WHERE project_id = ?1 AND status IN ('ok', 'fail', 'abandoned', 'waiting_human') \
-                      ORDER BY created_at DESC LIMIT 20";
-    let sql_all = "SELECT status, COALESCE(rework_count, 0) FROM forks \
+                      ORDER BY created_at_ms DESC LIMIT 20";
+    let sql_all = "SELECT status, COALESCE(attempt, 1), COALESCE(neon_verdict, '') FROM forks \
                    WHERE status IN ('ok', 'fail', 'abandoned', 'waiting_human') \
-                   ORDER BY created_at DESC LIMIT 20";
+                   ORDER BY created_at_ms DESC LIMIT 20";
 
-    let rows: Vec<(String, i64)> = if let Some(pid) = project_id {
+    let rows: Vec<(String, i64, String)> = if let Some(pid) = project_id {
         conn.prepare(sql_scoped)
             .and_then(|mut s| {
-                s.query_map([pid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
-                    .map(|it| it.filter_map(Result::ok).collect())
+                s.query_map([pid], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                })
+                .map(|it| it.filter_map(Result::ok).collect())
             })
             .unwrap_or_default()
     } else {
         conn.prepare(sql_all)
             .and_then(|mut s| {
-                s.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
-                    .map(|it| it.filter_map(Result::ok).collect())
+                s.query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                })
+                .map(|it| it.filter_map(Result::ok).collect())
             })
             .unwrap_or_default()
     };
@@ -239,14 +252,17 @@ pub fn collect_session_metrics_from_db(
         return (None, 0, 0);
     }
 
+    let is_first_pass = |st: &str, attempt: i64, verdict: &str| {
+        st == "ok" && attempt <= 1 && verdict != "rework"
+    };
     let total = rows.len();
     let first_pass = rows
         .iter()
-        .filter(|(st, rw)| st == "ok" && *rw == 0)
+        .filter(|(st, att, v)| is_first_pass(st, *att, v))
         .count();
     let mut consecutive_errors = 0usize;
-    for (st, rw) in &rows {
-        if st == "ok" && *rw == 0 {
+    for (st, att, v) in &rows {
+        if is_first_pass(st, *att, v) {
             break;
         }
         consecutive_errors += 1;
