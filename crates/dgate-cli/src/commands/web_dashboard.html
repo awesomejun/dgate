@@ -59,11 +59,16 @@
   .btn.paused { border-color: var(--amber); color: var(--amber); }
 
   /* Main layout: Left canvas + Right inspector */
-  .main { display: grid; grid-template-columns: 1fr 330px; min-height: 0; }
-  .stage-wrap { position: relative; overflow: auto; padding: 20px 24px 28px; }
+  .main { display: grid; grid-template-columns: 1fr 340px; min-height: 0; }
+  .stage-wrap {
+    position: relative; overflow: auto;
+    padding: 28px 34px 32px;
+    display: flex; align-items: stretch; justify-content: center;
+  }
   .stage {
-    position: relative; max-width: 1120px; margin: 0 auto;
-    display: grid; grid-template-columns: 230px 1fr; gap: 22px; align-items: stretch;
+    position: relative; width: 100%; max-width: 1180px;
+    min-height: calc(100vh - 112px);
+    display: grid; grid-template-columns: 248px 1fr; gap: 34px; align-items: stretch;
   }
   /* SVG wire overlay */
   svg.wires {
@@ -71,8 +76,11 @@
     pointer-events: none; overflow: visible; z-index: 1;
   }
   .wire-path { fill: none; stroke-width: 1.6; opacity: 0.55; }
+  .wire-path.dashed { stroke-dasharray: 4 5; opacity: 0.42; }
   .wire-path.active { opacity: 0.92; stroke-width: 2; }
-  .wire-pulse { fill: none; stroke-width: 2.6; stroke-dasharray: 6 18; animation: dash 1.6s linear infinite; }
+  .wire-pulse { fill: none; stroke-width: 2.8; stroke-dasharray: 6 18; animation: dash 1.6s linear infinite; }
+  .wire-label-bg { fill: #0f1522; stroke: #2c3852; stroke-width: 1; }
+  .wire-label-txt { fill: #9fb0cc; font-size: 10.5px; font-weight: 600; text-anchor: middle; dominant-baseline: middle; }
   .paused .wire-pulse { animation-play-state: paused; opacity: 0.25; }
   @keyframes dash { to { stroke-dashoffset: -24; } }
 
@@ -106,17 +114,19 @@
   .tele { font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
   /* Left Advisor column */
-  .advisor-col { display: flex; flex-direction: column; justify-content: space-between; gap: 14px; }
-  .gate-item { padding: 8px 10px; border-radius: 8px; background: rgba(192,132,252,0.06); border: 1px solid rgba(192,132,252,0.18); font-size: 11px; color: var(--soft); }
-  .gate-item b { color: var(--violet); display: block; margin-bottom: 3px; font-size: 11.5px; }
+  .advisor-col { display: flex; flex-direction: column; justify-content: space-between; gap: 18px; padding: 18px 16px; }
+  .gate-item { padding: 11px 12px; border-radius: 9px; background: rgba(192,132,252,0.06); border: 1px solid rgba(192,132,252,0.20); font-size: 11.5px; color: var(--soft); line-height: 1.45; }
+  .gate-item b { color: var(--violet); display: block; margin-bottom: 4px; font-size: 12px; }
 
   /* Right pipeline flow column */
-  .flow-col { display: flex; flex-direction: column; gap: 22px; }
-  .top-row { display: grid; grid-template-columns: 1.15fr 1fr; gap: 18px; }
+  .flow-col { display: flex; flex-direction: column; justify-content: space-between; gap: 38px; padding-right: 26px; }
+  .top-row { display: grid; grid-template-columns: 1.15fr 1fr; gap: 28px; }
+  .top-row .card { padding: 16px 18px; min-height: 104px; display: flex; flex-direction: column; justify-content: center; }
 
   /* Decision gate bars */
-  .route-row { display: grid; grid-template-columns: 118px 1fr 122px; align-items: center; gap: 10px; margin-top: 8px; font-size: 11.5px; }
-  .bar-track { position: relative; height: 8px; border-radius: 999px; background: rgba(45, 212, 191, 0.14); overflow: hidden; }
+  #node-decision { padding: 16px 20px 18px; }
+  .route-row { display: grid; grid-template-columns: 124px 1fr 128px; align-items: center; gap: 12px; margin-top: 11px; font-size: 12px; }
+  .bar-track { position: relative; height: 9px; border-radius: 999px; background: rgba(45, 212, 191, 0.14); overflow: hidden; }
   .bar-track.split { background: rgba(245, 158, 11, 0.16); }
   .bar-fill { height: 100%; border-radius: 999px; transition: width 0.35s ease; }
   .bar-thresh { position: absolute; top: 0; bottom: 0; left: 70%; width: 2px; background: rgba(230, 237, 247, 0.78); }
@@ -126,17 +136,18 @@
   .workers-box {
     position: relative; z-index: 2;
     border: 1px dashed rgba(56, 189, 248, 0.32); border-radius: 14px;
-    padding: 16px 14px 14px; background: rgba(18, 23, 34, 0.45);
+    padding: 18px 16px 16px; background: rgba(18, 23, 34, 0.45);
+    min-height: 156px; display: flex; flex-direction: column; justify-content: center;
   }
   .workers-box-label {
-    font-size: 11px; font-weight: 600; color: var(--cyan);
-    margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between;
+    font-size: 11.5px; font-weight: 600; color: var(--cyan);
+    margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between;
   }
-  .workers-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(195px, 1fr)); gap: 12px; }
+  .workers-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(205px, 1fr)); gap: 14px; }
   .owner-tag { font-size: 10.5px; color: var(--amber); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
   /* Return card */
-  .back-card { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+  .back-card { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 16px 20px; }
   .outcomes { display: flex; gap: 10px; font-size: 11.5px; font-family: ui-monospace, monospace; }
   .c-pass { color: var(--teal); font-weight: 700; }
   .c-rework { color: var(--amber); }
@@ -508,27 +519,49 @@
         cy: (r.top + r.bottom) / 2 - sr.top
       };
     };
+    const adv = box('node-advisor');
     const lead = box('node-lead');
     const ver = box('node-verifier');
     const dec = box('node-decision');
     const wbox = box('workersBox');
     const back = box('node-back');
-    if (!lead || !ver || !dec || !wbox || !back) return;
+    if (!adv || !lead || !ver || !dec || !wbox || !back) return;
 
     const segs = [];
-    const addCurve = (d, color, active) => {
-      segs.push(`<path class="wire-path ${active ? 'active' : ''}" d="${d}" stroke="${color}" />`);
+    const addCurve = (d, color, active, dashed = false) => {
+      segs.push(`<path class="wire-path ${active ? 'active' : ''} ${dashed ? 'dashed' : ''}" d="${d}" stroke="${color}" />`);
       if (active) segs.push(`<path class="wire-pulse" d="${d}" stroke="${color}" />`);
     };
+    const addPill = (x, y, text, w = 78) => {
+      segs.push(`<rect class="wire-label-bg" x="${x - w/2}" y="${y - 10}" width="${w}" height="20" rx="10" />`);
+      segs.push(`<text class="wire-label-txt" x="${x}" y="${y + 0.5}">${text}</text>`);
+    };
+
+    const verActive = (latest?.verifiers?.length || 0) > 0;
+    const advActive = (latest?.advisors?.length || 0) > 0;
+
+    // Advisor -> Lead / Workers / Return (점선 자문 연결)
+    addCurve(`M ${adv.r} ${lead.cy} L ${lead.l} ${lead.cy}`, '#c084fc', advActive, true);
+    addCurve(`M ${adv.r} ${wbox.cy} L ${wbox.l} ${wbox.cy}`, '#c084fc', advActive, true);
+    addCurve(`M ${adv.r} ${back.cy} L ${back.l} ${back.cy}`, '#c084fc', advActive, true);
 
     // Lead -> Verifier
-    addCurve(`M ${lead.r} ${lead.cy} L ${ver.l} ${ver.cy}`, '#facc15', (latest?.verifiers?.length || 0) > 0);
+    addCurve(`M ${lead.r} ${lead.cy} L ${ver.l} ${ver.cy}`, '#facc15', verActive);
+    addPill((lead.r + ver.l) / 2, lead.cy, '읽기전용 격리', 84);
+
     // Lead -> Decision Gate
     addCurve(`M ${lead.cx} ${lead.b} C ${lead.cx} ${(lead.b+dec.t)/2}, ${dec.cx} ${(lead.b+dec.t)/2}, ${dec.cx} ${dec.t}`, '#f59e0b', Boolean(latest?.lead));
+    addPill((lead.cx + dec.cx) / 2, (lead.b + dec.t) / 2, '분기 질의', 68);
+
     // Decision Gate -> Workers Box
     addCurve(`M ${dec.cx} ${dec.b} L ${wbox.cx} ${wbox.t}`, '#2dd4bf', hasMotion);
+
     // Workers Box -> Return Card
     addCurve(`M ${wbox.cx} ${wbox.b} L ${back.cx} ${back.t}`, '#38bdf8', hasMotion);
+
+    // Return Card -> Verifier 우측 교차검증 회귀루프 곡선
+    const loopX = Math.max(ver.r, back.r) + 22;
+    addCurve(`M ${back.r} ${back.cy} C ${loopX} ${back.cy}, ${loopX} ${ver.cy + 40}, ${ver.r} ${ver.cy + 14}`, '#facc15', verActive, !verActive);
 
     svg.innerHTML = segs.join('');
   }
