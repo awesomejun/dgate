@@ -16,6 +16,7 @@ pub mod report;
 pub mod retro;
 pub mod route;
 pub mod send;
+pub mod serve;
 pub mod settle_orphans;
 pub mod setup;
 pub mod stats;

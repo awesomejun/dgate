@@ -23,11 +23,11 @@ use args::ParsedArgs;
 use util::{eprint_line, CmdResult, DgError};
 
 /// 인식 가능한 명령 15종 + v2 신규 명령.
-pub const COMMANDS: [&str; 25] = [
+pub const COMMANDS: [&str; 26] = [
     "route", "gate", "close", "touch", "record", "backprop", "attempt", "retro",
     "settle-orphans", "wrap", "compact", "stats", "checkpoint", "worktree", "report",
     "hook", "setup", "dispatch", "dispatch-mode", "send", "reap", "suggest-sublead",
-    "suggest-session", "pipeline", "merge-train",
+    "suggest-session", "pipeline", "merge-train", "serve",
 ];
 
 const HELP: &str = "dg — decision gate CLI (plan-r2.1 §4.7, v2 native Rust)
@@ -64,6 +64,7 @@ const HELP: &str = "dg — decision gate CLI (plan-r2.1 §4.7, v2 native Rust)
   dg pipeline status --fork <id> [--state-dir <dir>] [--json]   (위상·시도·전이 이력 조회, 읽기 전용)
   dg pipeline run --fork <id> [--state-dir <dir>] [--repo <dir>] [--max-steps 20] [--dry-run] [--json]   (0토큰 자동 구동 — hc+dg wrap 워커 스폰 루프; ReadyPr exit 0, 에스컬레이션 exit 3)
   dg merge-train --pr <num> [--repo <dir>] [--ci-label ci-full] [--max-reruns 1] [--worktree <path>] [--poll-interval-ms 5000] [--timeout-ms 1800000] [--dry-run] [--json]   (직렬 머지 트레인: update-branch → ci-full → 재시도 → squash merge; sublead 금지)
+  dg serve [--port 4747] [--repo <dir>] [--db <path>] [--poll-ms 1500]   (실시간 OS 프로세스 ps/hc/herdr + Decision Gate SSE 웹 대시보드, 127.0.0.1 전용)
 
 라우트 r: file_select|tool_select|retry_or_abort|delegate_swarm
 공용: --db <path>는 DGATE_DB_PATH·DECISION_ORCHESTRATOR_DB_PATH·GEMINI_TRICK_DB_PATH보다 우선. --roster <path>/--profile <name> 명시 시
@@ -146,6 +147,7 @@ where
         "suggest-session" => commands::suggest_session::cmd_suggest_session(&parsed, json),
         "pipeline" => commands::pipeline::cmd_pipeline(sub.as_deref(), &parsed, json),
         "merge-train" => commands::merge_train::cmd_merge_train(&parsed, json),
+        "serve" => commands::serve::cmd_serve(&parsed, json),
         _ => unreachable!("command list checked above"),
     };
 

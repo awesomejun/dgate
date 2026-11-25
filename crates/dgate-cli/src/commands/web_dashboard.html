@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>dgate · Live Topology (SSE)</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --bg-card: #121722;
+    --bg-elev: #171d2b;
+    --border: #263044;
+    --text: #e6edf7;
+    --soft: #a6b4cc;
+    --muted: #6b7a94;
+    --amber: #f59e0b;
+    --gold: #facc15;
+    --teal: #2dd4bf;
+    --cyan: #38bdf8;
+    --violet: #c084fc;
+    --rose: #fb7185;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background-color: var(--bg);
+    background-image: radial-gradient(rgba(148, 163, 184, 0.11) 1px, transparent 1px);
+    background-size: 20px 20px;
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Pretendard", "Inter", ui-sans-serif, system-ui, sans-serif;
+    overflow: hidden;
+  }
+  .app { display: grid; grid-template-rows: 52px 1fr; height: 100vh; }
+  /* Top bar */
+  .topbar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 0 18px;
+    background: rgba(14, 18, 28, 0.92);
+    border-bottom: 1px solid var(--border);
+    backdrop-filter: blur(8px);
+  }
+  .brand { font-weight: 800; font-size: 15px; letter-spacing: 0.4px; color: var(--text); display: flex; align-items: center; gap: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--teal); box-shadow: 0 0 10px var(--teal); }
+  .dot.off { background: var(--rose); box-shadow: 0 0 8px var(--rose); }
+  .pill {
+    font-size: 11px; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--soft); background: var(--bg-card);
+  }
+  .pill.live { border-color: rgba(45, 212, 191, 0.45); color: var(--teal); }
+  .pill.clickable { cursor: pointer; transition: 0.15s; }
+  .pill.clickable:hover, .pill.active { border-color: var(--cyan); color: var(--cyan); background: rgba(56, 189, 248, 0.1); }
+  .spacer { flex: 1; }
+  .btn {
+    font-size: 11px; font-weight: 600; padding: 5px 11px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--bg-elev); color: var(--text);
+    cursor: pointer; transition: 0.15s;
+  }
+  .btn:hover { border-color: var(--teal); color: var(--teal); }
+  .btn.paused { border-color: var(--amber); color: var(--amber); }
+
+  /* Main layout: Left canvas + Right inspector */
+  .main { display: grid; grid-template-columns: 1fr 330px; min-height: 0; }
+  .stage-wrap { position: relative; overflow: auto; padding: 20px 24px 28px; }
+  .stage {
+    position: relative; max-width: 1120px; margin: 0 auto;
+    display: grid; grid-template-columns: 230px 1fr; gap: 22px; align-items: stretch;
+  }
+  /* SVG wire overlay */
+  svg.wires {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    pointer-events: none; overflow: visible; z-index: 1;
+  }
+  .wire-path { fill: none; stroke-width: 1.6; opacity: 0.55; }
+  .wire-path.active { opacity: 0.92; stroke-width: 2; }
+  .wire-pulse { fill: none; stroke-width: 2.6; stroke-dasharray: 6 18; animation: dash 1.6s linear infinite; }
+  .paused .wire-pulse { animation-play-state: paused; opacity: 0.25; }
+  @keyframes dash { to { stroke-dashoffset: -24; } }
+
+  /* Cards */
+  .card {
+    position: relative; z-index: 2;
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 13px 15px;
+    transition: border-color 0.2s, box-shadow 0.2s, opacity 0.2s;
+    cursor: pointer;
+  }
+  .card:hover { border-color: rgba(230, 237, 247, 0.45); }
+  .card.selected { box-shadow: 0 0 0 1.5px var(--text), 0 0 22px rgba(56, 189, 248, 0.22); }
+  .card.dimmed { opacity: 0.62; }
+  .card.amber { border-color: rgba(245, 158, 11, 0.65); box-shadow: 0 0 24px rgba(245, 158, 11, 0.10); }
+  .card.gold { border-color: rgba(250, 204, 21, 0.65); box-shadow: 0 0 24px rgba(250, 204, 21, 0.10); }
+  .card.teal { border-color: rgba(45, 212, 191, 0.65); box-shadow: 0 0 26px rgba(45, 212, 191, 0.11); }
+  .card.cyan { border-color: rgba(56, 189, 248, 0.65); box-shadow: 0 0 20px rgba(56, 189, 248, 0.11); }
+  .card.violet { border-color: rgba(192, 132, 252, 0.60); box-shadow: 0 0 22px rgba(192, 132, 252, 0.09); }
+  .card.dimmed.amber, .card.dimmed.gold, .card.dimmed.cyan, .card.dimmed.violet {
+    border-color: var(--border); box-shadow: none;
+  }
+
+  .card-hd { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+  .card-title { font-size: 13px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .badge {
+    font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 6px;
+    background: rgba(255,255,255,0.06); color: var(--soft); flex-shrink: 0;
+  }
+  .meta { font-size: 11px; color: var(--soft); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tele { font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* Left Advisor column */
+  .advisor-col { display: flex; flex-direction: column; justify-content: space-between; gap: 14px; }
+  .gate-item { padding: 8px 10px; border-radius: 8px; background: rgba(192,132,252,0.06); border: 1px solid rgba(192,132,252,0.18); font-size: 11px; color: var(--soft); }
+  .gate-item b { color: var(--violet); display: block; margin-bottom: 3px; font-size: 11.5px; }
+
+  /* Right pipeline flow column */
+  .flow-col { display: flex; flex-direction: column; gap: 22px; }
+  .top-row { display: grid; grid-template-columns: 1.15fr 1fr; gap: 18px; }
+
+  /* Decision gate bars */
+  .route-row { display: grid; grid-template-columns: 118px 1fr 122px; align-items: center; gap: 10px; margin-top: 8px; font-size: 11.5px; }
+  .bar-track { position: relative; height: 8px; border-radius: 999px; background: rgba(45, 212, 191, 0.14); overflow: hidden; }
+  .bar-track.split { background: rgba(245, 158, 11, 0.16); }
+  .bar-fill { height: 100%; border-radius: 999px; transition: width 0.35s ease; }
+  .bar-thresh { position: absolute; top: 0; bottom: 0; left: 70%; width: 2px; background: rgba(230, 237, 247, 0.78); }
+  .route-stat { text-align: right; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+
+  /* Workers grid */
+  .workers-box {
+    position: relative; z-index: 2;
+    border: 1px dashed rgba(56, 189, 248, 0.32); border-radius: 14px;
+    padding: 16px 14px 14px; background: rgba(18, 23, 34, 0.45);
+  }
+  .workers-box-label {
+    font-size: 11px; font-weight: 600; color: var(--cyan);
+    margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between;
+  }
+  .workers-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(195px, 1fr)); gap: 12px; }
+  .owner-tag { font-size: 10.5px; color: var(--amber); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* Return card */
+  .back-card { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+  .outcomes { display: flex; gap: 10px; font-size: 11.5px; font-family: ui-monospace, monospace; }
+  .c-pass { color: var(--teal); font-weight: 700; }
+  .c-rework { color: var(--amber); }
+  .c-fail { color: var(--rose); }
+  .c-human { color: var(--violet); font-weight: 700; }
+
+  /* Right Inspector sidebar */
+  .inspector {
+    border-left: 1px solid var(--border); background: rgba(14, 18, 28, 0.94);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .insp-tabs { display: flex; border-bottom: 1px solid var(--border); padding: 10px 14px; gap: 8px; }
+  .insp-body { padding: 14px; overflow-y: auto; flex: 1; font-size: 12px; }
+  .kv { display: grid; grid-template-columns: 78px 1fr; gap: 6px 8px; margin-top: 10px; font-size: 11.5px; }
+  .kv .k { color: var(--muted); }
+  .kv .v { color: var(--text); word-break: break-all; font-family: ui-monospace, monospace; font-size: 11px; }
+  .log-line {
+    padding: 7px 9px; border-radius: 7px; background: var(--bg-card);
+    border: 1px solid var(--border); margin-bottom: 7px;
+    font-family: ui-monospace, monospace; font-size: 10.5px; color: var(--soft);
+    word-break: break-word;
+  }
+  .empty-state { text-align: center; color: var(--muted); font-size: 12px; padding: 20px 8px; }
+</style>
+</head>
+<body>
+<div class="app" id="app">
+  <header class="topbar">
+    <div class="brand"><span class="dot" id="sseDot"></span> dgate <span style="color:var(--muted);font-weight:500;">Live OS Process Topology</span></div>
+    <span class="pill live" id="sseStatus">SSE 연결 중...</span>
+    <span class="pill" id="scopePill">scope: all</span>
+    <span class="pill" id="countsPill">LEAD 0 · WORKERS 0 · VERIFY 0</span>
+    <div class="spacer"></div>
+    <div id="repoFilters" style="display:flex;gap:6px;flex-wrap:nowrap;overflow:hidden;"></div>
+    <button class="btn" id="pauseBtn">⏸ 흐름 일시정지</button>
+  </header>
+
+  <div class="main">
+    <div class="stage-wrap" id="stageWrap">
+      <div class="stage" id="stage">
+        <svg class="wires" id="wiresSvg"></svg>
+
+        <!-- Left Column: Advisor / Guardrails -->
+        <aside class="card violet advisor-col" id="node-advisor" data-node="advisor">
+          <div>
+            <div class="card-hd">
+              <div class="card-title" style="color:var(--violet);">Advisor · 자문 3관문</div>
+              <span class="badge" id="advisorBadge">대기</span>
+            </div>
+            <div class="meta" id="advisorMeta">온디맨드 대기 · 일상 턴 침묵</div>
+            <div class="tele" style="color:var(--violet);" id="advisorTele">roster 대기</div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:8px;">
+            <div class="gate-item"><b>◇ G1 계획 확정 전</b>코더 투입 전 브리프·범위 점검</div>
+            <div class="gate-item"><b>◇ G2 같은 오류 2회</b>연속 실패 시 강제 split 에스컬레이션</div>
+            <div class="gate-item"><b>◇ G3 최종 머지 전</b>독립 판정 통과 후 READY_PR 승격</div>
+          </div>
+          <div class="meta" style="font-size:10.5px;color:var(--muted);">실시간 ps + hc + herdr 프로세스 관측</div>
+        </aside>
+
+        <!-- Right Column: Pipeline Flow -->
+        <section class="flow-col">
+          <div class="top-row">
+            <div class="card amber" id="node-lead" data-node="lead">
+              <div class="card-hd">
+                <div class="card-title" style="color:var(--amber);" id="leadTitle">Lead · 리드</div>
+                <span class="badge" id="leadBadge">대기</span>
+              </div>
+              <div class="meta" id="leadActivity">활성 리드 세션 대기 중</div>
+              <div class="tele" style="color:var(--amber);" id="leadTele">—</div>
+            </div>
+
+            <div class="card gold" id="node-verifier" data-node="verifier">
+              <div class="card-hd">
+                <div class="card-title" style="color:var(--gold);" id="verifierTitle">Verifier · 교차 검증</div>
+                <span class="badge" id="verifierBadge">대기</span>
+              </div>
+              <div class="meta" id="verifierActivity">호출 시 이종 모델 읽기전용 검증</div>
+              <div class="tele" style="color:var(--gold);" id="verifierTele">—</div>
+            </div>
+          </div>
+
+          <!-- Center: Decision Gate -->
+          <div class="card teal" id="node-decision" data-node="decision">
+            <div class="card-hd">
+              <div class="card-title" style="color:var(--teal);">Decision Gate · 분기 계층</div>
+              <span class="badge" id="forksBadge">forks 0 · θ_sharp 0.70</span>
+            </div>
+            <div id="routesContainer"></div>
+          </div>
+
+          <!-- Workers Fan-Out -->
+          <div class="workers-box" id="workersBox">
+            <div class="workers-box-label">
+              <span>하위 에이전트 · 실시간 OS 프로세스 매핑 (ps / hc / herdr)</span>
+              <span id="workersCountLabel" style="color:var(--soft);">0 active</span>
+            </div>
+            <div class="workers-grid" id="workersGrid">
+              <div class="empty-state">실행 중인 하위 워커가 없습니다</div>
+            </div>
+          </div>
+
+          <!-- Bottom: Return to Lead -->
+          <div class="card amber back-card" id="node-back" data-node="back">
+            <div>
+              <div class="card-title" style="color:var(--amber);">다시 Lead · 리드</div>
+              <div class="meta">검토 + 확인 · review + verify</div>
+            </div>
+            <div class="outcomes" id="outcomesBar">
+              <span class="c-pass">PASS 0</span>
+              <span class="c-rework">rework 0</span>
+              <span class="c-fail">fail 0</span>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <!-- Right Inspector Sidebar -->
+    <aside class="inspector">
+      <div class="insp-tabs">
+        <span class="pill clickable active" id="tabDetail">노드 상세</span>
+        <span class="pill clickable" id="tabLogs">감사 로그 (<span id="logCount">0</span>)</span>
+      </div>
+      <div class="insp-body" id="inspBody">
+        <div class="empty-state">좌측 흐름도에서 노드를 클릭하면<br/>실시간 PID · 모델 · 활동 상세를 표시합니다.</div>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<script>
+(() => {
+  let latest = null;
+  let selectedId = 'decision';
+  let activeTab = 'detail';
+  let repoFilter = 'all';
+  let paused = false;
+
+  const $ = (id) => document.getElementById(id);
+
+  $('pauseBtn').addEventListener('click', () => {
+    paused = !paused;
+    $('app').classList.toggle('paused', paused);
+    $('pauseBtn').classList.toggle('paused', paused);
+    $('pauseBtn').textContent = paused ? '▶ 흐름 재개' : '⏸ 흐름 일시정지';
+  });
+
+  $('tabDetail').addEventListener('click', () => { activeTab = 'detail'; syncTabs(); renderInspector(); });
+  $('tabLogs').addEventListener('click', () => { activeTab = 'logs'; syncTabs(); renderInspector(); });
+
+  function syncTabs() {
+    $('tabDetail').classList.toggle('active', activeTab === 'detail');
+    $('tabLogs').classList.toggle('active', activeTab === 'logs');
+  }
+
+  document.querySelectorAll('[data-node]').forEach(el => {
+    el.addEventListener('click', () => {
+      selectedId = el.getAttribute('data-node');
+      activeTab = 'detail';
+      syncTabs();
+      render();
+    });
+  });
+
+  function esc(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function filteredWorkers(snap) {
+    if (!snap) return [];
+    const list = snap.workers || [];
+    if (repoFilter === 'all') return list;
+    return list.filter(w => w.repo_tag === repoFilter);
+  }
+
+  function render() {
+    if (!latest) return;
+    const snap = latest;
+    const workers = filteredWorkers(snap);
+    const hasMotion = workers.some(w => w.active) || (snap.verifiers && snap.verifiers.length > 0);
+
+    $('scopePill').textContent = `scope: ${repoFilter === 'all' ? snap.scope : repoFilter}`;
+    $('countsPill').textContent = `LEAD ${snap.lead ? 1 : 0} · WORKERS ${workers.length} · VERIFY ${(snap.verifiers||[]).length} · ADVISOR ${(snap.advisors||[]).length}`;
+    $('logCount').textContent = (snap.recent_events || []).length;
+
+    // Repo filter pills
+    const repos = ['all', ...Array.from(new Set((snap.workers || []).map(w => w.repo_tag).filter(Boolean)))];
+    $('repoFilters').innerHTML = repos.slice(0, 5).map(r =>
+      `<span class="pill clickable ${repoFilter === r ? 'active' : ''}" data-repo="${esc(r)}">${esc(r)}</span>`
+    ).join('');
+    $('repoFilters').querySelectorAll('[data-repo]').forEach(el => {
+      el.addEventListener('click', () => { repoFilter = el.getAttribute('data-repo'); render(); });
+    });
+
+    // Lead
+    const leadEl = $('node-lead');
+    leadEl.classList.toggle('dimmed', !snap.lead);
+    leadEl.classList.toggle('selected', selectedId === 'lead');
+    $('leadTitle').textContent = snap.lead ? `Lead · ${snap.lead.name}` : 'Lead · 리드';
+    $('leadBadge').textContent = snap.lead ? (snap.lead.status || 'live') : '대기';
+    $('leadActivity').textContent = snap.lead ? snap.lead.activity : '활성 리드 세션 없음';
+    $('leadTele').textContent = snap.lead ? snap.lead.telemetry : 'roster 대기';
+
+    // Verifier
+    const v = (snap.verifiers || [])[0] || null;
+    const verEl = $('node-verifier');
+    verEl.classList.toggle('dimmed', !v);
+    verEl.classList.toggle('selected', selectedId === 'verifier');
+    $('verifierTitle').textContent = v ? `Verifier · ${v.name}` : 'Verifier · 교차 검증';
+    $('verifierBadge').textContent = (snap.verifiers || []).length > 1 ? `${snap.verifiers.length}개 검증 중` : (v ? '검증 중' : '대기');
+    $('verifierActivity').textContent = v ? v.activity : '호출 시 이종 모델 읽기전용 검증';
+    $('verifierTele').textContent = v ? v.telemetry : '대기 중';
+
+    // Advisor
+    const adv = (snap.advisors || [])[0] || null;
+    const advEl = $('node-advisor');
+    advEl.classList.toggle('dimmed', !adv);
+    advEl.classList.toggle('selected', selectedId === 'advisor');
+    $('advisorBadge').textContent = adv ? '자문 중' : '대기';
+    $('advisorMeta').textContent = adv ? adv.activity : '온디맨드 대기 · 일상 턴 침묵';
+    $('advisorTele').textContent = adv ? adv.telemetry : 'roster 대기';
+
+    // Decision Gate
+    $('node-decision').classList.toggle('selected', selectedId === 'decision');
+    $('forksBadge').textContent = `forks ${snap.total_forks} · θ_sharp 0.70`;
+    $('routesContainer').innerHTML = (snap.routes || []).map(r => {
+      const isSplit = r.forced_split || r.p < 0.70;
+      const color = r.forced_split ? 'var(--rose)' : (isSplit ? 'var(--amber)' : 'var(--teal)');
+      const pct = Math.max(2, Math.min(100, Math.round(r.p * 100)));
+      const tag = r.forced_split ? `p=${r.p.toFixed(2)} SPLIT!` : `p=${r.p.toFixed(2)} ${isSplit ? 'split' : 'sharp'} ${r.basis === 'measured' ? 'm' : 'p'}:${r.samples}`;
+      return `<div class="route-row">
+        <div style="color:${isSplit ? color : 'var(--text)'};">${esc(r.name)}</div>
+        <div class="bar-track ${isSplit ? 'split' : ''}">
+          <div class="bar-fill" style="width:${pct}%;background:${color};"></div>
+          <div class="bar-thresh" title="θ_sharp = 0.70"></div>
+        </div>
+        <div class="route-stat" style="color:${color};">${esc(tag)}</div>
+      </div>`;
+    }).join('');
+
+    // Workers grid
+    $('workersCountLabel').textContent = `${workers.filter(w => w.active).length} running / ${workers.length} total`;
+    if (workers.length === 0) {
+      $('workersGrid').innerHTML = '<div class="empty-state" style="grid-column:1/-1;">실행 중인 하위 워커가 없습니다 (ps / hc / herdr 감시 중)</div>';
+    } else {
+      $('workersGrid').innerHTML = workers.map(w => {
+        const isSel = selectedId === `worker:${w.address}`;
+        const dimmed = !w.active || w.empty_sublead;
+        const slotColor = w.slot === 'sublead' ? 'var(--violet)' : 'var(--cyan)';
+        const pidBadge = w.pid ? `PID ${w.pid}` : w.address;
+        return `<div class="card cyan ${dimmed ? 'dimmed' : ''} ${isSel ? 'selected' : ''}" data-worker="${esc(w.address)}">
+          <div class="card-hd">
+            <div class="card-title" style="color:${slotColor};">${esc(w.name)}${w.cluster_size !== null ? ` · ${w.cluster_size}` : ''}</div>
+            <span class="badge">${esc(pidBadge)}</span>
+          </div>
+          ${w.owner_badge ? `<div class="owner-tag">${esc(w.owner_badge)}</div>` : ''}
+          <div class="meta">${esc(w.activity)}</div>
+          <div class="tele" style="color:${slotColor};">${esc(w.telemetry)}</div>
+        </div>`;
+      }).join('');
+      $('workersGrid').querySelectorAll('[data-worker]').forEach(el => {
+        el.addEventListener('click', (e) => {
+          e.stopPropagation();
+          selectedId = `worker:${el.getAttribute('data-worker')}`;
+          activeTab = 'detail';
+          syncTabs();
+          render();
+        });
+      });
+    }
+
+    // Return card
+    const backEl = $('node-back');
+    backEl.classList.toggle('dimmed', !hasMotion);
+    backEl.classList.toggle('selected', selectedId === 'back');
+    const oc = snap.outcomes || { pass: 0, rework: 0, fail: 0, waiting_human: 0 };
+    $('outcomesBar').innerHTML = `
+      <span class="c-pass">PASS ${oc.pass}</span>
+      <span class="c-rework">rework ${oc.rework}</span>
+      <span class="c-fail">fail ${oc.fail}</span>
+      ${oc.waiting_human > 0 ? `<span class="c-human">human ${oc.waiting_human}</span>` : ''}
+    `;
+
+    renderInspector();
+    requestAnimationFrame(() => drawWires(hasMotion));
+  }
+
+  function renderInspector() {
+    if (!latest) return;
+    const body = $('inspBody');
+    if (activeTab === 'logs') {
+      const logs = latest.recent_events || [];
+      body.innerHTML = logs.length
+        ? logs.map(l => `<div class="log-line">${esc(l)}</div>`).join('')
+        : '<div class="empty-state">최근 decision_events 로그가 없습니다.</div>';
+      return;
+    }
+
+    if (selectedId.startsWith('worker:')) {
+      const addr = selectedId.slice(7);
+      const w = (latest.workers || []).find(x => x.address === addr);
+      if (!w) { body.innerHTML = '<div class="empty-state">선택한 워커가 종료되었습니다.</div>'; return; }
+      body.innerHTML = `
+        <div style="font-size:14px;font-weight:700;color:var(--cyan);">${esc(w.name)}</div>
+        <div class="meta" style="white-space:normal;margin-top:4px;">${esc(w.activity)}</div>
+        <div class="kv">
+          <div class="k">Address</div><div class="v">${esc(w.address)}</div>
+          <div class="k">OS PID</div><div class="v">${esc(w.pid ?? '—')}</div>
+          <div class="k">Slot</div><div class="v">${esc(w.slot)}</div>
+          <div class="k">Status</div><div class="v">${esc(w.status || 'live')}</div>
+          <div class="k">Telemetry</div><div class="v">${esc(w.telemetry)}</div>
+          <div class="k">Owner</div><div class="v">${esc(w.owner_badge || w.owner_address || '—')}</div>
+          <div class="k">Repo</div><div class="v">${esc(w.repo_tag || '—')}</div>
+          <div class="k">CWD</div><div class="v">${esc(w.cwd || '—')}</div>
+        </div>`;
+      return;
+    }
+
+    if (selectedId === 'lead') {
+      const l = latest.lead;
+      body.innerHTML = l
+        ? `<div style="font-size:14px;font-weight:700;color:var(--amber);">Lead · ${esc(l.name)}</div>
+           <div class="kv">
+             <div class="k">Address</div><div class="v">${esc(l.address)}</div>
+             <div class="k">Telemetry</div><div class="v">${esc(l.telemetry)}</div>
+             <div class="k">Status</div><div class="v">${esc(l.status || 'working')}</div>
+             <div class="k">Activity</div><div class="v">${esc(l.activity)}</div>
+             <div class="k">CWD</div><div class="v">${esc(l.cwd || '—')}</div>
+           </div>`
+        : '<div class="empty-state">현재 활성 Lead 세션이 없습니다.</div>';
+      return;
+    }
+
+    if (selectedId === 'verifier') {
+      const vs = latest.verifiers || [];
+      body.innerHTML = vs.length
+        ? vs.map(v => `<div class="log-line"><b style="color:var(--gold);">${esc(v.name)}</b><br/>${esc(v.telemetry)}<br/>${esc(v.activity)}</div>`).join('')
+        : '<div class="empty-state">현재 실행 중인 Verifier가 없습니다.</div>';
+      return;
+    }
+
+    // Default: Decision Gate summary
+    const oc = latest.outcomes || {};
+    body.innerHTML = `
+      <div style="font-size:14px;font-weight:700;color:var(--teal);">Decision Gate · 실시간 요약</div>
+      <div class="meta" style="white-space:normal;margin-top:4px;">SQLite WAL 사후확률(EWMA Beta) + 실시간 OS 프로세스(ps/hc/herdr) 스트리밍</div>
+      <div class="kv">
+        <div class="k">Updated</div><div class="v">${esc(latest.timestamp)}</div>
+        <div class="k">DB Live</div><div class="v">${latest.db_live ? 'connected' : 'prior fallback'}</div>
+        <div class="k">Forks</div><div class="v">${latest.total_forks} (open ${latest.open_forks})</div>
+        <div class="k">Outcomes</div><div class="v">PASS ${oc.pass||0} · rework ${oc.rework||0} · fail ${oc.fail||0}</div>
+      </div>`;
+  }
+
+  function drawWires(hasMotion) {
+    const svg = $('wiresSvg');
+    const stage = $('stage');
+    if (!svg || !stage) return;
+    const sr = stage.getBoundingClientRect();
+    const box = (id) => {
+      const el = $(id);
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return {
+        l: r.left - sr.left, r: r.right - sr.left,
+        t: r.top - sr.top, b: r.bottom - sr.top,
+        cx: (r.left + r.right) / 2 - sr.left,
+        cy: (r.top + r.bottom) / 2 - sr.top
+      };
+    };
+    const lead = box('node-lead');
+    const ver = box('node-verifier');
+    const dec = box('node-decision');
+    const wbox = box('workersBox');
+    const back = box('node-back');
+    if (!lead || !ver || !dec || !wbox || !back) return;
+
+    const segs = [];
+    const addCurve = (d, color, active) => {
+      segs.push(`<path class="wire-path ${active ? 'active' : ''}" d="${d}" stroke="${color}" />`);
+      if (active) segs.push(`<path class="wire-pulse" d="${d}" stroke="${color}" />`);
+    };
+
+    // Lead -> Verifier
+    addCurve(`M ${lead.r} ${lead.cy} L ${ver.l} ${ver.cy}`, '#facc15', (latest?.verifiers?.length || 0) > 0);
+    // Lead -> Decision Gate
+    addCurve(`M ${lead.cx} ${lead.b} C ${lead.cx} ${(lead.b+dec.t)/2}, ${dec.cx} ${(lead.b+dec.t)/2}, ${dec.cx} ${dec.t}`, '#f59e0b', Boolean(latest?.lead));
+    // Decision Gate -> Workers Box
+    addCurve(`M ${dec.cx} ${dec.b} L ${wbox.cx} ${wbox.t}`, '#2dd4bf', hasMotion);
+    // Workers Box -> Return Card
+    addCurve(`M ${wbox.cx} ${wbox.b} L ${back.cx} ${back.t}`, '#38bdf8', hasMotion);
+
+    svg.innerHTML = segs.join('');
+  }
+
+  window.addEventListener('resize', () => { if (latest) drawWires(true); });
+
+  function connectSSE() {
+    const es = new EventSource('/api/stream');
+    es.onopen = () => {
+      $('sseDot').classList.remove('off');
+      $('sseStatus').textContent = 'LIVE · SSE';
+    };
+    es.addEventListener('snapshot', (ev) => {
+      try {
+        latest = JSON.parse(ev.data);
+        $('sseStatus').textContent = `LIVE · ${latest.timestamp}`;
+        render();
+      } catch (_) {}
+    });
+    es.onerror = () => {
+      $('sseDot').classList.add('off');
+      $('sseStatus').textContent = '재연결 중...';
+    };
+  }
+
+  fetch('/api/snapshot').then(r => r.json()).then(d => { latest = d; render(); }).catch(() => {});
+  connectSSE();
+})();
+</script>
+</body>
+</html>
