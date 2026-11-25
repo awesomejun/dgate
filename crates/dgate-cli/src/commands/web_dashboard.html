@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>dgate · Obsidian Signal Topology</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23090c12'/%3E%3Ccircle cx='16' cy='16' r='8' fill='%232dd4bf'/%3E%3C/svg%3E" />
 <style>
   :root {
     --bg: #090c12;
@@ -577,7 +578,8 @@
   .pod-caption { margin-top: auto; padding-top: 8px; color: #64748b; font-size: 9.3px; }
   .model-roster { padding: 9px 9px; color: #475569; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
   .roster-list { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; overflow: hidden; }
-  .roster-item { border-left: 2px solid #3b82f6; padding-left: 6px; color: #475569; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 8.9px; line-height: 1.28; overflow-wrap: anywhere; }
+  .roster-item, .roster-row { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; border-left: 2px solid #3b82f6; padding-left: 6px; color: #334155; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9.5px; line-height: 1.32; overflow-wrap: anywhere; }
+  .roster-row b { color: #2563eb; font-weight: 800; flex-shrink: 0; }
   .roster-empty { color: #94a3b8; font-size: 9.4px; }
   .os-box {
     position: relative; margin-top: 14px; border: 1.5px dashed #10b981; border-radius: 14px; background: #f2fdf7;
@@ -636,9 +638,9 @@
   .local-metrics { margin-bottom: 2px; }
   .local-error { border: 1px solid rgba(239,68,68,.32); background: rgba(239,68,68,.08); color: var(--rose); border-radius: 10px; padding: 8px 10px; font-size: 11px; line-height: 1.35; }
   .usage-stack { display: flex; flex-direction: column; gap: 9px; }
-  .usage-row { display: grid; grid-template-columns: 44px 1fr 74px; align-items: center; gap: 8px; font-size: 11px; }
-  .usage-label { color: var(--soft); font-weight: 800; }
-  .usage-value { color: var(--muted); font-family: var(--mono); font-size: 10px; text-align: right; }
+  .usage-row { display: grid; grid-template-columns: 56px 1fr 86px; align-items: center; gap: 8px; font-size: 11px; }
+  .usage-label { color: var(--soft); font-weight: 800; white-space: nowrap; }
+  .usage-value { color: var(--muted); font-family: var(--mono); font-size: 10px; text-align: right; white-space: nowrap; }
   .repo-connect-row { display: grid; grid-template-columns: 1fr auto; gap: 7px; margin-top: 8px; }
   .repo-input { width: 100%; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); color: var(--text); padding: 8px 10px; font: 11px var(--mono); outline: none; }
   .repo-input:focus { border-color: var(--cyan); box-shadow: 0 0 0 2px rgba(34,211,238,.12); }
@@ -1785,9 +1787,9 @@
       ].join('')}</div>
       <div class="local-group-label">Host Disk &amp; RAM</div>
       <div class="usage-stack">
-        ${usageBarHtml('하드디스크 용량', disk.pct, `${num(disk.used_gb).toFixed(1)}/${diskTotal.toFixed(1)} GB`, 'var(--cyan)')}
-        ${usageBarHtml('여유', diskFreePct, `${num(disk.free_gb).toFixed(1)} GB free`, 'var(--teal)')}
-        ${usageBarHtml('RAM', ram.pct, `${num(ram.used_mb)} MB/${num(ram.total_gb).toFixed(1)} GB`, 'var(--violet)')}
+        ${usageBarHtml('디스크', disk.pct, `${num(disk.used_gb).toFixed(1)}/${diskTotal.toFixed(1)} GB`, 'var(--cyan)')}
+        ${usageBarHtml('여유 공간', diskFreePct, `${num(disk.free_gb).toFixed(1)} GB free`, 'var(--teal)')}
+        ${usageBarHtml('RAM', ram.pct, `${(num(ram.used_mb) / 1024).toFixed(1)}/${num(ram.total_gb).toFixed(1)} GB`, 'var(--violet)')}
       </div>
       <div class="local-group-label">로컬 저장소</div>
       <div class="repo-card"><b>${esc(local.name || 'local repo')}</b><br/>branch ${esc(local.branch || '—')} · worktrees ${num(local.worktree_count)}<div class="repo-anchor">anchor ${esc(local.head || 'commit —')}</div></div>
@@ -2504,32 +2506,29 @@
       label: 'detected pids', labelX: (scanner.r + mapper.l) / 2, labelY: scanner.t - 10, labelW: 88
     });
 
-    // Live Mapper sweeping emerald return bus around the runtime frame, then back into Decision Gate
-    // through the gate-rail whitespace. This keeps the feedback bus clear of Skills/Pod/Roster cards.
-    const returnX = runtime.r - 12;
-    const returnTopY = runtime.t - 8;
-    const decisionApproachX = dec.r + 8;
+    // Bottom Decision Gate loop card sweeping emerald return bus cleanly around the outer runtime frame
+    // and down into the top of the upper Decision Gate card (clear of bottom loop text & runtime header).
+    const returnX = runtime.r - 6;
+    const returnTopY = runtime.t - 10;
     const returnPoints = [
-      { x: mapper.r + 4, y: mapper.cy },
-      { x: returnX, y: mapper.cy },
+      { x: osDecision.r + 4, y: osDecision.cy },
+      { x: returnX, y: osDecision.cy },
       { x: returnX, y: returnTopY },
-      { x: decisionApproachX, y: returnTopY },
-      { x: decisionApproachX, y: dec.cy },
-      { x: dec.r + 4, y: dec.cy }
+      { x: dec.cx, y: returnTopY },
+      { x: dec.cx, y: dec.t - 4 }
     ];
     const returnD = roundedPath(returnPoints, wireShape === 'bus' ? 8 : (wireShape === 'bezier' ? 18 : 12));
     if (wireShape === 'bus') {
-      addBusJunction(returnX, mapper.cy, C.emerald);
+      addBusJunction(returnX, osDecision.cy, C.emerald);
       addBusJunction(returnX, returnTopY, C.emerald);
-      addBusJunction(decisionApproachX, returnTopY, C.emerald);
-      addBusJunction(decisionApproachX, dec.cy, C.emerald);
+      addBusJunction(dec.cx, returnTopY, C.emerald);
     }
     addWire({
       d: returnD,
       color: C.emerald,
       active: activeWorkers > 0 || factoryTrigger === 'os',
       label: 'live pid map',
-      labelX: decisionApproachX + (returnX - decisionApproachX) * 0.54,
+      labelX: dec.cx + (returnX - dec.cx) * 0.56,
       labelY: returnTopY - 13,
       labelW: 84
     });

@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/dependencies-0_npm-2ea043?style=flat-square" alt="dependencies">
   <a href="#7-rust-v2-네이티브-cli--선택적-gpui-데스크톱-관제앱"><img src="https://img.shields.io/badge/Rust_v2_+_GPUI-~3.7ms_startup-dea584?style=flat-square" alt="Rust"></a>
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-0078d4?style=flat-square" alt="platform">
-  <a href="#7-rust-v2-네이티브-cli--선택적-gpui-데스크톱-관제앱"><img src="https://img.shields.io/badge/tests-453_Rust_%2B_10_installer-2ea043?style=flat-square" alt="tests"></a>
+  <a href="#7-rust-v2-네이티브-cli--선택적-gpui-데스크톱-관제앱"><img src="https://img.shields.io/badge/tests-458_Rust_%2B_10_installer-2ea043?style=flat-square" alt="tests"></a>
   <img src="https://img.shields.io/badge/node-%3E%3D22.6-339933?style=flat-square" alt="node">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-111827?style=flat-square" alt="license"></a>
 </p>
@@ -53,7 +53,7 @@
   <tr>
     <td width="50%" valign="top">
       <h3>🖥️ 실시간 TUI · SSE 웹 · GPUI 관제</h3>
-      Rust 네이티브 <code>dgate-tui</code>(ratatui) · <code>dg serve</code>(무의존성 localhost SSE 웹 토폴로지) · <code>dgate-gui</code>(GPUI 0.2.2). <code>hc</code> · <code>dg wrap</code> · <code>herdr agent list</code> · 단독 OS <code>ps</code> 프로세스를 실시간 매핑하고, <code>θ_sharp</code> 임계선과 <code>PASS/rework/fail</code> 요약을 표시한다.
+      Rust 네이티브 <code>dgate-tui</code>(ratatui) · <code>dg serve</code>(무의존성 localhost SSE 웹 — Dark 토폴로지 &amp; Light 팩토리 듀얼 뷰) · <code>dgate-gui</code>(GPUI 0.2.2). <code>hc</code> · <code>dg wrap</code> · <code>herdr agent list</code> · 단독 OS <code>ps</code> 프로세스와 로컬 git·디스크/RAM을 실시간 매핑한다.
     </td>
     <td width="50%" valign="top">
       <h3>🌐 크로스 플랫폼 &amp; ~3.7ms 네이티브 기동</h3>
@@ -142,7 +142,7 @@ npm run setup:check      # 읽기전용 진단 리포트만 (파일 쓰기 0)
 # 1) 오케스트레이션 계획 리허설 (모델 호출 0회, 실기동 0회 — 무조건 안전)
 ./target/release/dg dispatch --task-kind multi_edit --repo . --dry-run
 
-# 2) 전체 테스트 463건 — Rust 워크스페이스 453 + 설치 스크립트 10
+# 2) 전체 테스트 468건 — Rust 워크스페이스 458 + 설치 스크립트 10
 npm test                 # = cargo test --workspace && node --test tests/*.test.ts
 
 # 3) 데모 TUI 스냅샷 (DB·hc 없이 관제 화면 정적 출력)
@@ -269,7 +269,7 @@ dg <command> [flags]
 | `retro` | fork 회고 마크다운(상태·원인·실패 도구·권고)을 다음 워커 브리프용으로 생성 |
 | `settle-orphans` | TTL 만료 fork 일괄 정산 |
 | `wrap` | 워커 커맨드 래핑 — 워치독 감시·산출물 계약·원자 커밋으로 SSOT 기록 (§5). `--stall-action warn`은 무출력 임계 초과 시 킬 대신 경고만 출력 |
-| `serve` | `--port 4747` · `--repo <dir>` · `--poll-ms 1500` — localhost 전용 실시간 SSE 웹 토폴로지 대시보드 (§6) |
+| `serve` | `--port 4747` · `--repo <dir>` · `--poll-ms 1500` — localhost 전용 실시간 SSE 웹 대시보드 (Dark 토폴로지 · Light 팩토리 듀얼 뷰, §6) |
 | `stats` | 비용·실행/대기 시간 통계 (`--cost`·`--timing`·`--days`·`--db`) — 완전 읽기전용, 구간 합집합으로 병렬 중복 제거 |
 | `checkpoint` | 워크트리 체크포인트 `create\|verify\|restore` — git 패치+untracked 스냅숏, sha256 manifest 검증 |
 | `worktree` | `worktree remove` — 체크포인트 검증 통과 전 삭제 물리 차단 (`exit 4`, 우회 불가) |
@@ -355,7 +355,7 @@ dg <command> [flags]
 - **Sublead 클러스터 & 루트 PID 귀속** — 중첩 `hc run --bg -- dg wrap` 자식 워커도 루트 PID(`wrap_pid == terminal.pid`)까지 추적해 소유 sublead 클러스터(`↳ sublead-*` 배지)에 자동 귀속합니다.
 - **활성 코더 우선 노출 & 오버플로 스크롤** — Workers 그리드는 **활성 클러스터(코더) → 미소속 워커 → 빈 sublead** 순으로 정렬하고, `←/→` 가로 슬라이딩 창으로 `+N개 더` 오버플로 카드까지 탐색합니다.
 - **내장 서브에이전트 경고** — 리드가 내장 서브에이전트(`invoke_subagent`)를 호출하면 Lead 카드에 관측 불가 경고 배지를 띄웁니다.
-- **localhost SSE 웹 대시보드 (`dg serve`)** — `dg serve [--port 4747] [--repo <dir>]`는 외부 크레이트 0개(`127.0.0.1` 전용)로 `GET /` · `/api/snapshot` · `/api/stream`(SSE)을 제공하며, `ps`/`hc`/`herdr agent list` 좌석과 단독 OS AI 프로세스(`os:<pid>`)를 곡선 베지어 팬아웃·우측 인스펙터 칩 그리드로 실시간 시각화합니다.
+- **localhost SSE 웹 대시보드 (`dg serve`)** — `dg serve [--port 4747] [--repo <dir>]`는 외부 크레이트 0개·100% 로컬 전용(`127.0.0.1`)으로 `GET /` · `/api/snapshot` · `/api/stream`(SSE)을 제공합니다. **토폴로지(Dark)** 와 **팩토리(Light 컨트롤 타워)** 듀얼 뷰를 상단에서 즉시 전환하며, 두 뷰가 공유하는 SVG 연결선 스튜디오(`bezier`·`rounded`·`bus` + `packet`·`comet`·`particle`·`chevron` + 테마 인식 케이싱/포트 도트)와 4탭 인스펙터(**로컬 상태**·**실시간**·**매핑 설계**·**상세·로그** — 호스트 Disk/RAM, 로컬 git·워크트리·`.herdr/pipelines`, `ps`/`hc`/`herdr` 프로세스 매핑)를 내장합니다.
 - **시각 계층 & 임계선 마커** — TUI · Web · GPUI 공통으로 Decision Gate 바에 `θ_sharp`(0.70) 임계선 마커를 표시하고, 하단 `다시 Lead` 카드에 실측 `PASS · rework · fail · human` 요약, 활성/대기 노드 광도 분리, 중복 벤더 모델명 자동 축약을 적용했습니다.
 
 ```bash
@@ -408,10 +408,10 @@ cargo run -p dgate-gui -- [--repo <dir>] [--db <path>] [--roster <path>] [--watc
 
 | 대상 | 테스트 수 | 실행 명령 |
 | :--- | :--- | :--- |
-| **Rust 워크스페이스** | **453건** (`core` 325 · `cli` 27 · `e2e` 11 · `gui` 45 · `tui` 45) | `cargo test --workspace` |
+| **Rust 워크스페이스** | **458건** (`core` 325 · `cli` 32 · `e2e` 11 · `gui` 45 · `tui` 45) | `cargo test --workspace` |
 | **전역 설치 스크립트** | **10건** (래퍼 생성 · 멱등 · win32 계약) | `node --test tests/install-global.test.ts` |
 
-`npm test`로 463건 전수를 한 번에 실행합니다.
+`npm test`로 468건 전수를 한 번에 실행합니다.
 
 ---
 
