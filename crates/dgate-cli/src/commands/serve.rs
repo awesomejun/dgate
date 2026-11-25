@@ -5,7 +5,7 @@
 //! - `GET /api/snapshot` — 현재 스냅숏 JSON
 //! - `GET /api/stream` — `text/event-stream` (SSE) 주기적 스냅숏 스트리밍
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -89,6 +89,18 @@ fn build_web_snapshot(
             .retain(|w| matches_repo_scope(w.cwd.as_deref(), Some(dir_s.as_str())));
     }
 
+    let mut repos: BTreeSet<String> = BTreeSet::new();
+    let mut providers: BTreeMap<String, usize> = BTreeMap::new();
+    for w in &merged.workers {
+        if !w.repo_tag.trim().is_empty() && w.repo_tag != "unknown" {
+            repos.insert(w.repo_tag.clone());
+        }
+        let cli = w.cli.trim();
+        if !cli.is_empty() {
+            *providers.entry(cli.to_string()).or_insert(0) += 1;
+        }
+    }
+
     let mut lead: Option<Value> = None;
     let mut verifiers: Vec<Value> = Vec::new();
     let mut advisors: Vec<Value> = Vec::new();
@@ -152,6 +164,34 @@ fn build_web_snapshot(
     for (sub, _) in clusters.iter().filter(|(_, c)| c.is_empty()) {
         ordered_workers.push(worker_to_json(sub, None, Some(0)));
     }
+
+    let lead_active = lead
+        .as_ref()
+        .and_then(|v| v.get("active"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let verifier_active = verifiers
+        .iter()
+        .any(|v| v.get("active").and_then(Value::as_bool).unwrap_or(false));
+    let active_worker_count = ordered_workers
+        .iter()
+        .filter(|w| w.get("active").and_then(Value::as_bool).unwrap_or(false))
+        .count();
+    let effort_level = lead
+        .as_ref()
+        .and_then(|v| v.get("effort"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            ordered_workers.iter().find_map(|w| {
+                if w.get("active").and_then(Value::as_bool).unwrap_or(false) {
+                    w.get("effort").and_then(Value::as_str)
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or("unknown")
+        .to_string();
 
     // DB 통계 (읽기전용, fail-open)
     let project_id = repo_filter.map(|d| resolve_project_identity(d).project_id);
@@ -243,6 +283,45 @@ fn build_web_snapshot(
         None => "all".to_string(),
     };
 
+    let failure_pressure = outcomes.rework + outcomes.fail > 0;
+    let active_gates = vec![
+        json!({
+            "id": "g1-hook-guard",
+            "gate": "G1",
+            "label": "dg hook --guard",
+            "active": lead_active,
+            "detail": "코더 투입 전 브리프·범위·완료 기준 점검",
+        }),
+        json!({
+            "id": "g2-wrap-watchdog",
+            "gate": "G2",
+            "label": "dg wrap watchdog",
+            "active": active_worker_count > 0,
+            "detail": "하위 워커 스톨·무응답 감시",
+        }),
+        json!({
+            "id": "g1-checkpoint",
+            "gate": "G1",
+            "label": "dg checkpoint",
+            "active": lead_active,
+            "detail": "결정 분기 전 작업 상태 체크포인트",
+        }),
+        json!({
+            "id": "g2-backprop",
+            "gate": "G2",
+            "label": "dg backprop",
+            "active": failure_pressure,
+            "detail": "연속 오류 신호를 상위 계획으로 역전파",
+        }),
+        json!({
+            "id": "g3-herdr-agent",
+            "gate": "G3",
+            "label": "herdr agent",
+            "active": verifier_active || outcomes.waiting_human > 0,
+            "detail": "완료 관문 독립 판정·READY_PR 승격",
+        }),
+    ];
+
     json!({
         "timestamp": format_hms_utc_offset(now_ms()),
         "scope": scope,
@@ -256,6 +335,10 @@ fn build_web_snapshot(
             "waiting_human": outcomes.waiting_human,
         },
         "routes": routes,
+        "providers": providers,
+        "repos": repos.into_iter().collect::<Vec<_>>(),
+        "effort_level": effort_level,
+        "active_gates": active_gates,
         "lead": lead,
         "verifiers": verifiers,
         "advisors": advisors,
@@ -410,5 +493,30 @@ mod tests {
         assert!(WEB_HTML.contains("/api/stream"));
         assert!(WEB_HTML.contains("/api/snapshot"));
         assert!(WEB_HTML.contains("EventSource"));
+    }
+
+    #[test]
+    fn embedded_web_html_contains_reference_grade_topology_contract() {
+        for needle in [
+            "#090c12",
+            "min-height: calc(100vh - 96px)",
+            "grid-template-columns: repeat(4, minmax(0, 1fr));",
+            "dg hook --guard",
+            "dg wrap watchdog",
+            "dg checkpoint",
+            "dg backprop",
+            "herdr agent",
+            "단일 리드",
+            "읽기 전용",
+            "하위 에이전트 · OS 프로세스 (ps / hc / herdr)",
+            "Decision → Worker → Verify → Merge",
+            "라우팅 상세",
+            "감사 로그",
+            "구성 요소 탐색",
+            "판단 펄스",
+            "animateMotion",
+        ] {
+            assert!(WEB_HTML.contains(needle), "missing dashboard contract: {needle}");
+        }
     }
 }

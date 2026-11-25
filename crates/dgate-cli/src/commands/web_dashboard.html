@@ -3,16 +3,18 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>dgate · Live Topology (SSE)</title>
+<title>dgate · Obsidian Signal Topology</title>
 <style>
   :root {
-    --bg: #0b0e14;
-    --bg-card: #121722;
-    --bg-elev: #171d2b;
-    --border: #263044;
-    --text: #e6edf7;
-    --soft: #a6b4cc;
-    --muted: #6b7a94;
+    --bg: #090c12;
+    --bg-panel: rgba(15, 20, 31, 0.90);
+    --bg-card: #111724;
+    --bg-card-2: #151d2d;
+    --border: #263248;
+    --border-soft: rgba(148, 163, 184, 0.20);
+    --text: #e8eef8;
+    --soft: #a9b8cf;
+    --muted: #687790;
     --amber: #f59e0b;
     --gold: #facc15;
     --teal: #2dd4bf;
@@ -21,259 +23,489 @@
     --rose: #fb7185;
   }
   * { box-sizing: border-box; }
-  html, body {
-    margin: 0; padding: 0; height: 100%;
-    background-color: var(--bg);
-    background-image: radial-gradient(rgba(148, 163, 184, 0.11) 1px, transparent 1px);
-    background-size: 20px 20px;
-    color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, "Pretendard", "Inter", ui-sans-serif, system-ui, sans-serif;
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
     overflow: hidden;
+    color: var(--text);
+    background-color: var(--bg);
+    background-image:
+      radial-gradient(circle at 18% 20%, rgba(192, 132, 252, 0.10), transparent 30%),
+      radial-gradient(circle at 48% 4%, rgba(245, 158, 11, 0.075), transparent 28%),
+      radial-gradient(circle at 73% 30%, rgba(45, 212, 191, 0.075), transparent 31%),
+      radial-gradient(circle at 65% 78%, rgba(56, 189, 248, 0.085), transparent 34%),
+      radial-gradient(rgba(148, 163, 184, 0.105) 1px, transparent 1px);
+    background-size: auto, auto, auto, auto, 22px 22px;
+    font-family: -apple-system, BlinkMacSystemFont, "Pretendard", "Inter", ui-sans-serif, system-ui, sans-serif;
   }
-  .app { display: grid; grid-template-rows: 52px 1fr; height: 100vh; }
-  /* Top bar */
-  .topbar {
-    display: flex; align-items: center; gap: 12px;
-    padding: 0 18px;
-    background: rgba(14, 18, 28, 0.92);
+  button, input { font: inherit; }
+  .app { height: 100vh; display: grid; grid-template-rows: 92px minmax(0, 1fr); }
+
+  /* 2-row top chrome */
+  .topchrome {
+    position: relative; z-index: 10;
+    background: rgba(10, 14, 22, 0.92);
     border-bottom: 1px solid var(--border);
-    backdrop-filter: blur(8px);
+    backdrop-filter: blur(12px);
   }
-  .brand { font-weight: 800; font-size: 15px; letter-spacing: 0.4px; color: var(--text); display: flex; align-items: center; gap: 8px; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--teal); box-shadow: 0 0 10px var(--teal); }
-  .dot.off { background: var(--rose); box-shadow: 0 0 8px var(--rose); }
-  .pill {
-    font-size: 11px; padding: 3px 9px; border-radius: 999px;
-    border: 1px solid var(--border); color: var(--soft); background: var(--bg-card);
+  .topline {
+    height: 53px; padding: 0 18px;
+    display: grid; grid-template-columns: minmax(220px, 1fr) auto minmax(220px, 1fr);
+    align-items: center; gap: 16px;
   }
-  .pill.live { border-color: rgba(45, 212, 191, 0.45); color: var(--teal); }
-  .pill.clickable { cursor: pointer; transition: 0.15s; }
-  .pill.clickable:hover, .pill.active { border-color: var(--cyan); color: var(--cyan); background: rgba(56, 189, 248, 0.1); }
-  .spacer { flex: 1; }
+  .brand { display: flex; align-items: center; gap: 9px; min-width: 0; }
+  .brand-name { font-size: 16px; font-weight: 850; letter-spacing: 0.2px; }
+  .brand-sub { color: var(--muted); font-size: 11px; font-weight: 650; letter-spacing: 1.15px; text-transform: uppercase; white-space: nowrap; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--teal); box-shadow: 0 0 11px var(--teal); flex: 0 0 auto; }
+  .dot.off { background: var(--rose); box-shadow: 0 0 9px var(--rose); }
+  .scope-tabs { display: flex; justify-content: center; align-items: center; gap: 7px; min-width: 0; overflow: hidden; }
+  .scope-tab {
+    border: 1px solid var(--border); border-radius: 999px;
+    color: var(--soft); background: rgba(17, 23, 36, 0.72);
+    font-size: 11.5px; font-weight: 650; padding: 5px 12px;
+    cursor: pointer; white-space: nowrap; transition: border-color .16s, color .16s, background .16s, box-shadow .16s;
+  }
+  .scope-tab:hover { color: var(--text); border-color: rgba(232, 238, 248, 0.38); }
+  .scope-tab.active {
+    color: var(--cyan); border-color: rgba(56, 189, 248, 0.64);
+    background: rgba(56, 189, 248, 0.11); box-shadow: 0 0 16px rgba(56, 189, 248, 0.12);
+  }
+  .top-actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
   .btn {
-    font-size: 11px; font-weight: 600; padding: 5px 11px; border-radius: 8px;
-    border: 1px solid var(--border); background: var(--bg-elev); color: var(--text);
-    cursor: pointer; transition: 0.15s;
+    border: 1px solid var(--border); border-radius: 9px;
+    background: var(--bg-card-2); color: var(--text);
+    font-size: 11.5px; font-weight: 700; padding: 6px 11px;
+    cursor: pointer; transition: border-color .16s, color .16s, box-shadow .16s;
   }
   .btn:hover { border-color: var(--teal); color: var(--teal); }
-  .btn.paused { border-color: var(--amber); color: var(--amber); }
+  .btn.paused { border-color: rgba(245, 158, 11, 0.68); color: var(--amber); box-shadow: 0 0 14px rgba(245, 158, 11, 0.12); }
 
-  /* Main layout: Left canvas + Right inspector */
-  .main { display: grid; grid-template-columns: 1fr 340px; min-height: 0; }
+  .subline {
+    height: 38px; padding: 0 18px 9px;
+    display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  }
+  .status-strip, .provider-pills { display: flex; align-items: center; gap: 7px; min-width: 0; overflow: hidden; }
+  .status-bit, .provider-pill {
+    border: 1px solid rgba(148, 163, 184, 0.18); border-radius: 999px;
+    background: rgba(17, 23, 36, 0.58); color: var(--soft);
+    font-size: 10.5px; font-weight: 700; letter-spacing: 0.18px;
+    padding: 3px 8px; white-space: nowrap;
+  }
+  .status-bit.live { color: var(--teal); border-color: rgba(45, 212, 191, 0.38); }
+  .status-bit.warn { color: var(--amber); border-color: rgba(245, 158, 11, 0.38); }
+  .status-bit.fail { color: var(--rose); border-color: rgba(251, 113, 133, 0.34); }
+  .provider-pill { color: var(--cyan); border-color: rgba(56, 189, 248, 0.28); }
+  .provider-pill.empty { color: var(--muted); border-color: rgba(148, 163, 184, 0.16); }
+
+  /* Main canvas + persistent inspector */
+  .main { min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 360px; }
   .stage-wrap {
-    position: relative; overflow: auto;
-    padding: 28px 34px 32px;
-    display: flex; align-items: stretch; justify-content: center;
+    position: relative; min-height: 0; overflow: auto;
+    display: flex; justify-content: center; align-items: stretch;
+  }
+  .stage-wrap::before {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background-image: radial-gradient(rgba(148, 163, 184, 0.12) 1px, transparent 1px);
+    background-size: 22px 22px;
+    mask-image: linear-gradient(to bottom, rgba(0,0,0,.88), rgba(0,0,0,.55));
+  }
+  .stage-wrap::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background:
+      radial-gradient(circle at 14% 42%, rgba(192, 132, 252, 0.105), transparent 25%),
+      radial-gradient(circle at 39% 13%, rgba(245, 158, 11, 0.08), transparent 22%),
+      radial-gradient(circle at 60% 15%, rgba(250, 204, 21, 0.06), transparent 20%),
+      radial-gradient(circle at 54% 45%, rgba(45, 212, 191, 0.075), transparent 26%),
+      radial-gradient(circle at 56% 75%, rgba(56, 189, 248, 0.085), transparent 29%);
   }
   .stage {
-    position: relative; width: 100%; max-width: 1180px;
-    min-height: calc(100vh - 112px);
-    display: grid; grid-template-columns: 248px 1fr; gap: 34px; align-items: stretch;
+    position: relative; z-index: 1;
+    width: min(1230px, calc(100% - 54px));
+    min-height: calc(100vh - 96px);
+    padding: 30px 0 34px;
+    display: grid;
+    grid-template-columns: 252px minmax(0, 1fr);
+    column-gap: 72px;
+    align-items: stretch;
   }
-  /* SVG wire overlay */
   svg.wires {
-    position: absolute; inset: 0; width: 100%; height: 100%;
-    pointer-events: none; overflow: visible; z-index: 1;
+    position: absolute; inset: 0; z-index: 1;
+    width: 100%; height: 100%; overflow: visible; pointer-events: none;
   }
-  .wire-path { fill: none; stroke-width: 1.6; opacity: 0.55; }
-  .wire-path.dashed { stroke-dasharray: 4 5; opacity: 0.42; }
-  .wire-path.active { opacity: 0.92; stroke-width: 2; }
-  .wire-pulse { fill: none; stroke-width: 2.8; stroke-dasharray: 6 18; animation: dash 1.6s linear infinite; }
-  .wire-label-bg { fill: #0f1522; stroke: #2c3852; stroke-width: 1; }
-  .wire-label-txt { fill: #9fb0cc; font-size: 10.5px; font-weight: 600; text-anchor: middle; dominant-baseline: middle; }
-  .paused .wire-pulse { animation-play-state: paused; opacity: 0.25; }
-  @keyframes dash { to { stroke-dashoffset: -24; } }
+  .wire-path { fill: none; stroke-width: 1.9; stroke-linecap: round; opacity: .48; }
+  .wire-path.active { opacity: .93; stroke-width: 2.35; filter: drop-shadow(0 0 4px currentColor); }
+  .wire-path.dotted { stroke-dasharray: 4 6; opacity: .40; }
+  .wire-flow {
+    fill: none; stroke-width: 3.1; stroke-linecap: round;
+    stroke-dasharray: 1 18; opacity: .9;
+    animation: wireDash 1.45s linear infinite;
+    filter: drop-shadow(0 0 5px currentColor);
+  }
+  .wire-orb { filter: url(#orbGlow); opacity: .95; }
+  .wire-label-bg { fill: rgba(13, 18, 29, 0.94); stroke-width: 1; }
+  .wire-label-txt { fill: #a9bad4; font-size: 10px; font-weight: 700; text-anchor: middle; dominant-baseline: middle; letter-spacing: .1px; }
+  .paused .wire-flow { animation-play-state: paused; opacity: .20; }
+  .paused .wire-orb { opacity: .20; }
+  @keyframes wireDash { to { stroke-dashoffset: -19; } }
 
-  /* Cards */
+  /* Shared cards */
   .card {
     position: relative; z-index: 2;
-    background: var(--bg-card); border: 1px solid var(--border);
-    border-radius: 12px; padding: 13px 15px;
-    transition: border-color 0.2s, box-shadow 0.2s, opacity 0.2s;
+    border: 1px solid var(--border); border-radius: 14px;
+    background: linear-gradient(180deg, rgba(21, 29, 45, 0.94), rgba(15, 21, 33, 0.91));
+    box-shadow: 0 14px 34px rgba(0, 0, 0, 0.24);
+    padding: 14px 16px;
     cursor: pointer;
+    transition: border-color .18s, box-shadow .18s, opacity .18s, transform .18s;
   }
-  .card:hover { border-color: rgba(230, 237, 247, 0.45); }
-  .card.selected { box-shadow: 0 0 0 1.5px var(--text), 0 0 22px rgba(56, 189, 248, 0.22); }
-  .card.dimmed { opacity: 0.62; }
-  .card.amber { border-color: rgba(245, 158, 11, 0.65); box-shadow: 0 0 24px rgba(245, 158, 11, 0.10); }
-  .card.gold { border-color: rgba(250, 204, 21, 0.65); box-shadow: 0 0 24px rgba(250, 204, 21, 0.10); }
-  .card.teal { border-color: rgba(45, 212, 191, 0.65); box-shadow: 0 0 26px rgba(45, 212, 191, 0.11); }
-  .card.cyan { border-color: rgba(56, 189, 248, 0.65); box-shadow: 0 0 20px rgba(56, 189, 248, 0.11); }
-  .card.violet { border-color: rgba(192, 132, 252, 0.60); box-shadow: 0 0 22px rgba(192, 132, 252, 0.09); }
-  .card.dimmed.amber, .card.dimmed.gold, .card.dimmed.cyan, .card.dimmed.violet {
-    border-color: var(--border); box-shadow: none;
+  .card:hover { border-color: rgba(232, 238, 248, 0.42); transform: translateY(-1px); }
+  .card.selected { box-shadow: 0 0 0 1.5px rgba(232,238,248,.92), 0 0 28px rgba(56, 189, 248, 0.20), 0 14px 34px rgba(0,0,0,.24); }
+  .card.dimmed { opacity: .58; }
+  .card.amber { border-color: rgba(245, 158, 11, 0.68); box-shadow: 0 0 26px rgba(245, 158, 11, 0.105), 0 14px 34px rgba(0,0,0,.24); }
+  .card.gold { border-color: rgba(250, 204, 21, 0.64); box-shadow: 0 0 25px rgba(250, 204, 21, 0.095), 0 14px 34px rgba(0,0,0,.24); }
+  .card.teal { border-color: rgba(45, 212, 191, 0.68); box-shadow: 0 0 30px rgba(45, 212, 191, 0.11), 0 14px 34px rgba(0,0,0,.24); }
+  .card.cyan { border-color: rgba(56, 189, 248, 0.62); box-shadow: 0 0 22px rgba(56, 189, 248, 0.11), 0 12px 28px rgba(0,0,0,.20); }
+  .card.violet { border-color: rgba(192, 132, 252, 0.60); box-shadow: 0 0 25px rgba(192, 132, 252, 0.09), 0 14px 34px rgba(0,0,0,.24); }
+  .card.dimmed.amber, .card.dimmed.gold, .card.dimmed.cyan, .card.dimmed.violet, .card.dimmed.teal {
+    border-color: var(--border); box-shadow: 0 10px 24px rgba(0,0,0,.18);
   }
-
-  .card-hd { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
-  .card-title { font-size: 13px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .badge {
-    font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 6px;
-    background: rgba(255,255,255,0.06); color: var(--soft); flex-shrink: 0;
+  .card-hd { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 7px; }
+  .card-title { font-size: 13px; font-weight: 800; letter-spacing: .05px; min-width: 0; }
+  .role-pill, .count-pill, .pid-badge, .role-badge {
+    flex: 0 0 auto; border-radius: 999px; padding: 3px 7px;
+    font-size: 9.8px; font-weight: 800; letter-spacing: .12px;
+    border: 1px solid rgba(148, 163, 184, 0.22); color: var(--soft); background: rgba(255,255,255,.045);
   }
-  .meta { font-size: 11px; color: var(--soft); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .tele { font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .role-pill.amber { color: var(--amber); border-color: rgba(245, 158, 11, .38); }
+  .role-pill.gold { color: var(--gold); border-color: rgba(250, 204, 21, .34); }
+  .meta { color: var(--soft); font-size: 11.5px; line-height: 1.45; }
+  .tele {
+    margin-top: 7px; color: var(--soft);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 10.8px; line-height: 1.45; white-space: normal; overflow-wrap: anywhere;
+  }
+  .effort-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; color: var(--muted); font-size: 10.5px; }
+  .effort-meter { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; letter-spacing: 2px; color: var(--amber); text-shadow: 0 0 8px rgba(245, 158, 11, .32); }
+  .effort-meter.empty { color: rgba(148, 163, 184, .36); text-shadow: none; }
 
-  /* Left Advisor column */
-  .advisor-col { display: flex; flex-direction: column; justify-content: space-between; gap: 18px; padding: 18px 16px; }
-  .gate-item { padding: 11px 12px; border-radius: 9px; background: rgba(192,132,252,0.06); border: 1px solid rgba(192,132,252,0.20); font-size: 11.5px; color: var(--soft); line-height: 1.45; }
-  .gate-item b { color: var(--violet); display: block; margin-bottom: 4px; font-size: 12px; }
+  /* Left Advisor column: three balanced sections */
+  .advisor-col {
+    min-height: 0; padding: 16px;
+    display: flex; flex-direction: column; justify-content: space-between; gap: 16px;
+  }
+  .advisor-section { position: relative; }
+  .advisor-section + .advisor-section { padding-top: 14px; border-top: 1px solid rgba(192, 132, 252, 0.16); }
+  .advisor-kicker { color: var(--violet); font-size: 10px; font-weight: 850; letter-spacing: 1.1px; text-transform: uppercase; margin-bottom: 6px; }
+  .probe-box {
+    margin-top: 11px; padding: 10px;
+    border: 1px solid rgba(192, 132, 252, 0.22); border-radius: 11px;
+    background: rgba(192, 132, 252, 0.055);
+  }
+  .probe-title { color: var(--violet); font-size: 10.5px; font-weight: 800; margin-bottom: 7px; }
+  .probe-list { display: flex; flex-direction: column; gap: 6px; }
+  .probe-item {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    color: var(--soft); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.3px;
+  }
+  .probe-state { width: 7px; height: 7px; border-radius: 50%; background: #3b465c; flex: 0 0 auto; }
+  .probe-item.active { color: #dcc8ff; }
+  .probe-item.active .probe-state { background: var(--violet); box-shadow: 0 0 8px var(--violet); }
+  .gate-copy {
+    color: var(--soft); font-size: 11px; line-height: 1.5;
+    border: 1px solid rgba(192, 132, 252, 0.16); border-radius: 10px;
+    background: rgba(192, 132, 252, 0.035); padding: 10px;
+  }
+  .gate-copy b { color: var(--violet); display: block; margin-bottom: 4px; font-size: 12px; }
+  .ready-pill { display: inline-flex; margin-top: 8px; border-radius: 999px; border: 1px solid rgba(192,132,252,.32); color: var(--violet); padding: 3px 8px; font-size: 10px; font-weight: 800; }
 
-  /* Right pipeline flow column */
-  .flow-col { display: flex; flex-direction: column; justify-content: space-between; gap: 38px; padding-right: 26px; }
-  .top-row { display: grid; grid-template-columns: 1.15fr 1fr; gap: 28px; }
-  .top-row .card { padding: 16px 18px; min-height: 104px; display: flex; flex-direction: column; justify-content: center; }
+  /* Pipeline stages */
+  .flow-col {
+    position: relative; z-index: 2; min-height: 0;
+    display: flex; flex-direction: column; justify-content: space-between; gap: 38px;
+    padding-right: 46px;
+  }
+  .top-row { display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(0, .88fr); gap: 92px; }
+  .role-card { min-height: 118px; padding: 16px 17px; display: flex; flex-direction: column; justify-content: center; }
+  .activity-line { min-height: 32px; color: var(--soft); font-size: 11.6px; line-height: 1.42; overflow-wrap: anywhere; }
+  .hd-pills { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; }
 
-  /* Decision gate bars */
-  #node-decision { padding: 16px 20px 18px; }
-  .route-row { display: grid; grid-template-columns: 124px 1fr 128px; align-items: center; gap: 12px; margin-top: 11px; font-size: 12px; }
-  .bar-track { position: relative; height: 9px; border-radius: 999px; background: rgba(45, 212, 191, 0.14); overflow: hidden; }
-  .bar-track.split { background: rgba(245, 158, 11, 0.16); }
-  .bar-fill { height: 100%; border-radius: 999px; transition: width 0.35s ease; }
-  .bar-thresh { position: absolute; top: 0; bottom: 0; left: 70%; width: 2px; background: rgba(230, 237, 247, 0.78); }
-  .route-stat { text-align: right; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+  #node-decision { padding: 16px 19px 17px; }
+  .decision-sub { color: var(--muted); font-size: 10.5px; margin-top: -2px; }
+  .route-row {
+    display: grid; grid-template-columns: 128px minmax(150px, 1fr) 132px;
+    align-items: center; gap: 13px; margin-top: 12px; font-size: 12px;
+  }
+  .bar-track {
+    position: relative; height: 12px; overflow: hidden; border-radius: 999px;
+    background: rgba(45, 212, 191, 0.12);
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,.035);
+  }
+  .bar-track.split { background: rgba(245, 158, 11, 0.14); }
+  .bar-fill {
+    height: 100%; border-radius: 999px; transition: width .35s ease;
+    box-shadow: 0 0 13px currentColor;
+  }
+  .bar-thresh {
+    position: absolute; top: -2px; bottom: -2px; left: 70%; width: 2px;
+    background: rgba(238, 244, 252, 0.90); box-shadow: 0 0 7px rgba(238,244,252,.55);
+  }
+  .route-stat { text-align: right; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.7px; white-space: nowrap; }
 
-  /* Workers grid */
+  /* Worker fan-out container */
   .workers-box {
     position: relative; z-index: 2;
-    border: 1px dashed rgba(56, 189, 248, 0.32); border-radius: 14px;
-    padding: 18px 16px 16px; background: rgba(18, 23, 34, 0.45);
-    min-height: 156px; display: flex; flex-direction: column; justify-content: center;
+    min-height: 168px; padding: 30px 15px 15px;
+    border: 1px dashed rgba(56, 189, 248, 0.40); border-radius: 15px;
+    background: rgba(12, 18, 29, 0.54);
+    box-shadow: inset 0 0 30px rgba(56, 189, 248, 0.025);
   }
   .workers-box-label {
-    font-size: 11.5px; font-weight: 600; color: var(--cyan);
-    margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between;
+    position: absolute; z-index: 4; top: -11px; left: 14px;
+    border: 1px solid rgba(56, 189, 248, 0.38); border-radius: 999px;
+    background: #0d1421; color: var(--cyan);
+    padding: 4px 10px; font-size: 10.6px; font-weight: 800; letter-spacing: .08px;
+    box-shadow: 0 0 16px rgba(56, 189, 248, 0.10);
+    pointer-events: none;
   }
-  .workers-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(205px, 1fr)); gap: 14px; }
-  .owner-tag { font-size: 10.5px; color: var(--amber); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .workers-count {
+    position: absolute; z-index: 4; top: -10px; right: 14px;
+    border-radius: 999px; border: 1px solid rgba(148, 163, 184, 0.18);
+    background: #0d1421; color: var(--soft); padding: 4px 9px; font-size: 10px; font-weight: 700;
+  }
+  .workers-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 14px;
+  }
+  .worker-card { min-height: 134px; padding: 12px 13px; cursor: pointer; }
+  .worker-card .card-hd { align-items: flex-start; margin-bottom: 5px; }
+  .worker-title-wrap { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .worker-name { font-size: 12px; font-weight: 800; line-height: 1.25; overflow-wrap: anywhere; }
+  .role-badge { align-self: flex-start; padding: 2px 6px; font-size: 9.4px; }
+  .slot-coder { color: var(--cyan); border-color: rgba(56, 189, 248, .38); }
+  .slot-sublead { color: var(--violet); border-color: rgba(192, 132, 252, .38); }
+  .slot-explore { color: var(--teal); border-color: rgba(45, 212, 191, .34); }
+  .slot-verifier { color: var(--gold); border-color: rgba(250, 204, 21, .34); }
+  .slot-advisor { color: var(--violet); border-color: rgba(192, 132, 252, .38); }
+  .pid-badge { color: #cfe7ff; border-color: rgba(56, 189, 248, .25); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .owner-tag { margin-top: 2px; color: var(--amber); font-size: 10.2px; font-weight: 700; overflow-wrap: anywhere; }
+  .worker-activity { margin-top: 6px; color: var(--soft); font-size: 10.8px; line-height: 1.36; min-height: 29px; overflow-wrap: anywhere; }
+  .worker-telemetry { margin-top: 6px; font-size: 10px; white-space: normal; overflow-wrap: anywhere; }
+  .empty-state {
+    grid-column: 1 / -1; padding: 28px 10px;
+    color: var(--muted); font-size: 12px; text-align: center;
+  }
 
-  /* Return card */
-  .back-card { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 16px 20px; }
-  .outcomes { display: flex; gap: 10px; font-size: 11.5px; font-family: ui-monospace, monospace; }
-  .c-pass { color: var(--teal); font-weight: 700; }
-  .c-rework { color: var(--amber); }
-  .c-fail { color: var(--rose); }
-  .c-human { color: var(--violet); font-weight: 700; }
+  .return-row { display: flex; justify-content: center; }
+  .return-card {
+    width: min(570px, 82%); padding: 15px 20px 14px;
+    text-align: center; cursor: pointer;
+  }
+  .outcomes { display: flex; justify-content: center; flex-wrap: wrap; gap: 9px; margin-top: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+  .c-pass { color: var(--teal); font-weight: 850; }
+  .c-rework { color: var(--amber); font-weight: 750; }
+  .c-fail { color: var(--rose); font-weight: 750; }
+  .c-human { color: var(--violet); font-weight: 850; }
+  .return-subline { margin-top: 7px; color: var(--muted); font-size: 10.4px; letter-spacing: .18px; }
 
-  /* Right Inspector sidebar */
+  /* Right inspector sidebar */
   .inspector {
-    border-left: 1px solid var(--border); background: rgba(14, 18, 28, 0.94);
-    display: flex; flex-direction: column; min-height: 0;
+    min-height: 0; display: flex; flex-direction: column;
+    border-left: 1px solid var(--border); background: rgba(11, 15, 24, 0.95);
+    box-shadow: -18px 0 42px rgba(0,0,0,.20);
   }
-  .insp-tabs { display: flex; border-bottom: 1px solid var(--border); padding: 10px 14px; gap: 8px; }
-  .insp-body { padding: 14px; overflow-y: auto; flex: 1; font-size: 12px; }
-  .kv { display: grid; grid-template-columns: 78px 1fr; gap: 6px 8px; margin-top: 10px; font-size: 11.5px; }
-  .kv .k { color: var(--muted); }
-  .kv .v { color: var(--text); word-break: break-all; font-family: ui-monospace, monospace; font-size: 11px; }
+  .insp-tabs {
+    display: flex; align-items: center; gap: 7px;
+    padding: 12px 13px; border-bottom: 1px solid var(--border);
+  }
+  .insp-tab {
+    border: 1px solid var(--border); border-radius: 999px;
+    background: rgba(17, 23, 36, .68); color: var(--soft);
+    padding: 5px 10px; font-size: 10.8px; font-weight: 800; cursor: pointer;
+  }
+  .insp-tab.active { color: var(--cyan); border-color: rgba(56, 189, 248, .54); background: rgba(56, 189, 248, .10); }
+  .pulse-pill {
+    margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+    border: 1px solid rgba(45, 212, 191, .28); border-radius: 999px;
+    color: var(--teal); padding: 4px 8px; font-size: 9.8px; font-weight: 850; white-space: nowrap;
+  }
+  .pulse-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--teal); box-shadow: 0 0 8px var(--teal); animation: pulse 1.5s ease-in-out infinite; }
+  .pulse-pill.idle { color: var(--muted); border-color: rgba(148, 163, 184, .18); }
+  .pulse-pill.idle .pulse-dot { background: var(--muted); box-shadow: none; animation: none; }
+  @keyframes pulse { 50% { opacity: .35; transform: scale(.78); } }
+  .insp-body { min-height: 0; flex: 1; overflow-y: auto; padding: 14px; }
+  .section-title { color: var(--muted); font-size: 10px; font-weight: 850; letter-spacing: 1.05px; text-transform: uppercase; margin-bottom: 8px; }
+  .chip-grid { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 14px; }
+  .node-chip {
+    border: 1px solid rgba(148, 163, 184, .20); border-radius: 999px;
+    background: rgba(17, 23, 36, .72); color: var(--soft);
+    font-size: 10.4px; font-weight: 750; padding: 5px 9px;
+    max-width: 158px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    cursor: pointer; transition: border-color .15s, color .15s, background .15s;
+  }
+  .node-chip:hover { color: var(--text); border-color: rgba(232, 238, 248, .36); }
+  .node-chip.active { color: var(--cyan); border-color: rgba(56, 189, 248, .58); background: rgba(56, 189, 248, .11); }
+  .detail-card {
+    border: 1px solid var(--border); border-radius: 13px;
+    background: linear-gradient(180deg, rgba(21,29,45,.88), rgba(14,19,30,.88));
+    padding: 14px;
+  }
+  .detail-title { font-size: 14px; font-weight: 850; line-height: 1.3; }
+  .detail-desc { margin-top: 7px; color: var(--soft); font-size: 11.3px; line-height: 1.52; }
+  .kv { display: grid; grid-template-columns: 78px minmax(0, 1fr); gap: 7px 9px; margin-top: 12px; font-size: 11px; }
+  .kv .k { color: var(--muted); font-weight: 700; }
+  .kv .v { color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; line-height: 1.42; overflow-wrap: anywhere; }
+  .signal-list { margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(148,163,184,.15); }
+  .sig-row { margin-top: 11px; }
+  .sig-head { display: flex; justify-content: space-between; gap: 8px; color: var(--soft); font-size: 10.8px; margin-bottom: 5px; }
+  .sig-head b { color: var(--text); }
+  .sig-stat { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
   .log-line {
-    padding: 7px 9px; border-radius: 7px; background: var(--bg-card);
+    padding: 8px 9px; border-radius: 8px; background: rgba(17,23,36,.82);
     border: 1px solid var(--border); margin-bottom: 7px;
-    font-family: ui-monospace, monospace; font-size: 10.5px; color: var(--soft);
-    word-break: break-word;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.3px; color: var(--soft);
+    line-height: 1.42; overflow-wrap: anywhere;
   }
-  .empty-state { text-align: center; color: var(--muted); font-size: 12px; padding: 20px 8px; }
+  .empty-detail { color: var(--muted); text-align: center; padding: 22px 8px; font-size: 11.5px; line-height: 1.5; }
+
+  @media (max-width: 1220px) {
+    .main { grid-template-columns: minmax(0, 1fr) 326px; }
+    .stage { width: min(1120px, calc(100% - 34px)); column-gap: 50px; grid-template-columns: 232px minmax(0, 1fr); }
+    .top-row { gap: 28px; }
+    .workers-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  }
+  @media (max-width: 940px) {
+    .main { grid-template-columns: 1fr; }
+    .inspector { display: none; }
+    .stage { grid-template-columns: 1fr; row-gap: 26px; }
+    .advisor-col { min-height: 420px; }
+    .workers-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media (max-width: 640px) {
+    .workers-grid { grid-template-columns: 1fr; }
+    .brand-sub { display: none; }
+  }
 </style>
 </head>
 <body>
 <div class="app" id="app">
-  <header class="topbar">
-    <div class="brand"><span class="dot" id="sseDot"></span> dgate <span style="color:var(--muted);font-weight:500;">Live OS Process Topology</span></div>
-    <span class="pill live" id="sseStatus">SSE 연결 중...</span>
-    <span class="pill" id="scopePill">scope: all</span>
-    <span class="pill" id="countsPill">LEAD 0 · WORKERS 0 · VERIFY 0</span>
-    <div class="spacer"></div>
-    <div id="repoFilters" style="display:flex;gap:6px;flex-wrap:nowrap;overflow:hidden;"></div>
-    <button class="btn" id="pauseBtn">⏸ 흐름 일시정지</button>
+  <header class="topchrome">
+    <div class="topline">
+      <div class="brand"><span class="dot" id="sseDot"></span><span class="brand-name">dgate</span><span class="brand-sub">Obsidian Signal</span></div>
+      <nav class="scope-tabs" id="repoFilters" aria-label="scope tabs"><button class="scope-tab active" type="button">전체</button></nav>
+      <div class="top-actions"><button class="btn" id="pauseBtn" type="button">⏸ 흐름 일시정지</button></div>
+    </div>
+    <div class="subline">
+      <div class="status-strip" id="statusStrip">
+        <span class="status-bit">WATCH</span><span class="status-bit live">LIVE</span><span class="status-bit">forks 0</span><span class="status-bit">PASS/rework/fail 0/0/0</span>
+      </div>
+      <div class="provider-pills" id="providerPills"><span class="provider-pill empty">provider 없음</span></div>
+    </div>
   </header>
 
   <div class="main">
     <div class="stage-wrap" id="stageWrap">
       <div class="stage" id="stage">
-        <svg class="wires" id="wiresSvg"></svg>
+        <svg class="wires" id="wiresSvg" aria-hidden="true"></svg>
 
-        <!-- Left Column: Advisor / Guardrails -->
         <aside class="card violet advisor-col" id="node-advisor" data-node="advisor">
-          <div>
+          <section class="advisor-section advisor-status">
+            <div class="advisor-kicker">Advisor</div>
             <div class="card-hd">
-              <div class="card-title" style="color:var(--violet);">Advisor · 자문 3관문</div>
-              <span class="badge" id="advisorBadge">대기</span>
+              <div class="card-title" style="color:var(--violet);">Advisor · 결정론 가드 &amp; 자문</div>
+              <span class="role-pill" id="advisorBadge">대기</span>
             </div>
             <div class="meta" id="advisorMeta">온디맨드 대기 · 일상 턴 침묵</div>
             <div class="tele" style="color:var(--violet);" id="advisorTele">roster 대기</div>
-          </div>
-          <div style="display:flex;flex-direction:column;gap:8px;">
-            <div class="gate-item"><b>◇ G1 계획 확정 전</b>코더 투입 전 브리프·범위 점검</div>
-            <div class="gate-item"><b>◇ G2 같은 오류 2회</b>연속 실패 시 강제 split 에스컬레이션</div>
-            <div class="gate-item"><b>◇ G3 최종 머지 전</b>독립 판정 통과 후 READY_PR 승격</div>
-          </div>
-          <div class="meta" style="font-size:10.5px;color:var(--muted);">실시간 ps + hc + herdr 프로세스 관측</div>
+            <div class="probe-box">
+              <div class="probe-title">활성 게이트 · 프로브</div>
+              <div class="probe-list" id="gateProbeList">
+                <div class="probe-item"><span>dg hook --guard</span><span class="probe-state"></span></div>
+                <div class="probe-item"><span>dg wrap watchdog</span><span class="probe-state"></span></div>
+                <div class="probe-item"><span>dg checkpoint</span><span class="probe-state"></span></div>
+                <div class="probe-item"><span>dg backprop</span><span class="probe-state"></span></div>
+                <div class="probe-item"><span>herdr agent</span><span class="probe-state"></span></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="advisor-section advisor-mid">
+            <div class="gate-copy"><b>◇ G2 연속 오류 2회 / 스톨 감시</b>같은 실패가 반복되면 sharp 진행을 멈추고 split 에스컬레이션으로 되돌립니다.</div>
+          </section>
+
+          <section class="advisor-section advisor-bottom">
+            <div class="gate-copy"><b>◇ G3 완료 관문 · READY_PR</b>독립 검증과 회귀 확인이 끝난 뒤에만 머지 준비 상태로 승격합니다.</div>
+            <span class="ready-pill">READY_PR gate</span>
+          </section>
         </aside>
 
-        <!-- Right Column: Pipeline Flow -->
         <section class="flow-col">
           <div class="top-row">
-            <div class="card amber" id="node-lead" data-node="lead">
+            <div class="card amber role-card" id="node-lead" data-node="lead">
               <div class="card-hd">
                 <div class="card-title" style="color:var(--amber);" id="leadTitle">Lead · 리드</div>
-                <span class="badge" id="leadBadge">대기</span>
+                <div class="hd-pills"><span class="role-pill amber">단일 리드</span><span class="count-pill" id="leadStatus">대기</span></div>
               </div>
-              <div class="meta" id="leadActivity">활성 리드 세션 대기 중</div>
-              <div class="tele" style="color:var(--amber);" id="leadTele">—</div>
+              <div class="activity-line" id="leadActivity">활성 리드 세션 대기 중</div>
+              <div class="effort-row"><span>effort</span><span class="effort-meter empty" id="leadEffort">□□□□</span></div>
+              <div class="tele" style="color:var(--amber);" id="leadTele">cli · model · effort</div>
             </div>
 
-            <div class="card gold" id="node-verifier" data-node="verifier">
+            <div class="card gold role-card" id="node-verifier" data-node="verifier">
               <div class="card-hd">
                 <div class="card-title" style="color:var(--gold);" id="verifierTitle">Verifier · 교차 검증</div>
-                <span class="badge" id="verifierBadge">대기</span>
+                <div class="hd-pills"><span class="role-pill gold">읽기 전용</span><span class="count-pill" id="verifierCount">0 active</span></div>
               </div>
-              <div class="meta" id="verifierActivity">호출 시 이종 모델 읽기전용 검증</div>
-              <div class="tele" style="color:var(--gold);" id="verifierTele">—</div>
+              <div class="activity-line" id="verifierActivity">호출 시 이종 모델 읽기전용 검증</div>
+              <div class="tele" style="color:var(--gold);" id="verifierTele">cli · model · effort</div>
             </div>
           </div>
 
-          <!-- Center: Decision Gate -->
           <div class="card teal" id="node-decision" data-node="decision">
             <div class="card-hd">
-              <div class="card-title" style="color:var(--teal);">Decision Gate · 분기 계층</div>
-              <span class="badge" id="forksBadge">forks 0 · θ_sharp 0.70</span>
+              <div>
+                <div class="card-title" style="color:var(--teal);">Decision Gate · 분기 계층</div>
+                <div class="decision-sub">sharp / split 사후확률 라우팅</div>
+              </div>
+              <span class="role-pill" style="color:var(--teal);border-color:rgba(45,212,191,.36);" id="forksBadge">forks 0 · θ_sharp 0.70</span>
             </div>
             <div id="routesContainer"></div>
           </div>
 
-          <!-- Workers Fan-Out -->
           <div class="workers-box" id="workersBox">
-            <div class="workers-box-label">
-              <span>하위 에이전트 · 실시간 OS 프로세스 매핑 (ps / hc / herdr)</span>
-              <span id="workersCountLabel" style="color:var(--soft);">0 active</span>
-            </div>
+            <div class="workers-box-label">하위 에이전트 · OS 프로세스 (ps / hc / herdr)</div>
+            <div class="workers-count" id="workersCountLabel">0 active</div>
             <div class="workers-grid" id="workersGrid">
               <div class="empty-state">실행 중인 하위 워커가 없습니다</div>
             </div>
           </div>
 
-          <!-- Bottom: Return to Lead -->
-          <div class="card amber back-card" id="node-back" data-node="back">
-            <div>
+          <div class="return-row">
+            <div class="card amber return-card" id="node-back" data-node="back">
               <div class="card-title" style="color:var(--amber);">다시 Lead · 리드</div>
-              <div class="meta">검토 + 확인 · review + verify</div>
-            </div>
-            <div class="outcomes" id="outcomesBar">
-              <span class="c-pass">PASS 0</span>
-              <span class="c-rework">rework 0</span>
-              <span class="c-fail">fail 0</span>
+              <div class="outcomes" id="outcomesBar">
+                <span class="c-pass">PASS 0</span><span class="c-rework">rework 0</span><span class="c-fail">fail 0</span><span class="c-human">human 0</span>
+              </div>
+              <div class="return-subline">Decision → Worker → Verify → Merge</div>
             </div>
           </div>
         </section>
       </div>
     </div>
 
-    <!-- Right Inspector Sidebar -->
     <aside class="inspector">
-      <div class="insp-tabs">
-        <span class="pill clickable active" id="tabDetail">노드 상세</span>
-        <span class="pill clickable" id="tabLogs">감사 로그 (<span id="logCount">0</span>)</span>
+      <div class="insp-tabs" role="tablist">
+        <button class="insp-tab active" id="tabDetail" type="button">라우팅 상세</button>
+        <button class="insp-tab" id="tabLogs" type="button">감사 로그 (<span id="logCount">0</span>)</button>
+        <span class="pulse-pill idle" id="pulsePill"><span class="pulse-dot"></span>판단 펄스</span>
       </div>
-      <div class="insp-body" id="inspBody">
-        <div class="empty-state">좌측 흐름도에서 노드를 클릭하면<br/>실시간 PID · 모델 · 활동 상세를 표시합니다.</div>
+      <div class="insp-body">
+        <section>
+          <div class="section-title">구성 요소 탐색</div>
+          <div class="chip-grid" id="nodeChips"></div>
+        </section>
+        <section id="inspContent">
+          <div class="empty-detail">좌측 흐름도 또는 위 칩에서 노드를 선택하면<br/>실시간 PID · 모델 · 활동 상세를 표시합니다.</div>
+        </section>
       </div>
     </aside>
   </div>
@@ -286,239 +518,414 @@
   let activeTab = 'detail';
   let repoFilter = 'all';
   let paused = false;
+  let sseLive = false;
 
   const $ = (id) => document.getElementById(id);
+  const C = { amber: '#f59e0b', gold: '#facc15', teal: '#2dd4bf', cyan: '#38bdf8', violet: '#c084fc', rose: '#fb7185' };
 
-  $('pauseBtn').addEventListener('click', () => {
-    paused = !paused;
-    $('app').classList.toggle('paused', paused);
-    $('pauseBtn').classList.toggle('paused', paused);
-    $('pauseBtn').textContent = paused ? '▶ 흐름 재개' : '⏸ 흐름 일시정지';
-  });
-
-  $('tabDetail').addEventListener('click', () => { activeTab = 'detail'; syncTabs(); renderInspector(); });
-  $('tabLogs').addEventListener('click', () => { activeTab = 'logs'; syncTabs(); renderInspector(); });
-
-  function syncTabs() {
-    $('tabDetail').classList.toggle('active', activeTab === 'detail');
-    $('tabLogs').classList.toggle('active', activeTab === 'logs');
-  }
-
-  document.querySelectorAll('[data-node]').forEach(el => {
-    el.addEventListener('click', () => {
-      selectedId = el.getAttribute('data-node');
-      activeTab = 'detail';
-      syncTabs();
-      render();
-    });
-  });
+  const fallbackGates = [
+    { label: 'dg hook --guard', gate: 'G1', active: false, detail: '코더 투입 전 브리프·범위·완료 기준 점검' },
+    { label: 'dg wrap watchdog', gate: 'G2', active: false, detail: '하위 워커 스톨·무응답 감시' },
+    { label: 'dg checkpoint', gate: 'G1', active: false, detail: '결정 분기 전 작업 상태 체크포인트' },
+    { label: 'dg backprop', gate: 'G2', active: false, detail: '연속 오류 신호를 상위 계획으로 역전파' },
+    { label: 'herdr agent', gate: 'G3', active: false, detail: '완료 관문 독립 판정·READY_PR 승격' }
+  ];
 
   function esc(s) {
     return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
-
+  function circledNumber(n) {
+    const marks = ['①','②','③','④','⑤','⑥','⑦','⑧','⑨','⑩','⑪','⑫','⑬','⑭','⑮','⑯','⑰','⑱','⑲','⑳'];
+    return marks[n - 1] || String(n);
+  }
+  function telemetryOf(w) {
+    if (!w) return 'cli · model · effort';
+    return w.telemetry || [w.cli, w.model, w.effort].filter(Boolean).join(' · ') || 'cli · model · effort';
+  }
+  function effortScore(effort) {
+    const e = String(effort || '').toLowerCase();
+    if (e === 'max' || e === 'xhigh') return 4;
+    if (e === 'high') return 3;
+    if (e === 'medium') return 2;
+    if (e === 'low' || e === 'minimal') return 1;
+    return 0;
+  }
+  function effortBlocks(effort) {
+    const score = effortScore(effort);
+    return [0, 1, 2, 3].map(i => i < score ? '■' : '□').join('');
+  }
   function filteredWorkers(snap) {
     if (!snap) return [];
     const list = snap.workers || [];
     if (repoFilter === 'all') return list;
     return list.filter(w => w.repo_tag === repoFilter);
   }
+  function allLiveNodes(snap) {
+    if (!snap) return [];
+    return [snap.lead, ...(snap.verifiers || []), ...(snap.advisors || []), ...(snap.workers || [])].filter(Boolean);
+  }
+  function outcomeCounts(snap) {
+    return snap?.outcomes || { pass: 0, rework: 0, fail: 0, waiting_human: 0 };
+  }
+
+  $('pauseBtn').addEventListener('click', () => {
+    paused = !paused;
+    $('app').classList.toggle('paused', paused);
+    $('pauseBtn').classList.toggle('paused', paused);
+    $('pauseBtn').textContent = paused ? '▶ 흐름 재개' : '⏸ 흐름 일시정지';
+    const svg = $('wiresSvg');
+    if (svg && svg.pauseAnimations && svg.unpauseAnimations) {
+      if (paused) svg.pauseAnimations(); else svg.unpauseAnimations();
+    }
+  });
+  $('tabDetail').addEventListener('click', () => { activeTab = 'detail'; syncTabs(); renderInspector(); });
+  $('tabLogs').addEventListener('click', () => { activeTab = 'logs'; syncTabs(); renderInspector(); });
+  function syncTabs() {
+    $('tabDetail').classList.toggle('active', activeTab === 'detail');
+    $('tabLogs').classList.toggle('active', activeTab === 'logs');
+  }
+  document.querySelectorAll('[data-node]').forEach(el => {
+    el.addEventListener('click', () => selectNode(el.getAttribute('data-node')));
+  });
+  function selectNode(id) {
+    selectedId = id;
+    activeTab = 'detail';
+    syncTabs();
+    render();
+  }
 
   function render() {
     if (!latest) return;
     const snap = latest;
     const workers = filteredWorkers(snap);
-    const hasMotion = workers.some(w => w.active) || (snap.verifiers && snap.verifiers.length > 0);
+    const oc = outcomeCounts(snap);
+    const activeWorkers = workers.filter(w => w.active).length;
+    const verifierCount = (snap.verifiers || []).filter(v => v.active).length;
+    const hasMotion = activeWorkers > 0 || verifierCount > 0;
 
-    $('scopePill').textContent = `scope: ${repoFilter === 'all' ? snap.scope : repoFilter}`;
-    $('countsPill').textContent = `LEAD ${snap.lead ? 1 : 0} · WORKERS ${workers.length} · VERIFY ${(snap.verifiers||[]).length} · ADVISOR ${(snap.advisors||[]).length}`;
+    renderScopeTabs(snap);
+    renderStatusStrip(snap, oc);
+    renderProviderPills(snap);
     $('logCount').textContent = (snap.recent_events || []).length;
+    $('pulsePill').classList.toggle('idle', !snap.db_live && (snap.recent_events || []).length === 0);
 
-    // Repo filter pills
-    const repos = ['all', ...Array.from(new Set((snap.workers || []).map(w => w.repo_tag).filter(Boolean)))];
-    $('repoFilters').innerHTML = repos.slice(0, 5).map(r =>
-      `<span class="pill clickable ${repoFilter === r ? 'active' : ''}" data-repo="${esc(r)}">${esc(r)}</span>`
+    renderAdvisor(snap);
+    renderLead(snap);
+    renderVerifier(snap);
+    renderDecision(snap);
+    renderWorkers(workers);
+    renderReturn(snap, oc, hasMotion);
+    renderNavigator(workers);
+    renderInspector();
+    requestAnimationFrame(() => drawWires());
+  }
+
+  function renderScopeTabs(snap) {
+    const detected = Array.isArray(snap.repos) && snap.repos.length
+      ? snap.repos
+      : Array.from(new Set(allLiveNodes(snap).map(w => w.repo_tag).filter(r => r && r !== 'unknown')));
+    const repos = detected.slice(0, 4);
+    if (repoFilter !== 'all' && !repos.includes(repoFilter)) repoFilter = 'all';
+    const tabs = ['all', ...repos];
+    $('repoFilters').innerHTML = tabs.map(r =>
+      `<button class="scope-tab ${repoFilter === r ? 'active' : ''}" type="button" data-repo="${esc(r)}">${r === 'all' ? '전체' : esc(r)}</button>`
     ).join('');
     $('repoFilters').querySelectorAll('[data-repo]').forEach(el => {
       el.addEventListener('click', () => { repoFilter = el.getAttribute('data-repo'); render(); });
     });
+  }
 
-    // Lead
-    const leadEl = $('node-lead');
-    leadEl.classList.toggle('dimmed', !snap.lead);
-    leadEl.classList.toggle('selected', selectedId === 'lead');
-    $('leadTitle').textContent = snap.lead ? `Lead · ${snap.lead.name}` : 'Lead · 리드';
-    $('leadBadge').textContent = snap.lead ? (snap.lead.status || 'live') : '대기';
-    $('leadActivity').textContent = snap.lead ? snap.lead.activity : '활성 리드 세션 없음';
-    $('leadTele').textContent = snap.lead ? snap.lead.telemetry : 'roster 대기';
+  function renderStatusStrip(snap, oc) {
+    $('statusStrip').innerHTML = `
+      <span class="status-bit">WATCH</span>
+      <span class="status-bit ${sseLive ? 'live' : 'fail'}">${sseLive ? 'LIVE' : 'RECONNECT'}</span>
+      <span class="status-bit">forks ${snap.total_forks || 0}</span>
+      <span class="status-bit ${oc.fail > 0 ? 'fail' : (oc.rework > 0 ? 'warn' : '')}">PASS/rework/fail ${oc.pass || 0}/${oc.rework || 0}/${oc.fail || 0}</span>
+      ${(oc.waiting_human || 0) > 0 ? `<span class="status-bit warn">human ${oc.waiting_human}</span>` : ''}
+    `;
+  }
 
-    // Verifier
-    const v = (snap.verifiers || [])[0] || null;
-    const verEl = $('node-verifier');
-    verEl.classList.toggle('dimmed', !v);
-    verEl.classList.toggle('selected', selectedId === 'verifier');
-    $('verifierTitle').textContent = v ? `Verifier · ${v.name}` : 'Verifier · 교차 검증';
-    $('verifierBadge').textContent = (snap.verifiers || []).length > 1 ? `${snap.verifiers.length}개 검증 중` : (v ? '검증 중' : '대기');
-    $('verifierActivity').textContent = v ? v.activity : '호출 시 이종 모델 읽기전용 검증';
-    $('verifierTele').textContent = v ? v.telemetry : '대기 중';
+  function renderProviderPills(snap) {
+    let entries = [];
+    if (snap.providers && typeof snap.providers === 'object') {
+      entries = Object.entries(snap.providers);
+    } else {
+      const counts = {};
+      allLiveNodes(snap).forEach(w => { if (w.cli) counts[w.cli] = (counts[w.cli] || 0) + 1; });
+      entries = Object.entries(counts);
+    }
+    entries.sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]));
+    $('providerPills').innerHTML = entries.length
+      ? entries.map(([cli, count]) => `<span class="provider-pill">${circledNumber(count)} ${esc(cli)}</span>`).join('')
+      : '<span class="provider-pill empty">provider 없음</span>';
+  }
 
-    // Advisor
+  function renderAdvisor(snap) {
     const adv = (snap.advisors || [])[0] || null;
-    const advEl = $('node-advisor');
-    advEl.classList.toggle('dimmed', !adv);
-    advEl.classList.toggle('selected', selectedId === 'advisor');
-    $('advisorBadge').textContent = adv ? '자문 중' : '대기';
+    const el = $('node-advisor');
+    el.classList.toggle('dimmed', !adv);
+    el.classList.toggle('selected', selectedId === 'advisor');
+    $('advisorBadge').textContent = adv ? (adv.status || '자문 중') : '대기';
     $('advisorMeta').textContent = adv ? adv.activity : '온디맨드 대기 · 일상 턴 침묵';
-    $('advisorTele').textContent = adv ? adv.telemetry : 'roster 대기';
+    $('advisorTele').textContent = adv ? telemetryOf(adv) : 'roster 대기';
+    const gates = Array.isArray(snap.active_gates) && snap.active_gates.length ? snap.active_gates : fallbackGates;
+    $('gateProbeList').innerHTML = gates.map(g => `
+      <div class="probe-item ${g.active ? 'active' : ''}" title="${esc(g.gate || '')} · ${esc(g.detail || '')}">
+        <span>${esc(g.label)}</span><span class="probe-state"></span>
+      </div>`).join('');
+  }
 
-    // Decision Gate
+  function renderLead(snap) {
+    const lead = snap.lead || null;
+    const el = $('node-lead');
+    el.classList.toggle('dimmed', !lead);
+    el.classList.toggle('selected', selectedId === 'lead');
+    $('leadTitle').textContent = lead ? `Lead · ${lead.name}` : 'Lead · 리드';
+    $('leadStatus').textContent = lead ? (lead.status || 'live') : '대기';
+    $('leadActivity').textContent = lead ? lead.activity : '활성 리드 세션 대기 중';
+    const blocks = effortBlocks(lead?.effort);
+    $('leadEffort').textContent = blocks;
+    $('leadEffort').classList.toggle('empty', effortScore(lead?.effort) === 0);
+    $('leadTele').textContent = telemetryOf(lead);
+  }
+
+  function renderVerifier(snap) {
+    const list = snap.verifiers || [];
+    const v = list[0] || null;
+    const active = list.filter(x => x.active).length;
+    const el = $('node-verifier');
+    el.classList.toggle('dimmed', !v);
+    el.classList.toggle('selected', selectedId === 'verifier');
+    $('verifierTitle').textContent = v ? `Verifier · ${v.name}` : 'Verifier · 교차 검증';
+    $('verifierCount').textContent = active > 0 ? `${active} active` : (v ? (v.status || '대기') : '0 active');
+    $('verifierActivity').textContent = v ? v.activity : '호출 시 이종 모델 읽기전용 검증';
+    $('verifierTele').textContent = v ? telemetryOf(v) : 'cli · model · effort';
+  }
+
+  function renderDecision(snap) {
     $('node-decision').classList.toggle('selected', selectedId === 'decision');
-    $('forksBadge').textContent = `forks ${snap.total_forks} · θ_sharp 0.70`;
+    $('forksBadge').textContent = `forks ${snap.total_forks || 0} · θ_sharp 0.70`;
     $('routesContainer').innerHTML = (snap.routes || []).map(r => {
       const isSplit = r.forced_split || r.p < 0.70;
       const color = r.forced_split ? 'var(--rose)' : (isSplit ? 'var(--amber)' : 'var(--teal)');
-      const pct = Math.max(2, Math.min(100, Math.round(r.p * 100)));
-      const tag = r.forced_split ? `p=${r.p.toFixed(2)} SPLIT!` : `p=${r.p.toFixed(2)} ${isSplit ? 'split' : 'sharp'} ${r.basis === 'measured' ? 'm' : 'p'}:${r.samples}`;
+      const pct = Math.max(2, Math.min(100, Math.round((r.p || 0) * 100)));
+      const tag = r.forced_split
+        ? `p=${(r.p || 0).toFixed(2)} split m:${r.samples || 0}`
+        : `p=${(r.p || 0).toFixed(2)} ${isSplit ? 'split' : 'sharp'} m:${r.samples || 0}`;
       return `<div class="route-row">
-        <div style="color:${isSplit ? color : 'var(--text)'};">${esc(r.name)}</div>
+        <div style="color:${isSplit ? color : 'var(--text)'};font-weight:700;">${esc(r.name)}</div>
         <div class="bar-track ${isSplit ? 'split' : ''}">
-          <div class="bar-fill" style="width:${pct}%;background:${color};"></div>
+          <div class="bar-fill" style="width:${pct}%;background:${color};color:${color};"></div>
           <div class="bar-thresh" title="θ_sharp = 0.70"></div>
         </div>
         <div class="route-stat" style="color:${color};">${esc(tag)}</div>
       </div>`;
     }).join('');
+  }
 
-    // Workers grid
-    $('workersCountLabel').textContent = `${workers.filter(w => w.active).length} running / ${workers.length} total`;
-    if (workers.length === 0) {
-      $('workersGrid').innerHTML = '<div class="empty-state" style="grid-column:1/-1;">실행 중인 하위 워커가 없습니다 (ps / hc / herdr 감시 중)</div>';
-    } else {
-      $('workersGrid').innerHTML = workers.map(w => {
-        const isSel = selectedId === `worker:${w.address}`;
-        const dimmed = !w.active || w.empty_sublead;
-        const slotColor = w.slot === 'sublead' ? 'var(--violet)' : 'var(--cyan)';
-        const pidBadge = w.pid ? `PID ${w.pid}` : w.address;
-        return `<div class="card cyan ${dimmed ? 'dimmed' : ''} ${isSel ? 'selected' : ''}" data-worker="${esc(w.address)}">
-          <div class="card-hd">
-            <div class="card-title" style="color:${slotColor};">${esc(w.name)}${w.cluster_size !== null ? ` · ${w.cluster_size}` : ''}</div>
-            <span class="badge">${esc(pidBadge)}</span>
-          </div>
-          ${w.owner_badge ? `<div class="owner-tag">${esc(w.owner_badge)}</div>` : ''}
-          <div class="meta">${esc(w.activity)}</div>
-          <div class="tele" style="color:${slotColor};">${esc(w.telemetry)}</div>
-        </div>`;
-      }).join('');
-      $('workersGrid').querySelectorAll('[data-worker]').forEach(el => {
-        el.addEventListener('click', (e) => {
-          e.stopPropagation();
-          selectedId = `worker:${el.getAttribute('data-worker')}`;
-          activeTab = 'detail';
-          syncTabs();
-          render();
-        });
-      });
+  function renderWorkers(workers) {
+    const active = workers.filter(w => w.active).length;
+    $('workersCountLabel').textContent = `${active} active / ${workers.length} total`;
+    if (!workers.length) {
+      $('workersGrid').innerHTML = '<div class="empty-state">실행 중인 하위 워커가 없습니다 (ps / hc / herdr 감시 중)</div>';
+      return;
     }
+    $('workersGrid').innerHTML = workers.map((w, i) => {
+      const isSel = selectedId === `worker:${w.address}`;
+      const dimmed = !w.active || w.empty_sublead;
+      const slot = esc(w.slot || 'coder');
+      const pidBadge = w.pid ? `PID ${w.pid}` : esc(w.address || '—');
+      const cluster = w.cluster_size !== null && w.cluster_size !== undefined ? ` · ${w.cluster_size}` : '';
+      return `<div class="card cyan worker-card ${dimmed ? 'dimmed' : ''} ${isSel ? 'selected' : ''}" data-worker="${esc(w.address)}" data-active="${w.active ? 'true' : 'false'}">
+        <div class="card-hd">
+          <div class="worker-title-wrap">
+            <span class="role-badge slot-${slot}">${circledNumber(i + 1)} ${slot}</span>
+            <div class="worker-name" style="color:${w.slot === 'sublead' ? 'var(--violet)' : 'var(--cyan)'};">${esc(w.name)}${cluster}</div>
+          </div>
+          <span class="pid-badge">${pidBadge}</span>
+        </div>
+        ${w.owner_badge ? `<div class="owner-tag">${esc(w.owner_badge)}</div>` : ''}
+        <div class="worker-activity">${esc(w.activity || '활동 신호 대기')}</div>
+        <div class="tele worker-telemetry" style="color:${w.slot === 'sublead' ? 'var(--violet)' : 'var(--cyan)'};">${esc(telemetryOf(w))}</div>
+      </div>`;
+    }).join('');
+    $('workersGrid').querySelectorAll('[data-worker]').forEach(el => {
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        selectNode(`worker:${el.getAttribute('data-worker')}`);
+      });
+    });
+  }
 
-    // Return card
-    const backEl = $('node-back');
-    backEl.classList.toggle('dimmed', !hasMotion);
-    backEl.classList.toggle('selected', selectedId === 'back');
-    const oc = snap.outcomes || { pass: 0, rework: 0, fail: 0, waiting_human: 0 };
+  function renderReturn(snap, oc, hasMotion) {
+    const el = $('node-back');
+    el.classList.toggle('dimmed', !hasMotion);
+    el.classList.toggle('selected', selectedId === 'back');
     $('outcomesBar').innerHTML = `
-      <span class="c-pass">PASS ${oc.pass}</span>
-      <span class="c-rework">rework ${oc.rework}</span>
-      <span class="c-fail">fail ${oc.fail}</span>
-      ${oc.waiting_human > 0 ? `<span class="c-human">human ${oc.waiting_human}</span>` : ''}
+      <span class="c-pass">PASS ${oc.pass || 0}</span>
+      <span class="c-rework">rework ${oc.rework || 0}</span>
+      <span class="c-fail">fail ${oc.fail || 0}</span>
+      <span class="c-human">human ${oc.waiting_human || 0}</span>
     `;
+  }
 
-    renderInspector();
-    requestAnimationFrame(() => drawWires(hasMotion));
+  function nodeChips(workers) {
+    return [
+      { id: 'advisor', label: 'Advisor' },
+      { id: 'lead', label: 'Lead' },
+      { id: 'verifier', label: 'Verifier' },
+      { id: 'decision', label: 'Decision Gate' },
+      ...workers.map((w, i) => ({ id: `worker:${w.address}`, label: `${circledNumber(i + 1)} ${w.name}` })),
+      { id: 'back', label: '다시 Lead' }
+    ];
+  }
+  function renderNavigator(workers) {
+    $('nodeChips').innerHTML = nodeChips(workers).map(chip =>
+      `<button class="node-chip ${selectedId === chip.id ? 'active' : ''}" type="button" data-chip="${esc(chip.id)}" title="${esc(chip.label)}">${esc(chip.label)}</button>`
+    ).join('');
+    $('nodeChips').querySelectorAll('[data-chip]').forEach(el => {
+      el.addEventListener('click', () => selectNode(el.getAttribute('data-chip')));
+    });
+  }
+
+  function selectedNodeData() {
+    if (!latest) return null;
+    if (selectedId.startsWith('worker:')) {
+      const addr = selectedId.slice(7);
+      return (latest.workers || []).find(x => x.address === addr) || null;
+    }
+    if (selectedId === 'lead') return latest.lead || null;
+    if (selectedId === 'verifier') return (latest.verifiers || [])[0] || null;
+    if (selectedId === 'advisor') return (latest.advisors || [])[0] || null;
+    return null;
+  }
+
+  function nodeMeta(id, data) {
+    const oc = outcomeCounts(latest);
+    const base = {
+      Address: data?.address || '—',
+      'OS PID': data?.pid || '—',
+      Slot: data?.slot || (id === 'decision' ? 'decision_gate' : id),
+      Telemetry: data ? telemetryOf(data) : '—',
+      Owner: data?.owner_badge || data?.owner_address || '—',
+      Repo: data?.repo_tag || latest?.scope || '—',
+      CWD: data?.cwd || '—'
+    };
+    if (id === 'decision') {
+      base.Telemetry = `forks ${latest.total_forks || 0} · open ${latest.open_forks || 0} · effort ${latest.effort_level || 'unknown'}`;
+      base.Repo = latest.scope || 'all';
+    }
+    if (id === 'back') {
+      base.Telemetry = `PASS ${oc.pass || 0} · rework ${oc.rework || 0} · fail ${oc.fail || 0} · human ${oc.waiting_human || 0}`;
+    }
+    return base;
+  }
+
+  const nodeDescriptions = {
+    advisor: '결정론 가드와 자문 계층입니다. 계획 확정 전 브리프 점검, 연속 오류·스톨 감시, 완료 관문 승격 여부를 실시간 프로세스와 게이트 신호로 표시합니다.',
+    lead: '단일 리드 세션입니다. 현재 작업 지시와 실행 흐름을 총괄하며 실제 CLI · 모델 · effort 텔레메트리를 표시합니다.',
+    verifier: '읽기 전용 교차 검증 계층입니다. 리드나 워커의 결과를 이종 모델/독립 세션으로 검사하고 회귀 루프 신호를 반환합니다.',
+    decision: 'Decision Gate는 SQLite에 누적된 사후확률을 사용해 sharp/split 분기를 결정합니다. θ_sharp 70% 위에서 sharp, 아래에서 split으로 읽습니다.',
+    back: '워커 결과를 리드로 되돌리는 수렴 지점입니다. PASS · rework · fail · human 결과를 합산해 다음 검증과 머지 루프로 연결합니다.',
+    worker: '하위 에이전트 OS 프로세스 카드입니다. PID, owner sublead, 활동 한 줄, 실측 CLI · 모델 · effort를 라이브로 표시합니다.'
+  };
+
+  function kvHtml(meta) {
+    return `<div class="kv">${Object.entries(meta).map(([k, v]) => `<div class="k">${esc(k)}</div><div class="v">${esc(v)}</div>`).join('')}</div>`;
   }
 
   function renderInspector() {
     if (!latest) return;
-    const body = $('inspBody');
+    const target = $('inspContent');
     if (activeTab === 'logs') {
       const logs = latest.recent_events || [];
-      body.innerHTML = logs.length
-        ? logs.map(l => `<div class="log-line">${esc(l)}</div>`).join('')
-        : '<div class="empty-state">최근 decision_events 로그가 없습니다.</div>';
+      target.innerHTML = `<div class="detail-card"><div class="section-title">감사 로그</div>${
+        logs.length
+          ? logs.map(l => `<div class="log-line">${esc(l)}</div>`).join('')
+          : '<div class="empty-detail">최근 decision_events 로그가 없습니다.</div>'
+      }</div>`;
       return;
     }
 
-    if (selectedId.startsWith('worker:')) {
-      const addr = selectedId.slice(7);
-      const w = (latest.workers || []).find(x => x.address === addr);
-      if (!w) { body.innerHTML = '<div class="empty-state">선택한 워커가 종료되었습니다.</div>'; return; }
-      body.innerHTML = `
-        <div style="font-size:14px;font-weight:700;color:var(--cyan);">${esc(w.name)}</div>
-        <div class="meta" style="white-space:normal;margin-top:4px;">${esc(w.activity)}</div>
-        <div class="kv">
-          <div class="k">Address</div><div class="v">${esc(w.address)}</div>
-          <div class="k">OS PID</div><div class="v">${esc(w.pid ?? '—')}</div>
-          <div class="k">Slot</div><div class="v">${esc(w.slot)}</div>
-          <div class="k">Status</div><div class="v">${esc(w.status || 'live')}</div>
-          <div class="k">Telemetry</div><div class="v">${esc(w.telemetry)}</div>
-          <div class="k">Owner</div><div class="v">${esc(w.owner_badge || w.owner_address || '—')}</div>
-          <div class="k">Repo</div><div class="v">${esc(w.repo_tag || '—')}</div>
-          <div class="k">CWD</div><div class="v">${esc(w.cwd || '—')}</div>
+    const data = selectedNodeData();
+    if (selectedId.startsWith('worker:') && !data) {
+      target.innerHTML = '<div class="detail-card"><div class="empty-detail">선택한 워커가 종료되었습니다.</div></div>';
+      return;
+    }
+
+    const key = selectedId.startsWith('worker:') ? 'worker' : selectedId;
+    const titles = {
+      advisor: 'Advisor · 결정론 가드 & 자문',
+      lead: data ? `Lead · ${data.name}` : 'Lead · 리드',
+      verifier: data ? `Verifier · ${data.name}` : 'Verifier · 교차 검증',
+      decision: 'Decision Gate · 분기 계층',
+      back: '다시 Lead · 리드',
+      worker: data ? data.name : '하위 에이전트'
+    };
+    const colors = { advisor: 'var(--violet)', lead: 'var(--amber)', verifier: 'var(--gold)', decision: 'var(--teal)', back: 'var(--amber)', worker: 'var(--cyan)' };
+    const meta = nodeMeta(key, data);
+    let extra = '';
+    if (key === 'decision') {
+      extra = `<div class="signal-list"><div class="section-title">신호 분해 · θ_sharp 70%</div>${(latest.routes || []).map(r => {
+        const isSplit = r.forced_split || r.p < 0.70;
+        const color = r.forced_split ? 'var(--rose)' : (isSplit ? 'var(--amber)' : 'var(--teal)');
+        const pct = Math.max(2, Math.min(100, Math.round((r.p || 0) * 100)));
+        return `<div class="sig-row">
+          <div class="sig-head"><b>${esc(r.name)}</b><span class="sig-stat" style="color:${color};">p=${(r.p || 0).toFixed(2)} ${isSplit ? 'split' : 'sharp'} · ${esc(r.basis || 'prior')} · m:${r.samples || 0}</span></div>
+          <div class="bar-track ${isSplit ? 'split' : ''}"><div class="bar-fill" style="width:${pct}%;background:${color};color:${color};"></div><div class="bar-thresh"></div></div>
         </div>`;
-      return;
+      }).join('')}</div>`;
+    }
+    if (key === 'advisor') {
+      const gates = Array.isArray(latest.active_gates) && latest.active_gates.length ? latest.active_gates : fallbackGates;
+      extra = `<div class="signal-list"><div class="section-title">활성 게이트 · 프로브</div>${gates.map(g =>
+        `<div class="log-line"><b style="color:${g.active ? 'var(--violet)' : 'var(--soft)'};">${esc(g.gate || '')} · ${esc(g.label)}</b><br/>${esc(g.detail || '')} — ${g.active ? 'active' : 'idle'}</div>`
+      ).join('')}</div>`;
+    }
+    if (key === 'verifier' && (latest.verifiers || []).length > 1) {
+      extra = `<div class="signal-list"><div class="section-title">활성 Verifier 세션</div>${(latest.verifiers || []).map(v =>
+        `<div class="log-line"><b style="color:var(--gold);">${esc(v.name)}</b><br/>${esc(telemetryOf(v))}<br/>${esc(v.activity || '')}</div>`
+      ).join('')}</div>`;
     }
 
-    if (selectedId === 'lead') {
-      const l = latest.lead;
-      body.innerHTML = l
-        ? `<div style="font-size:14px;font-weight:700;color:var(--amber);">Lead · ${esc(l.name)}</div>
-           <div class="kv">
-             <div class="k">Address</div><div class="v">${esc(l.address)}</div>
-             <div class="k">Telemetry</div><div class="v">${esc(l.telemetry)}</div>
-             <div class="k">Status</div><div class="v">${esc(l.status || 'working')}</div>
-             <div class="k">Activity</div><div class="v">${esc(l.activity)}</div>
-             <div class="k">CWD</div><div class="v">${esc(l.cwd || '—')}</div>
-           </div>`
-        : '<div class="empty-state">현재 활성 Lead 세션이 없습니다.</div>';
-      return;
-    }
-
-    if (selectedId === 'verifier') {
-      const vs = latest.verifiers || [];
-      body.innerHTML = vs.length
-        ? vs.map(v => `<div class="log-line"><b style="color:var(--gold);">${esc(v.name)}</b><br/>${esc(v.telemetry)}<br/>${esc(v.activity)}</div>`).join('')
-        : '<div class="empty-state">현재 실행 중인 Verifier가 없습니다.</div>';
-      return;
-    }
-
-    // Default: Decision Gate summary
-    const oc = latest.outcomes || {};
-    body.innerHTML = `
-      <div style="font-size:14px;font-weight:700;color:var(--teal);">Decision Gate · 실시간 요약</div>
-      <div class="meta" style="white-space:normal;margin-top:4px;">SQLite WAL 사후확률(EWMA Beta) + 실시간 OS 프로세스(ps/hc/herdr) 스트리밍</div>
-      <div class="kv">
-        <div class="k">Updated</div><div class="v">${esc(latest.timestamp)}</div>
-        <div class="k">DB Live</div><div class="v">${latest.db_live ? 'connected' : 'prior fallback'}</div>
-        <div class="k">Forks</div><div class="v">${latest.total_forks} (open ${latest.open_forks})</div>
-        <div class="k">Outcomes</div><div class="v">PASS ${oc.pass||0} · rework ${oc.rework||0} · fail ${oc.fail||0}</div>
-      </div>`;
+    target.innerHTML = `<div class="detail-card">
+      <div class="detail-title" style="color:${colors[key] || 'var(--text)'};">${esc(titles[key] || titles.worker)}</div>
+      <div class="detail-desc">${esc(nodeDescriptions[key] || nodeDescriptions.worker)}</div>
+      ${kvHtml(meta)}
+      ${extra}
+    </div>`;
   }
 
-  function drawWires(hasMotion) {
+  function markerDefs() {
+    return `<defs>
+      <filter id="orbGlow" x="-120%" y="-120%" width="340%" height="340%"><feGaussianBlur stdDeviation="3.2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      ${Object.entries(C).map(([name, color]) => `<marker id="arrow-${name}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="${color}"/></marker><marker id="arrow-${name}-start" viewBox="0 0 10 10" refX="2" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="${color}"/></marker>`).join('')}
+    </defs>`;
+  }
+
+  function drawWires() {
     const svg = $('wiresSvg');
     const stage = $('stage');
-    if (!svg || !stage) return;
+    if (!svg || !stage || !latest) return;
     const sr = stage.getBoundingClientRect();
-    const box = (id) => {
-      const el = $(id);
+    const width = Math.max(stage.scrollWidth, Math.ceil(sr.width));
+    const height = Math.max(stage.scrollHeight, Math.ceil(sr.height));
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    svg.style.width = `${width}px`;
+    svg.style.height = `${height}px`;
+
+    const rectOf = (el) => {
       if (!el) return null;
       const r = el.getBoundingClientRect();
       return {
         l: r.left - sr.left, r: r.right - sr.left,
         t: r.top - sr.top, b: r.bottom - sr.top,
+        w: r.width, h: r.height,
         cx: (r.left + r.right) / 2 - sr.left,
         cy: (r.top + r.bottom) / 2 - sr.top
       };
     };
+    const box = (id) => rectOf($(id));
     const adv = box('node-advisor');
     const lead = box('node-lead');
     const ver = box('node-verifier');
@@ -527,63 +934,126 @@
     const back = box('node-back');
     if (!adv || !lead || !ver || !dec || !wbox || !back) return;
 
-    const segs = [];
-    const addCurve = (d, color, active, dashed = false) => {
-      segs.push(`<path class="wire-path ${active ? 'active' : ''} ${dashed ? 'dashed' : ''}" d="${d}" stroke="${color}" />`);
-      if (active) segs.push(`<path class="wire-pulse" d="${d}" stroke="${color}" />`);
-    };
-    const addPill = (x, y, text, w = 78) => {
-      segs.push(`<rect class="wire-label-bg" x="${x - w/2}" y="${y - 10}" width="${w}" height="20" rx="10" />`);
-      segs.push(`<text class="wire-label-txt" x="${x}" y="${y + 0.5}">${text}</text>`);
-    };
+    const parts = [markerDefs()];
+    const labels = [];
+    let wireIndex = 0;
+    function addLabel(x, y, text, width, color) {
+      labels.push(`<rect class="wire-label-bg" x="${x - width / 2}" y="${y - 10}" width="${width}" height="20" rx="10" stroke="${color}" stroke-opacity="0.32"/>`);
+      labels.push(`<text class="wire-label-txt" x="${x}" y="${y + 0.5}">${esc(text)}</text>`);
+    }
+    function addWire({ d, color, colorName, active = false, dotted = false, startArrow = false, label = null, labelX = 0, labelY = 0, labelW = 88 }) {
+      const idx = wireIndex++;
+      const pathId = `wire-path-${idx}`;
+      const cls = `wire-path ${active ? 'active' : ''} ${dotted ? 'dotted' : ''}`;
+      parts.push(`<path id="${pathId}" class="${cls}" d="${d}" stroke="${color}" style="color:${color}" marker-end="url(#arrow-${colorName})" ${startArrow ? `marker-start="url(#arrow-${colorName}-start)"` : ''}/>`);
+      if (active) {
+        parts.push(`<path class="wire-flow" d="${d}" stroke="${color}" style="color:${color}"/>`);
+        parts.push(`<circle class="wire-orb" r="3.2" fill="${color}"><animateMotion dur="3.8s" repeatCount="indefinite" rotate="auto"><mpath href="#${pathId}"/></animateMotion></circle>`);
+      }
+      if (label) addLabel(labelX, labelY, label, labelW, color);
+    }
 
-    const verActive = (latest?.verifiers?.length || 0) > 0;
-    const advActive = (latest?.advisors?.length || 0) > 0;
+    const advActive = (latest.advisors || []).some(a => a.active);
+    const verActive = (latest.verifiers || []).some(v => v.active);
+    const leadActive = Boolean(latest.lead);
 
-    // Advisor -> Lead / Workers / Return (점선 자문 연결)
-    addCurve(`M ${adv.r} ${lead.cy} L ${lead.l} ${lead.cy}`, '#c084fc', advActive, true);
-    addCurve(`M ${adv.r} ${wbox.cy} L ${wbox.l} ${wbox.cy}`, '#c084fc', advActive, true);
-    addCurve(`M ${adv.r} ${back.cy} L ${back.l} ${back.cy}`, '#c084fc', advActive, true);
+    // Advisor ↔ Lead / Workers / Return — 3 horizontal dotted violet gate wires.
+    addWire({
+      d: `M ${adv.r + 2} ${lead.cy} L ${lead.l - 8} ${lead.cy}`,
+      color: C.violet, colorName: 'violet', active: advActive, dotted: true, startArrow: true,
+      label: '◇ G1 계획', labelX: (adv.r + lead.l) / 2, labelY: lead.cy, labelW: 78
+    });
+    addWire({
+      d: `M ${adv.r + 2} ${wbox.cy} L ${wbox.l - 8} ${wbox.cy}`,
+      color: C.violet, colorName: 'violet', active: advActive, dotted: true, startArrow: true,
+      label: '◇ G2 오류·스톨', labelX: (adv.r + wbox.l) / 2, labelY: wbox.cy, labelW: 100
+    });
+    addWire({
+      d: `M ${adv.r + 2} ${back.cy} L ${back.l - 8} ${back.cy}`,
+      color: C.violet, colorName: 'violet', active: advActive, dotted: true, startArrow: true,
+      label: '◇ G3 완료', labelX: (adv.r + back.l) / 2, labelY: back.cy, labelW: 82
+    });
 
-    // Lead -> Verifier
-    addCurve(`M ${lead.r} ${lead.cy} L ${ver.l} ${ver.cy}`, '#facc15', verActive);
-    addPill((lead.r + ver.l) / 2, lead.cy, '읽기전용 격리', 84);
+    // Lead → Verifier.
+    addWire({
+      d: `M ${lead.r + 3} ${lead.cy} C ${lead.r + 18} ${lead.cy}, ${ver.l - 18} ${ver.cy}, ${ver.l - 5} ${ver.cy}`,
+      color: C.gold, colorName: 'gold', active: verActive,
+      label: '읽기전용 격리', labelX: (lead.r + ver.l) / 2, labelY: lead.cy, labelW: 88
+    });
 
-    // Lead -> Decision Gate
-    addCurve(`M ${lead.cx} ${lead.b} C ${lead.cx} ${(lead.b+dec.t)/2}, ${dec.cx} ${(lead.b+dec.t)/2}, ${dec.cx} ${dec.t}`, '#f59e0b', Boolean(latest?.lead));
-    addPill((lead.cx + dec.cx) / 2, (lead.b + dec.t) / 2, '분기 질의', 68);
+    // Lead → Decision Gate.
+    addWire({
+      d: `M ${lead.cx} ${lead.b + 3} C ${lead.cx} ${lead.b + 34}, ${dec.cx} ${dec.t - 34}, ${dec.cx} ${dec.t - 5}`,
+      color: C.amber, colorName: 'amber', active: leadActive,
+      label: '분기 질의', labelX: (lead.cx + dec.cx) / 2, labelY: (lead.b + dec.t) / 2, labelW: 70
+    });
 
-    // Decision Gate -> Workers Box
-    addCurve(`M ${dec.cx} ${dec.b} L ${wbox.cx} ${wbox.t}`, '#2dd4bf', hasMotion);
+    // Decision Gate → each visible worker card.
+    const workerCards = Array.from(document.querySelectorAll('[data-worker]')).map((el, i, arr) => ({
+      el,
+      active: el.getAttribute('data-active') === 'true',
+      r: rectOf(el),
+      ratio: arr.length <= 1 ? 0.5 : i / (arr.length - 1)
+    })).filter(x => x.r);
+    const workerLabelRect = rectOf(document.querySelector('.workers-box-label'));
+    workerCards.forEach((w, i) => {
+      const spread = (i - (workerCards.length - 1) / 2) * 12;
+      const sx = dec.cx + spread;
+      const sy = dec.b + 4;
+      const ex = w.r.cx;
+      const ey = w.r.t - 5;
+      const fanY = Math.max(sy + 34, (workerLabelRect ? workerLabelRect.b : wbox.t) + 10);
+      addWire({
+        d: `M ${sx} ${sy} C ${sx} ${sy + 16}, ${sx} ${fanY - 16}, ${sx} ${fanY} C ${sx} ${fanY + 18}, ${ex} ${ey - 18}, ${ex} ${ey}`,
+        color: C.cyan, colorName: 'cyan', active: w.active
+      });
+    });
 
-    // Workers Box -> Return Card
-    addCurve(`M ${wbox.cx} ${wbox.b} L ${back.cx} ${back.t}`, '#38bdf8', hasMotion);
+    // Each visible worker card → bottom Return card.
+    workerCards.forEach((w, i) => {
+      const sx = w.r.cx;
+      const sy = w.r.b + 4;
+      const ex = back.l + back.w * (workerCards.length <= 1 ? 0.5 : 0.16 + 0.68 * (i / (workerCards.length - 1)));
+      const ey = back.t - 5;
+      const dy = Math.max(36, ey - sy);
+      addWire({
+        d: `M ${sx} ${sy} C ${sx} ${sy + dy * 0.46}, ${ex} ${ey - dy * 0.48}, ${ex} ${ey}`,
+        color: C.cyan, colorName: 'cyan', active: w.active
+      });
+    });
 
-    // Return Card -> Verifier 우측 교차검증 회귀루프 곡선
-    const loopX = Math.max(ver.r, back.r) + 22;
-    addCurve(`M ${back.r} ${back.cy} C ${loopX} ${back.cy}, ${loopX} ${ver.cy + 40}, ${ver.r} ${ver.cy + 14}`, '#facc15', verActive, !verActive);
+    // Bottom Return → Verifier, sweeping up the right side.
+    const loopX = Math.min(width - 20, Math.max(ver.r, back.r) + 30);
+    addWire({
+      d: `M ${back.r + 4} ${back.cy} C ${loopX} ${back.cy}, ${loopX} ${ver.cy + 44}, ${ver.r + 5} ${ver.cy + 12}`,
+      color: C.gold, colorName: 'gold', active: verActive,
+      label: '교차검증 · 회귀루프', labelX: Math.max(76, loopX - 58), labelY: (back.cy + ver.cy) / 2, labelW: 116
+    });
 
-    svg.innerHTML = segs.join('');
+    svg.innerHTML = parts.concat(labels).join('');
+    if (paused && svg.pauseAnimations) svg.pauseAnimations();
   }
 
-  window.addEventListener('resize', () => { if (latest) drawWires(true); });
+  window.addEventListener('resize', () => { if (latest) requestAnimationFrame(drawWires); });
 
   function connectSSE() {
     const es = new EventSource('/api/stream');
     es.onopen = () => {
+      sseLive = true;
       $('sseDot').classList.remove('off');
-      $('sseStatus').textContent = 'LIVE · SSE';
+      if (latest) render();
     };
     es.addEventListener('snapshot', (ev) => {
       try {
         latest = JSON.parse(ev.data);
-        $('sseStatus').textContent = `LIVE · ${latest.timestamp}`;
+        sseLive = true;
         render();
       } catch (_) {}
     });
     es.onerror = () => {
+      sseLive = false;
       $('sseDot').classList.add('off');
-      $('sseStatus').textContent = '재연결 중...';
+      if (latest) renderStatusStrip(latest, outcomeCounts(latest));
     };
   }
 
