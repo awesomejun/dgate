@@ -730,6 +730,15 @@ pub fn cluster_workers_by_sublead(workers: &[LiveWorkerInfo]) -> WorkerClusterPa
             if !w.address.is_empty() {
                 index_by_addr.entry(w.address.clone()).or_insert(idx);
             }
+            if w.address.starts_with("pid:") {
+                if let Some(owner) = w
+                    .owner_address
+                    .as_deref()
+                    .filter(|addr| !addr.is_empty())
+                {
+                    index_by_addr.entry(owner.to_string()).or_insert(idx);
+                }
+            }
             clusters.push(SubleadCluster {
                 sublead: w.clone(),
                 workers: Vec::new(),
@@ -3497,5 +3506,34 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["pid:20"]
         );
+    }
+
+    #[test]
+    fn cluster_workers_indexes_pid_sublead_by_hosting_terminal_owner() {
+        let mk = |addr: &str, name: &str, slot: LiveWorkerSlot, owner: Option<&str>| {
+            LiveWorkerInfo {
+                slot,
+                address: addr.to_string(),
+                owner_address: owner.map(str::to_string),
+                name: name.to_string(),
+                ..worker(addr, name, "dgate", None)
+            }
+        };
+        let workers = vec![
+            mk("pid:111", "sublead-auth", LiveWorkerSlot::Sublead, Some("tSub")),
+            mk("tChild", "coder-hc", LiveWorkerSlot::Coder, Some("tSub")),
+            mk("pid:222", "coder-wrap", LiveWorkerSlot::Coder, Some("tSub")),
+        ];
+        let parts = cluster_workers_by_sublead(&workers);
+        assert_eq!(parts.clusters.len(), 1);
+        assert_eq!(
+            parts.clusters[0]
+                .workers
+                .iter()
+                .map(|w| w.address.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tChild", "pid:222"]
+        );
+        assert!(parts.unowned.is_empty());
     }
 }

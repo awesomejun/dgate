@@ -117,12 +117,47 @@ struct CardView<'a> {
     cluster_size: Option<usize>,
 }
 
-/// `orderSwarmCardsByCluster` 미러 — 각 클러스터(sublead → 소속 워커) → 미소속.
+/// Workers 가로 오버플로 창 — 전체 카드 중 현재 보이는 구간과 그 안의 선택 위치.
+/// `worker_select`는 전체 순서 기준이고, 렌더링은 `[start .. start + len]`만 사용한다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkerWindow {
+    start: usize,
+    len: usize,
+    selected: usize,
+}
+
+/// 선택 인덱스가 항상 보이도록 하는 결정론적 슬라이딩 창.
+/// 첫 화면에서는 이동하지 않다가 선택이 오른쪽 끝을 넘으면 한 칸씩 팬한다.
+fn worker_window(total_cards: usize, visible_slots: usize, selected: usize) -> WorkerWindow {
+    if total_cards == 0 || visible_slots == 0 {
+        return WorkerWindow {
+            start: 0,
+            len: 0,
+            selected: 0,
+        };
+    }
+    let len = visible_slots.min(total_cards);
+    let clamped = selected.min(total_cards - 1);
+    let max_start = total_cards - len;
+    let start = clamped.saturating_sub(len - 1).min(max_start);
+    WorkerWindow {
+        start,
+        len,
+        selected: clamped - start,
+    }
+}
+
+/// `orderSwarmCardsByCluster` 미러 — 비어 있지 않은 클러스터(sublead → 소속 워커)
+/// → 미소속 → 빈 sublead 헤더. `TuiSnapshot::display_workers`와 순서를 1:1로 맞춘다.
 fn ordered_card_views(snap: &TuiSnapshot) -> Vec<CardView<'_>> {
     let parts = partition_sessions_by_role(&snap.roster.workers);
     let clustered = cluster_workers_by_sublead(parts.sub_workers.iter().copied());
     let mut out: Vec<CardView> = Vec::new();
-    for cluster in &clustered.clusters {
+    for cluster in clustered
+        .clusters
+        .iter()
+        .filter(|c| !c.workers.is_empty())
+    {
         let badge = format_sublead_owner_badge(&cluster.sublead.name);
         out.push(CardView {
             worker: cluster.sublead,
@@ -142,6 +177,17 @@ fn ordered_card_views(snap: &TuiSnapshot) -> Vec<CardView<'_>> {
             worker: w,
             owner_badge: None,
             cluster_size: None,
+        });
+    }
+    for cluster in clustered
+        .clusters
+        .iter()
+        .filter(|c| c.workers.is_empty())
+    {
+        out.push(CardView {
+            worker: cluster.sublead,
+            owner_badge: None,
+            cluster_size: Some(0),
         });
     }
     out
@@ -356,7 +402,7 @@ fn render_full_layout(
     );
 
     // 4. 파이프라인 & Advisor 자문 연결 와이어 (패널보다 먼저 그려서 보더와 자연스럽게 접합)
-    render_pipeline_wires(cv, snap, ctx, sim_time, l);
+    render_pipeline_wires(cv, snap, ui, ctx, sim_time, l);
     render_advisory_wires(cv, ctx, sim_time, l);
 
     // 5. 좌측 Advisor 자문 패널
@@ -592,6 +638,7 @@ fn render_legend_nav(cv: &mut Canvas, snap: &TuiSnapshot, x: i32, y: i32, width:
 fn render_pipeline_wires(
     cv: &mut Canvas,
     snap: &TuiSnapshot,
+    ui: &UiState,
     ctx: &RoleCtx,
     sim_time: f64,
     l: &FullLayout,
@@ -718,7 +765,11 @@ fn render_pipeline_wires(
     // 카드별 개별 펄스 — 실행 중인 카드로만 흐른다(대기/빈 카드는 펄스 0개).
     // 위상을 카드 인덱스로 엇갈리게 해 2번째(가운데)·4번째 워커도 확실히 보이게 한다.
     if ctx.motion {
-        for (i, card_view) in ctx.cards.iter().enumerate().take(l.cards.len()) {
+        let window = worker_window(ctx.cards.len(), l.cards.len(), ui.worker_select);
+        for i in 0..window.len {
+            let Some(card_view) = ctx.cards.get(window.start + i) else {
+                continue;
+            };
             if !snap.demo && !worker_actively_running(card_view.worker) {
                 continue;
             }
@@ -1597,8 +1648,10 @@ fn render_swarm_section(
     sim_time: f64,
     l: &FullLayout,
 ) {
+    let window = worker_window(ctx.cards.len(), l.cards.len(), ui.worker_select);
+
     // 위임 라벨 (하위 에이전트에 위임 · Workers) — 슬롯 초과 워커는 +N 배지로 안내
-    let overflow = ctx.cards.len().saturating_sub(l.cards.len());
+    let overflow = ctx.cards.len().saturating_sub(window.len);
     if l.delegate_label_y < l.fan_out_y {
         let first = l.cards[0];
         let last = l.cards[l.cards.len() - 1];
@@ -1647,15 +1700,14 @@ fn render_swarm_section(
         return;
     }
 
-    let sel_card_idx = (ui.worker_select).min(l.cards.len().saturating_sub(1));
-
-    for (idx, card_rect) in l.cards.iter().enumerate() {
-        let Some(entry) = ctx.cards.get(idx) else { break };
+    for (idx, card_rect) in l.cards.iter().take(window.len).enumerate() {
+        let card_idx = window.start + idx;
+        let Some(entry) = ctx.cards.get(card_idx) else { break };
         let card_rect = *card_rect;
         let w = entry.worker;
 
-        let card_advisory_glow = err_advisory && idx == 0;
-        let card_selected = focused && idx == sel_card_idx;
+        let card_advisory_glow = err_advisory && card_idx == 0;
+        let card_selected = focused && idx == window.selected;
         let card_bg = if card_advisory_glow {
             theme::BG_GLOW_PURPLE
         } else {
@@ -1743,7 +1795,7 @@ fn render_swarm_section(
             let is_done = status == "done";
             let is_idle = matches!(status, "idle" | "error");
             let turn_suffix = w.turn.map(|t| format!(" · turn {}", t)).unwrap_or_default();
-            let demo_idx = if snap.demo { Some(idx) } else { None };
+            let demo_idx = if snap.demo { Some(card_idx) } else { None };
             let elapsed = clock.elapsed_secs(&w.address, demo_idx);
 
             if snap.demo && worker_actively_running(w) {
@@ -1751,10 +1803,10 @@ fn render_swarm_section(
                 let right_label = match elapsed {
                     Some(secs) => format!(
                         "{} {}",
-                        spinner_frame(sim_time, idx as f64),
+                        spinner_frame(sim_time, card_idx as f64),
                         format_elapsed_mmss(secs)
                     ),
-                    None => format!("{} RUN", spinner_frame(sim_time, idx as f64)),
+                    None => format!("{} RUN", spinner_frame(sim_time, card_idx as f64)),
                 };
                 let bar_w = (iw.saturating_sub(string_width(&right_label) + 1)).max(6);
                 let start_x = ix
@@ -1767,7 +1819,7 @@ fn render_swarm_section(
                     theme::BLUE,
                     theme::BG_BLUE_TRACK,
                     sim_time,
-                    idx as f64,
+                    card_idx as f64,
                 );
                 cv.write_text(
                     start_x + bar_w as i32 + 1,
@@ -2425,6 +2477,7 @@ mod tests {
     use super::*;
     use crate::canvas::pad_left_width;
     use crate::state::{demo_snapshot, TuiSnapshot};
+    use dgate_core::live_sync::LiveWorkerSlot;
 
     fn render_demo(cols: u16, rows: u16) -> String {
         let snap = demo_snapshot();
@@ -2579,6 +2632,145 @@ mod tests {
         ui.worker_select = 0;
         let text = render_to_text(&snap, &ui, &WorkerClock::default(), 140, 40, 10.0);
         assert!(text.contains('▶'), "선택 마커:\n{}", text);
+    }
+
+    fn card_worker(
+        addr: &str,
+        name: &str,
+        slot: LiveWorkerSlot,
+        owner: Option<&str>,
+    ) -> LiveWorkerInfo {
+        let mut w = demo_snapshot()
+            .roster
+            .workers
+            .into_iter()
+            .find(|w| w.slot == LiveWorkerSlot::Coder)
+            .expect("demo coder fixture");
+        w.slot = slot;
+        w.address = addr.to_string();
+        w.owner_address = owner.map(str::to_string);
+        w.name = name.to_string();
+        w
+    }
+
+    #[test]
+    fn ordered_card_views_match_display_workers_with_empty_subleads_last() {
+        let mut snap = demo_snapshot();
+        let workers = vec![
+            card_worker("tEmpty1", "sublead-empty-1", LiveWorkerSlot::Sublead, None),
+            card_worker(
+                "pid:111",
+                "sublead-active",
+                LiveWorkerSlot::Sublead,
+                Some("tActive"),
+            ),
+            card_worker("tEmpty2", "sublead-empty-2", LiveWorkerSlot::Sublead, None),
+            card_worker("pid:222", "coder-active", LiveWorkerSlot::Coder, Some("tActive")),
+            card_worker("pid:333", "coder-free", LiveWorkerSlot::Coder, None),
+            card_worker("tEmpty3", "sublead-empty-3", LiveWorkerSlot::Sublead, None),
+        ];
+        snap.roster.active_worker_count = workers.len();
+        snap.roster.workers = workers;
+
+        let display_order: Vec<&str> = snap
+            .display_workers()
+            .iter()
+            .map(|w| w.name.as_str())
+            .collect();
+        let card_order: Vec<&str> = ordered_card_views(&snap)
+            .iter()
+            .map(|c| c.worker.name.as_str())
+            .collect();
+        assert_eq!(card_order, display_order);
+        assert_eq!(
+            card_order,
+            vec![
+                "sublead-active",
+                "coder-active",
+                "coder-free",
+                "sublead-empty-1",
+                "sublead-empty-2",
+                "sublead-empty-3"
+            ]
+        );
+    }
+
+    #[test]
+    fn worker_window_slices_overflow_and_clamps_selection() {
+        assert_eq!(
+            worker_window(5, 4, 0),
+            WorkerWindow {
+                start: 0,
+                len: 4,
+                selected: 0,
+            }
+        );
+        assert_eq!(
+            worker_window(5, 4, 3),
+            WorkerWindow {
+                start: 0,
+                len: 4,
+                selected: 3,
+            }
+        );
+        assert_eq!(
+            worker_window(5, 4, 4),
+            WorkerWindow {
+                start: 1,
+                len: 4,
+                selected: 3,
+            }
+        );
+        assert_eq!(
+            worker_window(5, 4, 99),
+            WorkerWindow {
+                start: 1,
+                len: 4,
+                selected: 3,
+            },
+            "stale worker_select must clamp to the last card"
+        );
+        assert_eq!(
+            worker_window(2, 4, 1),
+            WorkerWindow {
+                start: 0,
+                len: 2,
+                selected: 1,
+            }
+        );
+        assert_eq!(
+            worker_window(0, 4, 0),
+            WorkerWindow {
+                start: 0,
+                len: 0,
+                selected: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn worker_selection_pans_into_overflow_cards() {
+        let mut snap = demo_snapshot();
+        let mut extra = card_worker("demo-overflow", "w-overflow", LiveWorkerSlot::Coder, None);
+        extra.activity = "overflow 카드 도달 테스트".to_string();
+        snap.roster.workers.push(extra);
+        snap.roster.active_worker_count = snap.roster.workers.len();
+        let ui = UiState {
+            focused: FocusPanel::Swarm,
+            worker_select: 4,
+            ..Default::default()
+        };
+        let text = render_to_text(&snap, &ui, &WorkerClock::default(), 140, 40, 10.0);
+        assert!(
+            text.contains("w-overflow"),
+            "fifth overflow card should be reachable by selection:\n{}",
+            text
+        );
+        assert!(
+            text.contains("▶ w-overflow"),
+            "selection marker must stay on the rendered overflow card:\n{}",
+            text
+        );
     }
 
     #[test]

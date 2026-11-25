@@ -1580,7 +1580,10 @@ pub fn infer_live_worker_slot(
         short_model,
         model_name,
         address: detail.address.clone(),
-        owner_address: None,
+        owner_address: detail
+            .parent
+            .clone()
+            .filter(|p| !p.trim().is_empty()),
         name: if name.is_empty() {
             detail.address.clone()
         } else {
@@ -1992,10 +1995,20 @@ fn default_proc_lister() -> Option<String> {
     String::from_utf8(out.stdout).ok()
 }
 
-/// `hc get --json` 출력에서 터미널 자신과 포그라운드 프로세스 pid를 모은다.
-fn parse_hc_get_pids(raw: &str) -> Vec<u64> {
+/// `hc get --json`에서 워커 소유 판정에 필요한 프로세스 정보 — 터미널 자신과
+/// 포그라운드 pid, 그리고 이 터미널이 `hc run --bg -- dg wrap …`처럼 wrap 명령
+/// 전용으로 시작됐는지 여부. 초기 argv가 아니라 foreground만 wrap인 터미널은
+/// 사용자가 셸/CLI 안에서 동기적으로 wrap을 실행한 것이므로 전용 호스트가 아니다.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct HcTerminalProcessInfo {
+    pids: Vec<u64>,
+    dedicated_wrap_host: bool,
+}
+
+/// `hc get --json` 출력에서 터미널 프로세스 정보를 모은다.
+fn parse_hc_get_process_info(raw: &str) -> HcTerminalProcessInfo {
     let Ok(parsed) = serde_json::from_str::<Value>(raw) else {
-        return Vec::new();
+        return HcTerminalProcessInfo::default();
     };
     let mut pids = Vec::new();
     if let Some(p) = parsed.get("pid").and_then(Value::as_u64) {
@@ -2008,7 +2021,17 @@ fn parse_hc_get_pids(raw: &str) -> Vec<u64> {
     {
         pids.push(p);
     }
-    pids
+    let argv: Option<Vec<String>> = parsed.get("argv").and_then(Value::as_array).map(|arr| {
+        arr.iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<String>>()
+    });
+    let dedicated_wrap_host = argv.as_deref().is_some_and(is_dg_wrap_host_argv);
+    HcTerminalProcessInfo {
+        pids,
+        dedicated_wrap_host,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2291,7 +2314,7 @@ pub struct LiveSyncSnapshotter {
     get_watched_lead: Option<Arc<dyn Fn() -> Option<String> + Send + Sync>>,
     on_update: Option<Arc<Mutex<dyn FnMut(&MergedLiveRoster) + Send + Sync>>>,
     proc_lister: Arc<dyn Fn() -> Option<String> + Send + Sync>,
-    pid_cache: HashMap<String, Vec<u64>>,
+    pid_cache: HashMap<String, HcTerminalProcessInfo>,
     base_labels: Option<RosterDisplayLabels>,
     roster_signature: Option<String>,
     last_workers: Vec<LiveWorkerInfo>,
@@ -2544,9 +2567,9 @@ impl LiveSyncSnapshotter {
                     self.pid_cache
                         .retain(|addr, _| terminals.iter().any(|t| &t.address == addr));
                     let mut fetched = 0usize;
-                    let mut pid_owner: HashMap<u64, &HcTerminalSummary> = HashMap::new();
+                    let mut pid_owner: HashMap<u64, (&HcTerminalSummary, bool)> = HashMap::new();
                     for t in terminals {
-                        if t.state.as_deref() != Some("live") || t.parent.is_some() {
+                        if t.state.as_deref() != Some("live") {
                             continue;
                         }
                         if !self.pid_cache.contains_key(&t.address) && fetched < 12 {
@@ -2556,20 +2579,22 @@ impl LiveSyncSnapshotter {
                                 &["get", t.address.as_str(), "--json"],
                                 HC_LS_TIMEOUT_MS,
                             ) {
-                                self.pid_cache
-                                    .insert(t.address.clone(), parse_hc_get_pids(&raw));
+                                self.pid_cache.insert(
+                                    t.address.clone(),
+                                    parse_hc_get_process_info(&raw),
+                                );
                             }
                         }
-                        if let Some(pids) = self.pid_cache.get(&t.address) {
-                            for pid in pids {
-                                pid_owner.insert(*pid, t);
+                        if let Some(info) = self.pid_cache.get(&t.address) {
+                            for pid in &info.pids {
+                                pid_owner.insert(*pid, (t, info.dedicated_wrap_host));
                             }
                         }
                     }
                     let repo_scope = self.repo_filter_dir.as_deref().and_then(|p| p.to_str());
                     for p in &procs {
                         let owner = p.ancestors.iter().find_map(|a| pid_owner.get(a).copied());
-                        let Some(owner) = owner else {
+                        let Some((owner, owner_dedicated_wrap_host)) = owner else {
                             // 고아 wrap(nohup & 등으로 PPID=1)도 미소속 카드로 표시 —
                             // --project 있을 때만 레포 스코프 필터를 적용한다.
                             let scope_ok = p
@@ -2586,7 +2611,23 @@ impl LiveSyncSnapshotter {
                         if !matches_repo_scope(owner.cwd.as_deref(), repo_scope) {
                             continue;
                         }
-                        workers.push(wrap_proc_to_worker(p, owner));
+                        let mut worker = wrap_proc_to_worker(p, owner);
+                        // `hc run --bg -- dg wrap` 전용 터미널은 카드가 억제되는
+                        // 실행 껍데기다. 비-sublead 자식 워커는 이 껍데기 주소가 아니라
+                        // hc parent(보통 해당 껍데기를 만든 sublead 터미널)에 귀속시켜
+                        // sublead 클러스터가 자식 수를 실제로 보이게 한다.
+                        // 반대로 일반 셸/CLI 안에서 동기 실행한 wrap은 기존처럼 실행
+                        // 터미널 자신을 소유자로 유지한다.
+                        if owner_dedicated_wrap_host && worker.slot != LiveWorkerSlot::Sublead {
+                            if let Some(parent_addr) = owner
+                                .parent
+                                .as_deref()
+                                .filter(|addr| !addr.trim().is_empty())
+                            {
+                                worker.owner_address = Some(parent_addr.to_string());
+                            }
+                        }
+                        workers.push(worker);
                     }
                 }
             }
@@ -4124,7 +4165,7 @@ mod tests {
             "terminals": [
                 { "address": "tDg", "agent": "dg", "name": "coder-direct", "parent": "t0", "state": "live", "status": "working", "cwd": "/tmp/repo-a" },
                 { "address": "tEnv", "agent": "env", "name": "coder-envwrap", "parent": "t0", "state": "live", "status": "working", "cwd": "/tmp/repo-a" },
-                { "address": "tSh", "agent": "pi", "name": "coder-shelljob", "parent": "t0", "state": "live", "status": "working", "cwd": "/tmp/repo-a" }
+                { "address": "tSh", "agent": "pi", "name": "coder-shelljob", "parent": null, "state": "live", "status": "working", "cwd": "/tmp/repo-a" }
             ]
         })
         .to_string();
@@ -4205,5 +4246,151 @@ mod tests {
         let unowned = wrap_proc_to_unowned_worker(&proc);
         assert_eq!(unowned.address, "pid:4242");
         assert_eq!(unowned.owner_address, None);
+    }
+
+    #[test]
+    fn terminal_worker_owner_address_uses_hc_parent_when_present() {
+        let mut d = detail(
+            "tChild",
+            "coder-child",
+            "pi",
+            &["pi", "--model", "m-child"],
+            Some("/tmp/repo-a"),
+        );
+        d.parent = Some("tSub".to_string());
+        let owned = infer_live_worker_slot(&d, None).unwrap();
+        assert_eq!(owned.owner_address.as_deref(), Some("tSub"));
+
+        d.parent = Some(String::new());
+        let empty = infer_live_worker_slot(&d, None).unwrap();
+        assert_eq!(empty.owner_address, None);
+
+        d.parent = None;
+        let absent = infer_live_worker_slot(&d, None).unwrap();
+        assert_eq!(absent.owner_address, None);
+    }
+
+    #[test]
+    fn nested_hc_run_bg_wrap_child_uses_parent_sublead_as_owner() {
+        let _g: MutexGuard<'_, ()> = env_lock();
+        let tmp = temp_dir("live-nested-wrap-owner");
+        std::fs::create_dir_all(&tmp).unwrap();
+        isolate_env(&tmp);
+        let ls = serde_json::json!({
+            "terminals": [
+                { "address": "tSub", "agent": "dg", "name": "sublead-auth", "parent": null, "state": "live", "status": "working", "cwd": "/tmp/repo-a" },
+                { "address": "tChild", "agent": "dg", "name": "coder-child", "parent": "tSub", "state": "live", "status": "working", "cwd": "/tmp/repo-a" }
+            ]
+        })
+        .to_string();
+        let details = HashMap::from([
+            (
+                "tSub".to_string(),
+                serde_json::json!({
+                    "address": "tSub", "agent": "dg", "name": "sublead-auth", "state": "live",
+                    "status": "working", "cwd": "/tmp/repo-a", "pid": 1000,
+                    "argv": ["dg", "wrap", "--role", "sublead", "--label", "sublead-auth", "--", "pi", "--model", "m-sub"],
+                    "foreground": { "pid": 111, "argv": ["dg", "wrap", "--role", "sublead", "--label", "sublead-auth", "--", "pi", "--model", "m-sub"] }
+                })
+                .to_string(),
+            ),
+            (
+                "tChild".to_string(),
+                serde_json::json!({
+                    "address": "tChild", "agent": "dg", "name": "coder-child", "parent": "tSub", "state": "live",
+                    "status": "working", "cwd": "/tmp/repo-a", "pid": 2000,
+                    "argv": ["dg", "wrap", "--role", "coder", "--label", "coder-child", "--", "pi", "--model", "m-child"],
+                    "foreground": { "pid": 222, "argv": ["dg", "wrap", "--role", "coder", "--label", "coder-child", "--", "pi", "--model", "m-child"] }
+                })
+                .to_string(),
+            ),
+        ]);
+        let mock = Arc::new(MockHc::new(vec![ls], details, HashMap::new()));
+        let ps = concat!(
+            "1000     1 /bin/zsh -l\n",
+            "2000     1 /bin/zsh -l\n",
+            " 111  1000 dg wrap --role sublead --label sublead-auth -- pi --model m-sub\n",
+            " 112   111 pi --model m-sub\n",
+            " 222  2000 dg wrap --role coder --label coder-child -- pi --model m-child\n",
+            " 223   222 pi --model m-child\n"
+        )
+        .to_string();
+        let mut snap = LiveSyncSnapshotter::new(LiveSyncOptions {
+            repo_dir: tmp.clone(),
+            repo_filter_dir: None,
+            hc_bin: "hc".to_string(),
+            exec_runner: mock,
+            get_watched_lead: None,
+            proc_lister: Arc::new(move || Some(ps.clone())),
+            on_update: None,
+        });
+        let merged = snap.tick_now();
+        let sub = merged
+            .workers
+            .iter()
+            .find(|w| w.address == "pid:111")
+            .unwrap_or_else(|| panic!("sublead wrap card missing: {:?}", merged.workers));
+        assert_eq!(sub.slot, LiveWorkerSlot::Sublead);
+        assert_eq!(sub.owner_address.as_deref(), Some("tSub"));
+        let coder = merged
+            .workers
+            .iter()
+            .find(|w| w.address == "pid:222")
+            .unwrap_or_else(|| panic!("coder wrap card missing: {:?}", merged.workers));
+        assert_eq!(coder.slot, LiveWorkerSlot::Coder);
+        assert_eq!(
+            coder.owner_address.as_deref(),
+            Some("tSub"),
+            "hc run --bg child coder must attach to the parent sublead terminal, not its own wrap-host terminal"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn synchronous_wrap_in_shell_keeps_host_terminal_as_owner() {
+        let _g: MutexGuard<'_, ()> = env_lock();
+        let tmp = temp_dir("live-sync-wrap-owner");
+        std::fs::create_dir_all(&tmp).unwrap();
+        isolate_env(&tmp);
+        let ls = serde_json::json!({
+            "terminals": [
+                { "address": "tSub", "agent": "pi", "name": "sublead-auth", "parent": "tLead", "state": "live", "status": "working", "cwd": "/tmp/repo-a" }
+            ]
+        })
+        .to_string();
+        let details = HashMap::from([(
+            "tSub".to_string(),
+            serde_json::json!({
+                "address": "tSub", "agent": "pi", "name": "sublead-auth", "parent": "tLead", "state": "live",
+                "status": "working", "cwd": "/tmp/repo-a", "pid": 1000,
+                "argv": ["pi", "--model", "m-sub"],
+                "foreground": { "pid": 333, "argv": ["dg", "wrap", "--role", "coder", "--label", "coder-sync", "--", "pi", "--model", "m-child"] }
+            })
+            .to_string(),
+        )]);
+        let mock = Arc::new(MockHc::new(vec![ls], details, HashMap::new()));
+        let ps = concat!(
+            "1000     1 pi --model m-sub\n",
+            " 333  1000 dg wrap --role coder --label coder-sync -- pi --model m-child\n",
+            " 334   333 pi --model m-child\n"
+        )
+        .to_string();
+        let mut snap = LiveSyncSnapshotter::new(LiveSyncOptions {
+            repo_dir: tmp.clone(),
+            repo_filter_dir: None,
+            hc_bin: "hc".to_string(),
+            exec_runner: mock,
+            get_watched_lead: None,
+            proc_lister: Arc::new(move || Some(ps.clone())),
+            on_update: None,
+        });
+        let merged = snap.tick_now();
+        let coder = merged
+            .workers
+            .iter()
+            .find(|w| w.address == "pid:333")
+            .unwrap_or_else(|| panic!("sync wrap card missing: {:?}", merged.workers));
+        assert_eq!(coder.owner_address.as_deref(), Some("tSub"));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

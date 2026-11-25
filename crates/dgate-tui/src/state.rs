@@ -121,11 +121,22 @@ impl TuiSnapshot {
         let parts = partition_sessions_by_role(&self.roster.workers);
         let clustered = cluster_workers_by_sublead(parts.sub_workers.iter().copied());
         let mut out: Vec<&LiveWorkerInfo> = Vec::new();
-        for c in &clustered.clusters {
+        for c in clustered
+            .clusters
+            .iter()
+            .filter(|c| !c.workers.is_empty())
+        {
             out.push(c.sublead);
             out.extend(c.workers.iter().copied());
         }
         out.extend(clustered.unowned.iter().copied());
+        for c in clustered
+            .clusters
+            .iter()
+            .filter(|c| c.workers.is_empty())
+        {
+            out.push(c.sublead);
+        }
         out
     }
 }
@@ -189,6 +200,15 @@ pub fn cluster_workers_by_sublead<'a>(
             let idx = clusters.len();
             if !w.address.is_empty() {
                 index_by_addr.entry(w.address.as_str()).or_insert(idx);
+            }
+            if w.address.starts_with("pid:") {
+                if let Some(owner) = w
+                    .owner_address
+                    .as_deref()
+                    .filter(|addr| !addr.is_empty())
+                {
+                    index_by_addr.entry(owner).or_insert(idx);
+                }
             }
             clusters.push(SubleadCluster {
                 sublead: w,
@@ -873,6 +893,61 @@ mod tests {
         // sublead 자체는 unowned에 없고, 미소속 1개만 남는다.
         assert_eq!(parts.unowned.len(), 1);
         assert_eq!(parts.unowned[0].name, "w-free");
+    }
+
+    #[test]
+    fn cluster_workers_indexes_pid_sublead_by_hosting_terminal_owner() {
+        let sub = mk_worker(
+            "pid:111",
+            "sublead-auth",
+            LiveWorkerSlot::Sublead,
+            Some("tSub"),
+        );
+        let workers = [
+            sub,
+            mk_worker("tChild", "coder-hc", LiveWorkerSlot::Coder, Some("tSub")),
+            mk_worker("pid:222", "coder-wrap", LiveWorkerSlot::Coder, Some("tSub")),
+        ];
+        let parts = cluster_workers_by_sublead(workers.iter());
+        assert_eq!(parts.clusters.len(), 1);
+        assert_eq!(
+            parts.clusters[0]
+                .workers
+                .iter()
+                .map(|w| w.address.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tChild", "pid:222"],
+            "children referencing the hosting hc terminal must join the pid:N sublead cluster"
+        );
+        assert!(parts.unowned.is_empty());
+    }
+
+    #[test]
+    fn display_workers_puts_active_clusters_before_unowned_and_empty_subleads_last() {
+        let mut snap = demo_snapshot();
+        let workers = vec![
+            mk_worker("tEmpty1", "sublead-empty-1", LiveWorkerSlot::Sublead, None),
+            mk_worker("pid:111", "sublead-active", LiveWorkerSlot::Sublead, Some("tActive")),
+            mk_worker("tEmpty2", "sublead-empty-2", LiveWorkerSlot::Sublead, None),
+            mk_worker("pid:222", "coder-active", LiveWorkerSlot::Coder, Some("tActive")),
+            mk_worker("pid:333", "coder-free", LiveWorkerSlot::Coder, None),
+            mk_worker("tEmpty3", "sublead-empty-3", LiveWorkerSlot::Sublead, None),
+        ];
+        snap.roster.active_worker_count = workers.len();
+        snap.roster.workers = workers;
+        let order: Vec<&str> = snap.display_workers().iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(
+            order,
+            vec![
+                "sublead-active",
+                "coder-active",
+                "coder-free",
+                "sublead-empty-1",
+                "sublead-empty-2",
+                "sublead-empty-3"
+            ],
+            "non-empty clusters first, then unowned workers, then empty sublead headers"
+        );
     }
 
     #[test]
