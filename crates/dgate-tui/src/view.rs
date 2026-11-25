@@ -413,7 +413,7 @@ fn render_full_layout(
     render_neon_panel(cv, snap, ui, ctx, sim_time, l);
     render_decision_panel(cv, snap, ui, l);
     render_swarm_section(cv, snap, ui, clock, ctx, sim_time, l);
-    render_back_panel(cv, ui, ctx, l);
+    render_back_panel(cv, snap, ui, ctx, l);
 
     // 7. 하단 세션 기록 패널
     render_logs_panel(cv, snap, ui.focused == FocusPanel::Logs, l.logs);
@@ -1611,9 +1611,23 @@ fn render_decision_panel(cv: &mut Canvas, snap: &TuiSnapshot, ui: &UiState, l: &
             false,
             None,
         );
-        cv.draw_progress_bar(ix + label_w as i32 + 2, cy, bar_w, route.p, row_color, track_bg);
+        let bar_x = ix + label_w as i32 + 2;
+        cv.draw_progress_bar(bar_x, cy, bar_w, route.p, row_color, track_bg);
+        // θ_sharp(0.70) 임계선 마커 — sharp/split 경계를 프로그레스 바 위에 직접 표시
+        if bar_w >= 4 {
+            let thresh_off = ((SHARP_FLOOR * bar_w as f64).round() as usize).min(bar_w - 1);
+            cv.write_text(
+                bar_x + thresh_off as i32,
+                cy,
+                "│",
+                theme::FG_SOFT,
+                None,
+                true,
+                Some(1),
+            );
+        }
         cv.write_text(
-            ix + label_w as i32 + 2 + bar_w as i32 + 2,
+            bar_x + bar_w as i32 + 2,
             cy,
             &tag,
             row_color,
@@ -1630,8 +1644,9 @@ fn render_decision_panel(cv: &mut Canvas, snap: &TuiSnapshot, ui: &UiState, l: &
             ix,
             cy,
             &[
-                Seg::new("sharp → 코드에서 실행", theme::GREEN),
-                Seg::new("   split → Lead", theme::MUTED),
+                Seg::new("sharp(≥0.70) → 워커", theme::GREEN),
+                Seg::new("  │ θ_sharp  ", theme::FG_SOFT),
+                Seg::new("split → Lead", theme::MUTED),
             ],
             Some(iw),
         );
@@ -1713,10 +1728,13 @@ fn render_swarm_section(
         } else {
             theme::BG
         };
+        let is_dimmed = !worker_actively_running(w) || entry.cluster_size == Some(0);
         let base_border = if card_advisory_glow {
             theme::PURPLE
         } else if card_selected {
             theme::ORANGE
+        } else if is_dimmed {
+            lerp_color(theme::BLUE, theme::BORDER_LOG, 0.55)
         } else {
             theme::BLUE
         };
@@ -1900,8 +1918,14 @@ fn render_swarm_section(
     }
 }
 
-/// 다시 Lead 패널 — `renderBackPanel` 미러(팬인 결과를 Lead가 검토).
-fn render_back_panel(cv: &mut Canvas, _ui: &UiState, ctx: &RoleCtx, l: &FullLayout) {
+/// 다시 Lead 패널 — `renderBackPanel` 미러(팬인 결과를 Lead가 검토 + 실측 검증 요약).
+fn render_back_panel(
+    cv: &mut Canvas,
+    snap: &TuiSnapshot,
+    _ui: &UiState,
+    ctx: &RoleCtx,
+    l: &FullLayout,
+) {
     let r = l.back;
     let glowing = ctx.active_trigger == 2;
     let panel_bg = if glowing {
@@ -1911,8 +1935,10 @@ fn render_back_panel(cv: &mut Canvas, _ui: &UiState, ctx: &RoleCtx, l: &FullLayo
     };
     let border_color = if glowing {
         theme::PURPLE
-    } else {
+    } else if ctx.motion {
         theme::ORANGE
+    } else {
+        lerp_color(theme::ORANGE, theme::BORDER_LOG, 0.45)
     };
 
     cv.draw_box(
@@ -1937,15 +1963,39 @@ fn render_back_panel(cv: &mut Canvas, _ui: &UiState, ctx: &RoleCtx, l: &FullLayo
     let y1 = r.y as i32 + 1;
     cv.write_centered(ix, y1, iw, "다시 Lead · 리드", theme::ORANGE, Some(panel_bg), true);
     if y1 + 1 < (r.y + r.height - 1) as i32 {
-        cv.write_segments_centered(
-            ix,
-            y1 + 1,
-            iw,
-            &[
-                Seg::new("검토 + 확인 ", theme::FG).bg(panel_bg),
-                Seg::new("· review + verify", theme::MUTED).bg(panel_bg),
-            ],
-        );
+        let oc = snap.outcome_counts;
+        if oc.total() > 0 {
+            let mut segs = vec![
+                Seg::new(format!("PASS {}", oc.pass), theme::GREEN).bg(panel_bg).bold(),
+                Seg::new(" · ", theme::MUTED).bg(panel_bg),
+                Seg::new(format!("rework {}", oc.rework), theme::ORANGE).bg(panel_bg),
+                Seg::new(" · ", theme::MUTED).bg(panel_bg),
+                Seg::new(
+                    format!("fail {}", oc.fail),
+                    if oc.fail > 0 { theme::TRAFFIC_RED } else { theme::MUTED },
+                )
+                .bg(panel_bg),
+            ];
+            if oc.waiting_human > 0 {
+                segs.push(Seg::new(" · ", theme::MUTED).bg(panel_bg));
+                segs.push(
+                    Seg::new(format!("human {}", oc.waiting_human), theme::PURPLE)
+                        .bg(panel_bg)
+                        .bold(),
+                );
+            }
+            cv.write_segments_centered(ix, y1 + 1, iw, &segs);
+        } else {
+            cv.write_segments_centered(
+                ix,
+                y1 + 1,
+                iw,
+                &[
+                    Seg::new("검토 + 확인 ", theme::FG).bg(panel_bg),
+                    Seg::new("· review + verify", theme::MUTED).bg(panel_bg),
+                ],
+            );
+        }
     }
 }
 

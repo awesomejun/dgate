@@ -1879,7 +1879,12 @@ impl DashboardView {
             .and_then(|s| s.disagreement_rate)
             .map(|r| format!("{:.1}%", (1.0 - r) * 100.0))
             .unwrap_or_else(|| "—".to_string());
-        div()
+        let has_active_workers = snap
+            .workers
+            .iter()
+            .any(|w| !matches!(w.status.as_deref(), Some("done" | "idle" | "error")));
+        let oc = snap.outcome_counts;
+        let mut bar = div()
             .flex()
             .flex_row()
             .items_center()
@@ -1890,25 +1895,63 @@ impl DashboardView {
             .rounded_lg()
             .bg(BG_ELEVATED)
             .border_1()
-            .border_color(LEAD_ORANGE)
-            .child(div().flex_1())
+            .border_color(if has_active_workers {
+                LEAD_ORANGE
+            } else {
+                BORDER_LOG
+            })
             .child(
                 div()
                     .text_size(px(11.))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(LEAD_ORANGE)
+                    .text_color(if has_active_workers {
+                        LEAD_ORANGE
+                    } else {
+                        TEXT_SOFT
+                    })
                     .child("다시 Lead · 리드"),
-            )
-            .child(
-                div()
-                    .text_size(px(10.))
-                    .text_color(MUTED)
-                    .truncate()
-                    .child(format!(
-                        "평균 지연 {} · 절감 {} · 비용 {} · shadow 일치율 {}",
-                        delay, gain, cost, agreement
-                    )),
-            )
+            );
+        if oc.total() > 0 {
+            bar = bar
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(GATE_GREEN)
+                        .child(format!("PASS {}", oc.pass)),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(LEAD_ORANGE)
+                        .child(format!("rework {}", oc.rework)),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(if oc.fail > 0 { ROSE_DANGER } else { MUTED })
+                        .child(format!("fail {}", oc.fail)),
+                );
+            if oc.waiting_human > 0 {
+                bar = bar.child(
+                    div()
+                        .text_size(px(10.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(ADVISOR_PURPLE)
+                        .child(format!("human {}", oc.waiting_human)),
+                );
+            }
+        }
+        bar.child(div().flex_1()).child(
+            div()
+                .text_size(px(10.))
+                .text_color(MUTED)
+                .truncate()
+                .child(format!(
+                    "평균 지연 {} · 절감 {} · 비용 {} · shadow 일치율 {}",
+                    delay, gain, cost, agreement
+                )),
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -3410,9 +3453,10 @@ fn route_row(r: &RouteMetric) -> gpui::Div {
                 .truncate()
                 .child(r.name.clone()),
         )
-        // 확률 바 — 나머지 폭 전부(h 6px 고정)
+        // 확률 바 — 나머지 폭 전부(h 6px 고정) + θ_sharp(0.70) 임계선 마커
         .child(
             div()
+                .relative()
                 .flex()
                 .flex_1()
                 .min_w_0()
@@ -3426,6 +3470,15 @@ fn route_row(r: &RouteMetric) -> gpui::Div {
                         .w(relative(r.p.clamp(0.0, 1.0) as f32))
                         .rounded_full()
                         .bg(fill),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(relative(dgate_core::stats::SHARP_FLOOR as f32))
+                        .w(px(1.5))
+                        .bg(TEXT_SOFT),
                 ),
         )
         // 우측 통계 — 고정 폭 155px 우측 정렬 1행

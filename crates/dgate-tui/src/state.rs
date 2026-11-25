@@ -105,6 +105,8 @@ pub struct TuiSnapshot {
     pub open_forks: i64,
     pub total_events: i64,
     pub total_forks: i64,
+    /// 하단 복귀 카드용 실측 검증 요약(PASS/rework/fail/human).
+    pub outcome_counts: dgate_core::stats::ForkOutcomeCounts,
     /// `decision_events` 최근 로그 — 최신순, 리댁션 적용 1줄 요약.
     pub recent_log: Vec<String>,
     /// DEMO 스냅숏 여부 — 헤더 배너·실측 타이머 표시 분기용.
@@ -618,6 +620,15 @@ pub fn poll_once(
         Scope::All => None,
     };
     let recent_log = fetch_recent_events(db_path, project_id.as_deref(), RECENT_LOG_LIMIT);
+    let outcome_counts = open_db_safe(
+        db_path,
+        OpenDbOptions {
+            read_only: true,
+            busy_timeout_ms: Some(1500),
+        },
+    )
+    .map(|conn| dgate_core::stats::fetch_fork_outcome_counts(&conn, project_id.as_deref()))
+    .unwrap_or_default();
     TuiSnapshot {
         scope_label: scope.label(),
         updated_at_label: format_local_time_label(now_ms()),
@@ -627,6 +638,7 @@ pub fn poll_once(
         open_forks,
         total_events,
         total_forks,
+        outcome_counts,
         recent_log,
         demo: false,
     }
@@ -812,6 +824,7 @@ pub fn demo_snapshot() -> TuiSnapshot {
         open_forks: 2,
         total_events: 48,
         total_forks: 16,
+        outcome_counts: dgate_core::stats::ForkOutcomeCounts::default(),
         recent_log: vec![
             "10:42:18 · [wrap] delegate_swarm · w-explore-1 — ok".to_string(),
             "10:41:52 · [wrap] tool_select · cargo test — ok".to_string(),

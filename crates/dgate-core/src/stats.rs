@@ -592,6 +592,64 @@ pub fn compute_timing_stats(db: &Connection, opts: &TimingStatsOptions) -> Timin
     }
 }
 
+/// 하단 복귀 카드(`다시 Lead · 리드`)용 실측 검증 요약 카운터(읽기전용).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ForkOutcomeCounts {
+    /// 1차 PASS(`status='ok'` AND `rework_count=0`).
+    pub pass: i64,
+    /// 재작업 포함(`rework_count>0`).
+    pub rework: i64,
+    /// 실패·유기(`status IN ('fail','abandoned')`).
+    pub fail: i64,
+    /// 사람 대기/에스컬레이션(`status='waiting_human'`).
+    pub waiting_human: i64,
+}
+
+impl ForkOutcomeCounts {
+    pub fn total(&self) -> i64 {
+        self.pass + self.rework + self.fail + self.waiting_human
+    }
+}
+
+/// `forks` 테이블에서 검증 결과 집계를 읽는다(읽기전용 — 오류·테이블 부재 시 0 반환).
+pub fn fetch_fork_outcome_counts(conn: &Connection, project_id: Option<&str>) -> ForkOutcomeCounts {
+    let sql = if project_id.is_some() {
+        "SELECT \
+            COALESCE(SUM(CASE WHEN status = 'ok' AND COALESCE(rework_count, 0) = 0 THEN 1 ELSE 0 END), 0), \
+            COALESCE(SUM(CASE WHEN COALESCE(rework_count, 0) > 0 THEN 1 ELSE 0 END), 0), \
+            COALESCE(SUM(CASE WHEN status IN ('fail', 'abandoned') THEN 1 ELSE 0 END), 0), \
+            COALESCE(SUM(CASE WHEN status = 'waiting_human' THEN 1 ELSE 0 END), 0) \
+         FROM forks WHERE project_id = ?1"
+    } else {
+        "SELECT \
+            COALESCE(SUM(CASE WHEN status = 'ok' AND COALESCE(rework_count, 0) = 0 THEN 1 ELSE 0 END), 0), \
+            COALESCE(SUM(CASE WHEN COALESCE(rework_count, 0) > 0 THEN 1 ELSE 0 END), 0), \
+            COALESCE(SUM(CASE WHEN status IN ('fail', 'abandoned') THEN 1 ELSE 0 END), 0), \
+            COALESCE(SUM(CASE WHEN status = 'waiting_human' THEN 1 ELSE 0 END), 0) \
+         FROM forks"
+    };
+    let res = if let Some(pid) = project_id {
+        conn.query_row(sql, [pid], |r| {
+            Ok(ForkOutcomeCounts {
+                pass: r.get(0)?,
+                rework: r.get(1)?,
+                fail: r.get(2)?,
+                waiting_human: r.get(3)?,
+            })
+        })
+    } else {
+        conn.query_row(sql, [], |r| {
+            Ok(ForkOutcomeCounts {
+                pass: r.get(0)?,
+                rework: r.get(1)?,
+                fail: r.get(2)?,
+                waiting_human: r.get(3)?,
+            })
+        })
+    };
+    res.unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

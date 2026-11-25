@@ -313,6 +313,8 @@ pub struct DashboardSnapshot {
     pub cost_summary: Option<CostStatsResult>,
     pub timing_summary: Option<TimingStatsResult>,
     pub shadow_summary: Option<DecisionApiShadowSummary>,
+    /// 하단 복귀 카드용 실측 검증 요약(PASS/rework/fail/human).
+    pub outcome_counts: dgate_core::stats::ForkOutcomeCounts,
     /// 레포 탭별 번들 — 키는 repo_tag.
     pub repo_stats: BTreeMap<String, RepoStatsBundle>,
     /// 세션 기록 패널에 올릴 최신 결정 이벤트(읽기전용 조회 + 리댁션 적용).
@@ -1659,6 +1661,10 @@ pub fn poll_once(cfg: &PollerConfig, snapshotter: &mut LiveSyncSnapshotter) -> D
             });
         }
     }
+    let outcome_counts = conn
+        .as_ref()
+        .map(|c| dgate_core::stats::fetch_fork_outcome_counts(c, None))
+        .unwrap_or_default();
     if let Some(c) = conn.as_ref() {
         recent_log.extend(fetch_recent_log(c, RECENT_LOG_LIMIT));
     }
@@ -1678,6 +1684,7 @@ pub fn poll_once(cfg: &PollerConfig, snapshotter: &mut LiveSyncSnapshotter) -> D
         cost_summary: global_cost,
         timing_summary: global_timing,
         shadow_summary: global_shadow,
+        outcome_counts,
         repo_stats,
         recent_log,
         parent_map,
@@ -1913,6 +1920,12 @@ pub fn demo_snapshot() -> DashboardSnapshot {
         cost_summary: Some(cost),
         timing_summary: Some(timing),
         shadow_summary: Some(shadow),
+        outcome_counts: dgate_core::stats::ForkOutcomeCounts {
+            pass: 12,
+            rework: 2,
+            fail: 1,
+            waiting_human: 0,
+        },
         recent_log,
         parent_map: HashMap::from([
             ("demo-w-explore-1".to_string(), "demo-w-lead-1".to_string()),
@@ -2200,6 +2213,7 @@ mod tests {
             cost_summary: None,
             timing_summary: None,
             shadow_summary: None,
+            outcome_counts: dgate_core::stats::ForkOutcomeCounts::default(),
             repo_stats,
             recent_log: vec![],
             parent_map: HashMap::new(),

@@ -707,12 +707,26 @@ pub fn format_live_telemetry(
         parts.push(c.to_string());
     }
     if let Some(m_raw) = model.map(str::trim).filter(|s| !s.is_empty()) {
-        let compact = match m_raw.rfind('/') {
+        let after_slash = match m_raw.rfind('/') {
             Some(idx) => {
                 let tail = m_raw[idx + 1..].trim();
                 if tail.is_empty() { m_raw } else { tail }
             }
             None => m_raw,
+        };
+        // 중복 벤더 접두 정리 (예: `deepseek-deepseek-v4.1-flash` → `deepseek-v4.1-flash`)
+        let compact = if let Some((first, rest)) = after_slash.split_once('-') {
+            if !first.is_empty()
+                && rest.len() > first.len() + 1
+                && rest[..first.len()].eq_ignore_ascii_case(first)
+                && rest.as_bytes()[first.len()] == b'-'
+            {
+                rest
+            } else {
+                after_slash
+            }
+        } else {
+            after_slash
         };
         if !compact.eq_ignore_ascii_case(c) {
             parts.push(compact.to_string());
