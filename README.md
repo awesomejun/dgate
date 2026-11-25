@@ -242,6 +242,7 @@ flowchart LR
 
 - **`dg pipeline init|step|status|run`** — 상주 sublead LLM의 기계적 상태 전이 토큰 낭비(~70%)를 없애는 **0토큰 결정적 상태머신**([docs/sublead-pipeline-design.md](docs/sublead-pipeline-design.md)). `.herdr/pipelines/<run_id>.json` 기반으로 `coder → verifier(이종 모델 강제) → rework(backprop + 재스폰) → advisor-g3 → READY_PR`까지 자동 구동하고, 예산 소진·`verdict=human`·프로토콜 위반 시에만 `exit 3`으로 단발 에스컬레이션을 트리거합니다(`--dry-run` 리허설, macOS/Linux + Windows `cmd /C` 네이티브 지원).
 - **`dg suggest-sublead`** — `decision.db` 3축 신호(리드 부하·영역 분리·작업 범위) 또는 착수 전 `--scopes <p1,p2,...>`로 비겹침 병렬 그룹 수와 sublead 분리 여부를 LLM 호출 0회로 판정합니다([docs/sublead-design.md](docs/sublead-design.md)). 비겹침 독립 태스크가 2개 이상이면 기본값으로 격리 worktree 병렬 실행을 권장합니다.
+- **`dg suggest-session`** — 코더 세션의 **에페머럴(1작업 1세션) vs Warm 재사용(프롬프트 캐시 활용)**을 LLM 호출 0회로 판정합니다. `verifier`/`advisor`는 항상 에페머럴, 투입 전 3초 필터(`door=one-way`·파일 ≥6·도메인 불일치·대기 <3건 → 에페머럴), 실행 중 자동 리셋선(연속 실패 2회·컴팩션 발생·5작업/35턴·DB 1차 통과율 <70%)을 기계적으로 적용합니다.
 - **`dg merge-train`** — strict 브랜치 보호 환경에서 `READY_PR`들을 직렬 머지하며 CI 재실행·sublead 머지 금지 가드를 함께 적용합니다.
 
 ### 디스패처 게이트 — `--brief-file` · `--after <fork_id>`
@@ -282,6 +283,7 @@ dg <command> [flags]
 | `pipeline` | `init\|step\|status\|run [--dry-run]` — 0토큰 결정적 sublead 상태머신(`coder→verifier→rework/g3→READY_PR`, 에스컬레이션 `exit 3`) |
 | `merge-train` | 직렬 머지 트레인 — CI 재실행 확인 및 sublead 머지 차단 가드 |
 | `suggest-sublead` | `--project <dir>` 또는 `--scopes <p1,p2,...>` — 3축 신호 기반 sublead 분리·병렬 배치 추천 (LLM 0호출) |
+| `suggest-session` | `--role` · `--door` · `--files` · `--same-domain` · `--queued` · `--compacted` — 하이브리드 세션 수명 정책(`ephemeral` vs `warm_reuse` + 리셋 판정, LLM 0호출) |
 
 </details>
 

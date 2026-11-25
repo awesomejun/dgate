@@ -15,6 +15,7 @@ pub mod pipeline;
 pub mod redact;
 pub mod report;
 pub mod roster;
+pub mod session_policy;
 pub mod setup;
 pub mod stats;
 pub mod suggest_sublead;

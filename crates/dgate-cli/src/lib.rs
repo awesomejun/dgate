@@ -23,11 +23,11 @@ use args::ParsedArgs;
 use util::{eprint_line, CmdResult, DgError};
 
 /// 인식 가능한 명령 15종 + v2 신규 명령.
-pub const COMMANDS: [&str; 24] = [
+pub const COMMANDS: [&str; 25] = [
     "route", "gate", "close", "touch", "record", "backprop", "attempt", "retro",
     "settle-orphans", "wrap", "compact", "stats", "checkpoint", "worktree", "report",
     "hook", "setup", "dispatch", "dispatch-mode", "send", "reap", "suggest-sublead",
-    "pipeline", "merge-train",
+    "suggest-session", "pipeline", "merge-train",
 ];
 
 const HELP: &str = "dg — decision gate CLI (plan-r2.1 §4.7, v2 native Rust)
@@ -58,6 +58,7 @@ const HELP: &str = "dg — decision gate CLI (plan-r2.1 §4.7, v2 native Rust)
   dg send <addr> <message…> [--attempts N]   (hc send + 전달 확인·재전송, 미확인 exit 1)
   dg reap [--minutes 30] [--role <role>] [--owner <addr>] [--dry-run]   (종료 터미널 유휴 창 경과 후 자동 정리)
   dg suggest-sublead [--project <dir>] [--db <path>] [--active-workers <n>] [--max-subleads <2..4>] [--scopes <p1,p2,...>] [--json]   (3축 DB 신호 기반 sublead 분리 제안; --scopes 지정 시 DB 없이 사전 분해 판정)
+  dg suggest-session [--role coder|verifier|advisor] [--door one-way|two-way] [--files <n>] [--same-domain] [--queued <n>] [--session-tasks <n>] [--session-turns <n>] [--compacted] [--consecutive-errors <n>] [--project <dir>] [--db <path>] [--json]   (하이브리드 세션 수명 정책 판정: ephemeral vs warm_reuse + 리셋 판정, LLM 0호출)
   dg pipeline init --fork <id> --brief <path> --branch <name> [--worktree <dir>] [--scope <glob>] [--max-reworks 2] [--coder-model <m>] [--verifier-model <m>] [--state-dir <dir>] [--json]   (결정적 파이프라인 상태 파일 생성)
   dg pipeline step --fork <id> --event <coder-ok|coder-fail|verdict|g3-pass|g3-fail> [--head <sha>] [--verdict-file <path>] [--pr <num>] [--reason <text>] [--stalled] [--state-dir <dir>] [--json]   (상태 전이 → 다음 결정적 액션; 에스컬레이션 exit 3)
   dg pipeline status --fork <id> [--state-dir <dir>] [--json]   (위상·시도·전이 이력 조회, 읽기 전용)
@@ -142,6 +143,7 @@ where
         "send" => commands::send::cmd_send(&parsed, json),
         "reap" => commands::reap::cmd_reap(&parsed, json),
         "suggest-sublead" => commands::suggest_sublead::cmd_suggest_sublead(&parsed, json),
+        "suggest-session" => commands::suggest_session::cmd_suggest_session(&parsed, json),
         "pipeline" => commands::pipeline::cmd_pipeline(sub.as_deref(), &parsed, json),
         "merge-train" => commands::merge_train::cmd_merge_train(&parsed, json),
         _ => unreachable!("command list checked above"),

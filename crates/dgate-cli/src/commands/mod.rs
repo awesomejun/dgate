@@ -19,6 +19,7 @@ pub mod send;
 pub mod settle_orphans;
 pub mod setup;
 pub mod stats;
+pub mod suggest_session;
 pub mod suggest_sublead;
 pub mod touch;
 pub mod wrap;
