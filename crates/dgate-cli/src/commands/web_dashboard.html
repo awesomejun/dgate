@@ -999,18 +999,16 @@
       r: rectOf(el),
       ratio: arr.length <= 1 ? 0.5 : i / (arr.length - 1)
     })).filter(x => x.r);
-    const workerLabelRect = rectOf(document.querySelector('.workers-box-label'));
     workerCards.forEach((w, i) => {
-      const spread = (i - (workerCards.length - 1) / 2) * 12;
+      const spread = (i - (workerCards.length - 1) / 2) * 14;
       const sx = dec.cx + spread;
       const sy = dec.b + 4;
       const ex = w.r.cx;
       const ey = w.r.t - 4;
-      const landY = Math.max(sy + 20, ey - 12);
-      const fanY = Math.min(landY - 12, Math.max(sy + 22, (workerLabelRect ? workerLabelRect.b : wbox.t) + 8));
-      const midY = (fanY + landY) / 2;
+      const landY = Math.max(sy + 16, ey - 10);
+      const midY = (sy + landY) / 2;
       addWire({
-        d: `M ${sx} ${sy} L ${sx} ${fanY} C ${sx} ${midY}, ${ex} ${midY}, ${ex} ${landY} L ${ex} ${ey}`,
+        d: `M ${sx} ${sy} C ${sx} ${midY}, ${ex} ${midY}, ${ex} ${landY} L ${ex} ${ey}`,
         color: C.cyan, colorName: 'cyan', active: w.active
       });
     });
