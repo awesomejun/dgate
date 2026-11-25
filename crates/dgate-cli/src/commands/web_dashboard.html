@@ -21,6 +21,9 @@
     --cyan: #38bdf8;
     --violet: #c084fc;
     --rose: #fb7185;
+    --wire-casing: #090c12;
+    --wire-label-bg: #0e131f;
+    --wire-label-text: #a9bad4;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; height: 100%; }
@@ -152,8 +155,8 @@
     position: absolute; inset: 0; z-index: 1;
     width: 100%; height: 100%; overflow: visible; pointer-events: none;
   }
-  .wire-casing {
-    fill: none; stroke: #090c12; stroke-width: 6; stroke-opacity: .88;
+  .wire-casing, .sv-casing {
+    fill: none; stroke: var(--wire-casing); stroke-width: 6; stroke-opacity: .88;
     stroke-linecap: round; stroke-linejoin: round;
   }
   .wire-path { fill: none; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; opacity: .48; }
@@ -174,9 +177,9 @@
     fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
     filter: drop-shadow(0 0 3px currentColor); pointer-events: none;
   }
-  .wire-junction { stroke: #090c12; stroke-width: 1.4; }
-  .wire-label-bg { fill: #0e131f; stroke-width: 1; }
-  .wire-label-txt { fill: #a9bad4; font-size: 10px; font-weight: 700; text-anchor: middle; dominant-baseline: middle; letter-spacing: .1px; }
+  .wire-junction, .sv-route-port { stroke: var(--wire-casing); stroke-width: 1.4; }
+  .wire-label-bg { fill: var(--wire-label-bg); stroke-width: 1; }
+  .wire-label-txt { fill: var(--wire-label-text); font-size: 10px; font-weight: 700; text-anchor: middle; dominant-baseline: middle; letter-spacing: .1px; }
   .paused .wire-flow-packet-body, .paused .wire-flow-packet-head { animation-play-state: paused; opacity: .18; }
   .paused .wire-orb { opacity: .20; }
   @keyframes packetBodyDash { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -41; } }
@@ -402,6 +405,270 @@
   }
   .empty-detail { color: var(--muted); text-align: center; padding: 22px 8px; font-size: 11.5px; line-height: 1.5; }
 
+
+  /* View mode segmented control */
+  .top-center { display: flex; align-items: center; justify-content: center; gap: 10px; min-width: 0; overflow: hidden; }
+  .view-switcher {
+    display: inline-flex; align-items: center; gap: 2px; padding: 2px; flex: 0 0 auto;
+    border: 1px solid rgba(148, 163, 184, 0.22); border-radius: 999px;
+    background: rgba(13, 18, 29, 0.78);
+  }
+  .view-seg {
+    border: 0; border-radius: 999px; background: transparent; color: var(--soft);
+    padding: 4px 10px; font-size: 10.8px; font-weight: 850; line-height: 1.2; cursor: pointer; white-space: nowrap;
+    transition: color .14s, background .14s, box-shadow .14s;
+  }
+  .view-seg:hover { color: var(--text); background: rgba(148, 163, 184, 0.09); }
+  .view-seg.active { color: var(--cyan); background: rgba(56, 189, 248, 0.13); box-shadow: inset 0 0 0 1px rgba(56, 189, 248, 0.30); }
+
+  /* Light Factory Runtime theme — scoped so topology keeps its dark Obsidian palette. */
+  body.mode-factory {
+    --bg: #f8fafc;
+    --bg-panel: #ffffff;
+    --bg-card: #ffffff;
+    --bg-card-2: #f1f5f9;
+    --border: #cbd5e1;
+    --border-soft: rgba(100, 116, 139, 0.24);
+    --text: #0f172a;
+    --soft: #475569;
+    --muted: #64748b;
+    --teal: #10b981;
+    --cyan: #3b82f6;
+    --violet: #6366f1;
+    --rose: #ef4444;
+    --wire-casing: #f8fafc;
+    --wire-label-bg: #ffffff;
+    --wire-label-text: #475569;
+    background-color: #f8fafc;
+    background-image: radial-gradient(rgba(15, 23, 42, 0.06) 1px, transparent 1px);
+    background-size: 22px 22px;
+  }
+  body.mode-factory .topchrome { background: rgba(255,255,255,.94); border-bottom-color: #dbe3ed; }
+  body.mode-factory .view-switcher, body.mode-factory .wire-segmented { background: #f1f5f9; border-color: #d6e0eb; box-shadow: none; }
+  body.mode-factory .view-seg, body.mode-factory .wire-seg { color: #64748b; }
+  body.mode-factory .view-seg:hover, body.mode-factory .wire-seg:hover { color: #0f172a; background: rgba(255,255,255,.72); }
+  body.mode-factory .view-seg.active { color: #2563eb; background: #ffffff; box-shadow: inset 0 0 0 1px rgba(59,130,246,.30), 0 1px 3px rgba(15,23,42,.08); }
+  body.mode-factory .wire-seg.active { color: #2563eb; background: #ffffff; box-shadow: inset 0 0 0 1px rgba(59,130,246,.28), 0 1px 3px rgba(15,23,42,.07); }
+  body.mode-factory .scope-tab { background: #ffffff; border-color: #d5dee9; color: #64748b; }
+  body.mode-factory .scope-tab:hover { color: #0f172a; border-color: #aebdce; }
+  body.mode-factory .scope-tab.active { color: #2563eb; border-color: rgba(59,130,246,.46); background: #eff6ff; box-shadow: none; }
+  body.mode-factory .btn { background: #0f172a; border-color: #0f172a; color: #ffffff; border-radius: 999px; box-shadow: 0 4px 10px rgba(15,23,42,.10); }
+  body.mode-factory .btn:hover { color: #ffffff; border-color: #2563eb; background: #1e293b; }
+  body.mode-factory .btn.paused { color: #ffffff; border-color: #b45309; background: #b45309; box-shadow: none; }
+  body.mode-factory .status-bit, body.mode-factory .provider-pill { background: #ffffff; border-color: #d7e0ea; color: #64748b; box-shadow: 0 1px 2px rgba(15,23,42,.03); }
+  body.mode-factory .status-bit.live { color: #16a34a; border-color: rgba(22,163,74,.32); background: #f0fdf4; }
+  body.mode-factory .status-bit.warn { color: #b45309; border-color: rgba(245,158,11,.34); background: #fffbeb; }
+  body.mode-factory .status-bit.fail { color: #dc2626; border-color: rgba(239,68,68,.30); background: #fef2f2; }
+  body.mode-factory .provider-pill { color: #4f46e5; border-color: rgba(99,102,241,.30); background: #eef2ff; }
+  body.mode-factory .provider-pill.empty { color: #94a3b8; background: #fff; }
+  body.mode-factory .stage-wrap::before { background-image: radial-gradient(rgba(15,23,42,.065) 1px, transparent 1px); mask-image: none; }
+  body.mode-factory .stage-wrap::after { background: none; }
+  body.mode-factory .inspector { background: #ffffff; border-left-color: #dbe3ed; box-shadow: -14px 0 30px rgba(15,23,42,.045); }
+  body.mode-factory .insp-tabs { border-bottom-color: #e2e8f0; background: #f8fafc; }
+  body.mode-factory .insp-tab { background: #ffffff; border-color: #d8e0ea; color: #64748b; }
+  body.mode-factory .insp-tab.active { color: #2563eb; border-color: rgba(59,130,246,.38); background: #eff6ff; }
+  body.mode-factory .insp-statusline { border-bottom-color: #e2e8f0; color: #64748b; }
+  body.mode-factory .pulse-pill { background: #fff; }
+  body.mode-factory .node-chip { background: #ffffff; border-color: #d8e0ea; color: #64748b; }
+  body.mode-factory .node-chip:hover { color: #0f172a; border-color: #b6c3d2; }
+  body.mode-factory .node-chip.active { color: #2563eb; border-color: rgba(59,130,246,.42); background: #eff6ff; }
+  body.mode-factory .detail-card { background: #ffffff; border-color: #dbe3ed; box-shadow: 0 4px 14px rgba(15,23,42,.04); }
+  body.mode-factory .log-line { background: #f8fafc; border-color: #e2e8f0; color: #475569; }
+  body.mode-factory .bar-track { background: #e2e8f0; box-shadow: inset 0 0 0 1px rgba(15,23,42,.025); }
+  body.mode-factory .bar-thresh { background: #0f172a; box-shadow: none; }
+  body.mode-factory .wire-label-bg { filter: drop-shadow(0 1px 2px rgba(15,23,42,.10)); }
+  body.mode-factory .wire-flow-packet-body { stroke-width: 3.1; opacity: .28; }
+  body.mode-factory .wire-flow-packet-head { stroke-width: 2; opacity: .86; }
+
+  /* Topology/factory stage switching */
+  .factory-stage { display: none; }
+  body.mode-factory .stage { display: none; }
+  body.mode-factory .stage-wrap { justify-content: flex-start; }
+  body.mode-factory .factory-stage {
+    display: block; position: relative; z-index: 1; flex: 0 0 auto; margin-inline: auto;
+    width: min(1230px, calc(100% - 42px)); min-width: 1040px;
+    min-height: calc(100vh - 96px); padding: 22px 0 28px;
+  }
+  svg.factory-wires { position: absolute; inset: 0; z-index: 4; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+  .factory-stage > :not(svg) { position: relative; z-index: 2; }
+  .factory-title-row { display: flex; align-items: flex-end; justify-content: space-between; margin: 0 2px 12px; }
+  .factory-view-title { color: #0f172a; font-size: 19px; font-weight: 850; letter-spacing: -.25px; }
+  .factory-view-sub { margin-top: 3px; color: #64748b; font-size: 11.5px; }
+  .factory-grid {
+    position: relative; z-index: 2; display: grid;
+    grid-template-columns: 176px minmax(650px, 1fr) 172px;
+    gap: 28px; align-items: stretch; min-height: 640px;
+  }
+  .factory-io-col {
+    border: 1px solid #d7e0ea; border-radius: 16px; background: #f1f5f9;
+    padding: 15px 13px; display: flex; flex-direction: column; box-shadow: inset 0 1px 0 rgba(255,255,255,.68);
+  }
+  .io-head { color: #334155; font-size: 10px; font-weight: 850; letter-spacing: .92px; text-transform: uppercase; margin-bottom: 12px; display: flex; align-items: center; gap: 6px; }
+  .io-head::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #64748b; box-shadow: inset 0 0 0 2px rgba(255,255,255,.42); }
+  .io-stack { display: flex; flex-direction: column; gap: 13px; }
+  .output-stack { gap: 15px; }
+  .io-bottom { margin-top: auto; }
+  .factory-node {
+    position: relative; z-index: 2; cursor: pointer;
+    border: 1px solid #cbd5e1; border-radius: 11px; background: #ffffff;
+    box-shadow: 0 2px 6px rgba(15,23,42,.045);
+    transition: border-color .16s, box-shadow .16s, transform .16s, opacity .16s;
+  }
+  .factory-node:hover { border-color: #94a3b8; transform: translateY(-1px); box-shadow: 0 5px 14px rgba(15,23,42,.07); }
+  .factory-node.selected { box-shadow: 0 0 0 2px rgba(37,99,235,.72), 0 8px 20px rgba(37,99,235,.10); }
+  .factory-node.active-live { border-color: currentColor; box-shadow: 0 0 0 1px currentColor inset, 0 5px 16px rgba(15,23,42,.065); }
+  .io-card { min-height: 58px; padding: 10px 11px; color: #475569; }
+  .fn-title-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+  .fn-title { color: #0f172a; font-size: 12.2px; font-weight: 820; line-height: 1.2; }
+  .fn-sub { margin-top: 4px; color: #64748b; font-size: 10.2px; line-height: 1.35; overflow-wrap: anywhere; }
+  .fn-live { margin-top: 5px; color: #2563eb; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9.8px; line-height: 1.3; }
+  .mini-pill, .step-state {
+    flex: 0 0 auto; border: 1px solid #d7e0ea; border-radius: 999px; background: #f8fafc; color: #64748b;
+    padding: 2px 6px; font-size: 8.9px; font-weight: 820; white-space: nowrap;
+  }
+  .step-state.live, .mini-pill.live { color: #2563eb; border-color: rgba(59,130,246,.32); background: #eff6ff; }
+
+  .runtime-frame {
+    border: 2px solid #3b82f6; border-radius: 16px; background: #ffffff;
+    padding: 14px 15px 15px; display: flex; flex-direction: column; min-width: 0;
+    box-shadow: 0 8px 24px rgba(59,130,246,.055);
+  }
+  .runtime-head { display: flex; align-items: center; gap: 8px; color: #2563eb; font-size: 11px; font-weight: 850; letter-spacing: .46px; margin-bottom: 12px; }
+  .runtime-orbit { width: 14px; height: 14px; border: 2px solid #3b82f6; border-radius: 50%; position: relative; flex: 0 0 auto; }
+  .runtime-orbit::after { content: ""; position: absolute; width: 4px; height: 4px; border-radius: 50%; background: #ef4444; right: -2px; top: -2px; }
+  .runtime-grid {
+    flex: 1; min-height: 410px; display: grid;
+    grid-template-columns: 140px minmax(270px, .95fr) minmax(280px, 1.05fr);
+    gap: 14px; align-items: stretch;
+  }
+  .gate-rail { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  .gate-card { min-height: 82px; padding: 11px 11px; color: #2563eb; }
+  .contract-note {
+    margin-top: auto; color: #64748b; font-size: 9.5px; line-height: 1.46;
+    border-left: 2px solid #cbd5e1; padding-left: 8px;
+  }
+  .pipeline-box {
+    position: relative; border: 1.5px dashed #f59e0b; border-radius: 14px; background: #fffdf5;
+    padding: 25px 14px 13px; min-width: 0;
+  }
+  .dashed-label {
+    position: absolute; top: -10px; left: 12px; z-index: 3;
+    border-radius: 999px; padding: 3px 8px; font-size: 9.4px; font-weight: 850; letter-spacing: .16px; white-space: nowrap;
+    background: #fff; pointer-events: none;
+  }
+  .amber-label { color: #b45309; border: 1px solid rgba(245,158,11,.42); background: #fffbeb; }
+  .emerald-label { color: #047857; border: 1px solid rgba(16,185,129,.38); background: #ecfdf5; }
+  .pipeline-steps { height: 100%; display: flex; flex-direction: column; justify-content: space-between; gap: 9px; }
+  .step-card { min-height: 63px; padding: 10px 12px; color: #d97706; }
+  .step-card .fn-title { font-size: 12px; }
+  .runtime-resources { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+  .resource-card { min-height: 86px; padding: 10px 12px; color: #2563eb; }
+  .resource-pair { flex: 0 0 auto; height: 126px; display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(0, .92fr); gap: 9px; align-items: stretch; }
+  .agent-pod {
+    border: 1.5px dashed #6366f1; background: #f5f7ff; padding: 9px 9px; color: #4f46e5;
+    display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden;
+  }
+  .pod-pills { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+  .pod-pill {
+    max-width: 100%; border: 1px solid rgba(99,102,241,.28); border-radius: 999px; background: #ffffff;
+    color: #4f46e5; padding: 3px 6px; font-size: 9px; font-weight: 780; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .pod-pill.empty { color: #94a3b8; border-color: #dbe3ed; }
+  .pod-caption { margin-top: auto; padding-top: 8px; color: #64748b; font-size: 9.3px; }
+  .model-roster { padding: 9px 9px; color: #475569; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+  .roster-list { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; overflow: hidden; }
+  .roster-item { border-left: 2px solid #3b82f6; padding-left: 6px; color: #475569; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 8.9px; line-height: 1.28; overflow-wrap: anywhere; }
+  .roster-empty { color: #94a3b8; font-size: 9.4px; }
+  .os-box {
+    position: relative; margin-top: 14px; border: 1.5px dashed #10b981; border-radius: 14px; background: #f2fdf7;
+    min-height: 126px; padding: 25px 14px 10px;
+  }
+  .os-row { display: grid; grid-template-columns: minmax(150px, .82fr) minmax(190px, 1.08fr) minmax(150px, .9fr); gap: 14px; align-items: center; }
+  .os-card { min-height: 63px; padding: 10px 11px; color: #059669; }
+  .os-note { color: #475569; font-size: 10px; line-height: 1.48; }
+  .os-caption { margin-top: 8px; color: #059669; font-size: 9.4px; font-weight: 700; text-align: center; }
+  #f-node-human.waiting { border-color: #fb7185; background: #fff1f2; }
+  #f-node-human.clear, #f-node-human { border-color: #bbf7d0; background: #f0fdf4; }
+  #f-node-human.waiting .fn-title { color: #be123c; }
+  #f-node-human.clear .fn-title, #f-node-human .fn-title { color: #15803d; }
+
+  /* Inspector tab refresh */
+  .insp-tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; padding: 12px 13px 10px; }
+  .insp-tab { padding: 5px 4px; text-align: center; font-size: 10.2px; }
+  .insp-statusline {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 7px 13px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 9.8px;
+  }
+  .insp-statusline .pulse-pill { margin-left: 0; }
+  .insp-log-count { white-space: nowrap; }
+  .overview-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; margin-bottom: 12px; }
+  .outcome-tile { border: 1px solid var(--border); border-radius: 10px; padding: 9px 6px; text-align: center; background: rgba(255,255,255,.025); }
+  body.mode-factory .outcome-tile { background: #f8fafc; }
+  .outcome-num { font-size: 17px; font-weight: 850; line-height: 1; }
+  .outcome-label { margin-top: 4px; color: var(--muted); font-size: 9.3px; font-weight: 760; }
+  .runtime-status { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin-top: 10px; }
+  .runtime-status-pill { border: 1px solid var(--border); border-radius: 9px; padding: 8px; color: var(--soft); font-size: 10px; }
+  .live-list { display: flex; flex-direction: column; gap: 7px; }
+  .live-row {
+    width: 100%; text-align: left; border: 1px solid var(--border); border-radius: 10px;
+    background: rgba(255,255,255,.025); color: var(--soft); padding: 9px; cursor: pointer;
+  }
+  body.mode-factory .live-row { background: #ffffff; }
+  .live-row.active { border-color: rgba(59,130,246,.44); box-shadow: 0 0 0 1px rgba(59,130,246,.12); }
+  .live-head { display: flex; justify-content: space-between; gap: 7px; color: var(--text); font-size: 11px; font-weight: 800; }
+  .live-meta { margin-top: 4px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9.7px; overflow-wrap: anywhere; }
+  .live-activity { margin-top: 4px; font-size: 10.2px; line-height: 1.35; }
+  .studio-block { border: 1px solid var(--border); border-radius: 11px; padding: 11px; margin-bottom: 10px; }
+  body.mode-factory .studio-block { background: #f8fafc; }
+  .studio-title { color: var(--soft); font-size: 10.4px; font-weight: 850; margin-bottom: 8px; }
+  .studio-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .studio-note { margin-top: 8px; color: var(--muted); font-size: 9.7px; line-height: 1.42; }
+  .toggle-pill {
+    border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--soft);
+    padding: 4px 9px; font-size: 10px; font-weight: 800; cursor: pointer;
+  }
+  .toggle-pill.active { color: var(--cyan); border-color: rgba(56,189,248,.42); background: rgba(56,189,248,.10); }
+  body.mode-factory .toggle-pill.active { color: #2563eb; border-color: rgba(59,130,246,.38); background: #eff6ff; }
+
+
+  .local-panel { display: flex; flex-direction: column; gap: 12px; }
+  .local-group-label { margin-top: 2px; color: var(--soft); font-size: 10px; font-weight: 850; letter-spacing: .7px; text-transform: uppercase; }
+  .local-metrics { margin-bottom: 2px; }
+  .local-error { border: 1px solid rgba(239,68,68,.32); background: rgba(239,68,68,.08); color: var(--rose); border-radius: 10px; padding: 8px 10px; font-size: 11px; line-height: 1.35; }
+  .usage-stack { display: flex; flex-direction: column; gap: 9px; }
+  .usage-row { display: grid; grid-template-columns: 44px 1fr 74px; align-items: center; gap: 8px; font-size: 11px; }
+  .usage-label { color: var(--soft); font-weight: 800; }
+  .usage-value { color: var(--muted); font-family: var(--mono); font-size: 10px; text-align: right; }
+  .repo-connect-row { display: grid; grid-template-columns: 1fr auto; gap: 7px; margin-top: 8px; }
+  .repo-input { width: 100%; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); color: var(--text); padding: 8px 10px; font: 11px var(--mono); outline: none; }
+  .repo-input:focus { border-color: var(--cyan); box-shadow: 0 0 0 2px rgba(34,211,238,.12); }
+  .repo-connect-btn { border: 0; border-radius: 9px; background: var(--blue); color: white; padding: 8px 11px; font-size: 11px; font-weight: 800; cursor: pointer; }
+  body.mode-factory .repo-input { background: #ffffff; color: #0f172a; border-color: #cbd5e1; }
+  .repo-card { border: 1px solid rgba(34,197,94,.28); background: rgba(34,197,94,.08); border-radius: 10px; padding: 9px 10px; margin-top: 8px; font-size: 11px; line-height: 1.45; }
+  .repo-card b { color: var(--teal); }
+  .repo-anchor { color: var(--muted); font-family: var(--mono); font-size: 10px; margin-top: 4px; word-break: break-all; }
+  .trigger-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+  .trigger-card { border: 1px solid var(--line); border-radius: 10px; background: rgba(148,163,184,.06); color: var(--text); padding: 8px; text-align: left; cursor: pointer; transition: border-color .18s ease, transform .18s ease, box-shadow .18s ease; }
+  .trigger-card:hover { border-color: var(--cyan); transform: translateY(-1px); }
+  .trigger-card b { display: block; font-size: 11px; margin-bottom: 3px; }
+  .trigger-card span { color: var(--muted); font-size: 10px; line-height: 1.25; }
+  .local-list { display: flex; flex-direction: column; gap: 6px; max-height: 180px; overflow: auto; padding-right: 2px; }
+  .local-link { display: block; border: 1px solid var(--line); border-radius: 9px; padding: 7px 8px; color: var(--text); text-decoration: none; background: rgba(148,163,184,.045); }
+  .local-link:hover { border-color: var(--cyan); }
+  .local-link-title { display: block; font-size: 11px; font-weight: 750; line-height: 1.25; }
+  .local-link-meta { display: block; color: var(--muted); font-family: var(--mono); font-size: 9.5px; margin-top: 3px; }
+  .local-row-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .phase-badge { flex: 0 0 auto; border: 1px solid currentColor; border-radius: 999px; padding: 2px 6px; font-family: var(--mono); font-size: 8.8px; font-weight: 850; text-transform: uppercase; }
+  .mapping-table { width: 100%; border-collapse: collapse; font-size: 10.5px; overflow: hidden; border-radius: 9px; }
+  .mapping-table th, .mapping-table td { border-bottom: 1px solid var(--line); padding: 6px 5px; text-align: left; vertical-align: top; }
+  .mapping-table th { color: var(--soft); font-size: 9.5px; letter-spacing: .5px; text-transform: uppercase; }
+  .mapping-table td:first-child { color: var(--cyan); font-family: var(--mono); white-space: nowrap; }
+  .mapping-table tr:last-child td { border-bottom: 0; }
+  .factory-node.trigger-pulse { box-shadow: 0 0 0 3px rgba(34,211,238,.28), 0 0 24px rgba(34,211,238,.34); border-color: var(--cyan) !important; }
+  body.mode-factory .trigger-card, body.mode-factory .local-link { background: #ffffff; border-color: #dbe4ef; }
+  body.mode-factory .local-error { background: #fef2f2; color: #b91c1c; }
+  body.mode-factory .repo-card { background: #f0fdf4; border-color: #bbf7d0; }
+
   @media (max-width: 1220px) {
     .main { grid-template-columns: minmax(0, 1fr) 326px; }
     .stage { width: min(1120px, calc(100% - 34px)); column-gap: 50px; grid-template-columns: 232px minmax(0, 1fr); }
@@ -412,12 +679,19 @@
     .wire-control-label { display: none; }
     .wire-seg { padding: 3px 6px; font-size: 9.7px; }
   }
+  @media (max-width: 1220px) {
+    body.mode-factory .factory-stage { width: min(1120px, calc(100% - 28px)); }
+    .factory-grid { grid-template-columns: 168px minmax(610px, 1fr) 164px; gap: 24px; }
+    .runtime-grid { grid-template-columns: 136px minmax(250px, .95fr) minmax(255px, 1.05fr); gap: 12px; }
+  }
   @media (max-width: 940px) {
     .main { grid-template-columns: 1fr; }
     .subline { grid-template-columns: 1fr; height: auto; row-gap: 6px; padding-bottom: 10px; }
     .status-strip, .wire-switchers, .provider-pills { justify-self: center; }
     .inspector { display: none; }
     .stage { grid-template-columns: 1fr; row-gap: 26px; }
+    body.mode-factory .factory-stage { min-width: 980px; width: 980px; }
+    .top-center { flex-wrap: wrap; }
     .advisor-col { min-height: 420px; }
     .workers-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
@@ -427,12 +701,18 @@
   }
 </style>
 </head>
-<body>
+<body class="mode-topology">
 <div class="app" id="app">
   <header class="topchrome">
     <div class="topline">
-      <div class="brand"><span class="dot" id="sseDot"></span><span class="brand-name">dgate</span><span class="brand-sub">Obsidian Signal</span></div>
-      <nav class="scope-tabs" id="repoFilters" aria-label="scope tabs"><button class="scope-tab active" type="button">전체</button></nav>
+      <div class="brand"><span class="dot" id="sseDot"></span><span class="brand-name" id="brandName">dgate</span><span class="brand-sub" id="brandSub">Obsidian Signal</span></div>
+      <div class="top-center">
+        <div class="view-switcher" role="group" aria-label="뷰 모드">
+          <button class="view-seg active" type="button" data-view="topology">토폴로지</button>
+          <button class="view-seg" type="button" data-view="factory">팩토리</button>
+        </div>
+        <nav class="scope-tabs" id="repoFilters" aria-label="scope tabs"><button class="scope-tab active" type="button">전체</button></nav>
+      </div>
       <div class="top-actions"><button class="btn" id="pauseBtn" type="button">⏸ 흐름 일시정지</button></div>
     </div>
     <div class="subline">
@@ -550,14 +830,165 @@
           </div>
         </section>
       </div>
+
+      <div class="factory-stage" id="factoryStage" aria-label="Factory Runtime architecture diagram">
+        <svg class="wires factory-wires" id="factoryWiresSvg" aria-hidden="true"></svg>
+        <div class="factory-title-row">
+          <div>
+            <div class="factory-view-title">dgate Factory</div>
+            <div class="factory-view-sub">Local Triggers → Live Runtime → Local Results</div>
+          </div>
+        </div>
+        <div class="factory-grid">
+          <aside class="factory-io-col factory-inputs" id="f-inputs" aria-label="Local triggers">
+          <div class="io-head">LOCAL TRIGGERS</div>
+          <div class="io-stack">
+            <div class="factory-node io-card" data-node="f-dispatch" id="f-node-dispatch">
+              <div class="fn-title">Dispatch</div>
+              <div class="fn-sub">(fork 발급)</div>
+              <div class="fn-live" id="fDispatchLive">fork 0</div>
+            </div>
+            <div class="factory-node io-card" data-node="f-brief" id="f-node-brief">
+              <div class="fn-title">Brief Gate</div>
+              <div class="fn-sub">(Standards/Spec)</div>
+              <div class="fn-live" id="fBriefLive">gate idle</div>
+            </div>
+            <div class="factory-node io-card" data-node="f-rework" id="f-node-rework">
+              <div class="fn-title">Rework / Esc</div>
+              <div class="fn-sub">(exit 3)</div>
+              <div class="fn-live" id="fReworkLive">rework 0</div>
+            </div>
+          </div>
+          <div class="factory-node io-card io-bottom" data-node="f-osherdr" id="f-node-osherdr">
+            <div class="fn-title">OS / Herdr</div>
+            <div class="fn-sub">(ps 1.5s · hc · herdr)</div>
+            <div class="fn-live" id="fOsHerdrLive">mapped 0 / host 0</div>
+          </div>
+        </aside>
+
+          <section class="runtime-frame" id="f-runtime" data-node="f-runtime">
+            <div class="runtime-head">
+              <span class="runtime-orbit"></span>
+              <span>DGATE / LIVE RUNTIME</span>
+            </div>
+            <div class="runtime-grid">
+              <div class="gate-rail">
+                <div class="factory-node gate-card" id="f-node-decision" data-node="f-decision">
+                  <div class="fn-title-row"><div class="fn-title">Decision Gate</div><span class="mini-pill" id="fDecisionBadge">forks 0</span></div>
+                  <div class="fn-sub">EWMA Beta · θ_sharp 0.70</div>
+                  <div class="fn-live" id="fDecisionLive">sharp 0 · split 0</div>
+                </div>
+                <div class="factory-node gate-card" id="f-node-session" data-node="f-session">
+                  <div class="fn-title-row"><div class="fn-title">Session Policy</div><span class="mini-pill" id="fSessionMode">ephemeral</span></div>
+                  <div class="fn-sub">dg suggest-session</div>
+                  <div class="fn-live" id="fSessionLive">warm_reuse 대기</div>
+                </div>
+                <div class="contract-note">읽기 전용 가드: Edit·Write 차단<br/>strict dispatch · 시크릿 자동 마스킹</div>
+              </div>
+
+              <div class="pipeline-box" id="f-pipeline" data-node="f-pipeline">
+                <div class="dashed-label amber-label">PIPELINE RUN · 0-TOKEN STATE MACHINE</div>
+                <div class="pipeline-steps">
+                  <div class="factory-node step-card" id="f-node-step-dispatch" data-node="f-step-dispatch">
+                    <div class="fn-title-row"><div class="fn-title">Dispatch &amp; Worktree</div><span class="step-state" id="fStepDispatchState">idle</span></div>
+                    <div class="fn-sub" id="fStepDispatchMeta">fork 발급 · 격리 브랜치</div>
+                  </div>
+                  <div class="factory-node step-card" id="f-node-step-coder" data-node="f-step-coder">
+                    <div class="fn-title-row"><div class="fn-title">Coder · Implement</div><span class="step-state" id="fCoderCount">0 active</span></div>
+                    <div class="fn-sub" id="fCoderMeta">primary model 대기</div>
+                  </div>
+                  <div class="factory-node step-card" id="f-node-step-verifier" data-node="f-step-verifier">
+                    <div class="fn-title-row"><div class="fn-title">Verifier · Cross-Check</div><span class="step-state" id="fVerifierCount">0 active</span></div>
+                    <div class="fn-sub" id="fVerifierMeta">model 대기</div>
+                  </div>
+                  <div class="factory-node step-card" id="f-node-step-advisor" data-node="f-step-advisor">
+                    <div class="fn-title-row"><div class="fn-title">Advisor · G3 Gate</div><span class="step-state" id="fAdvisorCount">0 active</span></div>
+                    <div class="fn-sub" id="fAdvisorMeta">0 advisor · 게이트 대기</div>
+                  </div>
+                  <div class="factory-node step-card" id="f-node-step-backprop" data-node="f-step-backprop">
+                    <div class="fn-title-row"><div class="fn-title">Backprop &amp; Summary</div><span class="step-state" id="fBackpropState">PASS 0</span></div>
+                    <div class="fn-sub" id="fBackpropMeta">PASS 0 · rework 0 · fail 0</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="runtime-resources">
+                <div class="factory-node resource-card skills-card" id="f-node-skills" data-node="f-skills">
+                  <div class="fn-title-row"><div class="fn-title">Skills &amp; Gates</div><span class="mini-pill" id="fSkillsCount">0/5</span></div>
+                  <div class="fn-sub">dg hook · dg wrap · dg checkpoint · dg backprop</div>
+                  <div class="fn-live" id="fSkillsLive">gate probe idle</div>
+                </div>
+                <div class="resource-pair">
+                  <div class="factory-node agent-pod" id="f-node-agentpod" data-node="f-agentpod">
+                    <div class="fn-title-row"><div class="fn-title">Agent Pod</div><span class="mini-pill" id="fAgentCount">0</span></div>
+                    <div class="pod-pills" id="fAgentPodPills"><span class="pod-pill empty">worker 대기</span></div>
+                    <div class="pod-caption">read-only roles isolated</div>
+                  </div>
+                  <div class="factory-node model-roster" id="f-node-roster" data-node="f-roster">
+                    <div class="fn-title-row"><div class="fn-title">Model</div><span class="mini-pill" id="fRosterCount">0</span></div>
+                    <div class="roster-list" id="fModelRoster"><div class="roster-empty">cli · model · effort</div></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="os-box" id="f-osbox" data-node="f-osbox">
+              <div class="dashed-label emerald-label">OS SCANNER → LIVE MAPPER → DECISION GATE LOOP</div>
+              <div class="os-row">
+                <div class="factory-node os-card" id="f-node-scanner" data-node="f-scanner">
+                  <div class="fn-title">OS Scanner</div>
+                  <div class="fn-sub" id="fScannerMeta">ps 1.5s poll · SSE · mapped 0 / host 0</div>
+                </div>
+                <div class="factory-node os-card" id="f-node-mapper" data-node="f-mapper">
+                  <div class="fn-title">Live Mapper</div>
+                  <div class="fn-sub" id="fMapperMeta">hc ls · dg wrap · herdr · os:&lt;pid&gt;</div>
+                </div>
+                <div class="factory-node os-card" id="f-node-osdecision" data-node="f-osdecision">
+                  <div class="fn-title">Decision Gate</div>
+                  <div class="fn-sub" id="fOsDecisionMeta">loop feedback · sharp/split 재계산</div>
+                </div>
+              </div>
+              <div class="os-caption">종료된 워커는 자동 정리되고, 감지 PID는 Live Mapper를 거쳐 Decision Gate 피드백 루프로 연결됩니다.</div>
+            </div>
+          </section>
+
+          <aside class="factory-io-col factory-outputs" id="f-outputs" aria-label="Local results">
+          <div class="io-head">LOCAL RESULTS</div>
+          <div class="io-stack">
+            <div class="factory-node io-card output-card" data-node="f-readypr" id="f-node-readypr">
+              <div class="fn-title">Worktree Commit</div>
+              <div class="fn-sub">(로컬 커밋)</div>
+              <div class="fn-live" id="fCommitLive">commit —</div>
+            </div>
+            <div class="factory-node io-card output-card" data-node="f-human" id="f-node-human">
+              <div class="fn-title">Verdict PASS</div>
+              <div class="fn-sub">(교차검증 통과)</div>
+              <div class="fn-live" id="fVerdictLive">PASS 0</div>
+            </div>
+            <div class="factory-node io-card output-card" data-node="f-merge" id="f-node-merge">
+              <div class="fn-title">Checkpoint / Merge</div>
+              <div class="fn-sub">(체크포인트·병합)</div>
+              <div class="fn-live" id="fMergeLive">pipeline 0</div>
+            </div>
+            <div class="factory-node io-card output-card" data-node="f-audit" id="f-node-audit">
+              <div class="fn-title">DB Telemetry</div>
+              <div class="fn-sub">(decision_events)</div>
+              <div class="fn-live" id="fAuditLive">events 0</div>
+            </div>
+          </div>
+        </aside>
+        </div>
+      </div>
     </div>
 
     <aside class="inspector">
-      <div class="insp-tabs" role="tablist">
-        <button class="insp-tab active" id="tabDetail" type="button">라우팅 상세</button>
-        <button class="insp-tab" id="tabLogs" type="button">감사 로그 (<span id="logCount">0</span>)</button>
-        <span class="pulse-pill idle" id="pulsePill"><span class="pulse-dot"></span>판단 펄스</span>
+      <div class="insp-tabs" role="tablist" aria-label="인스펙터 탭">
+        <button class="insp-tab active" id="tabOverview" type="button">로컬 상태</button>
+        <button class="insp-tab" id="tabLive" type="button">실시간 (<span id="liveCount">0</span>)</button>
+        <button class="insp-tab" id="tabConnectors" type="button">매핑 설계</button>
+        <button class="insp-tab" id="tabDetailLogs" type="button">상세·로그</button>
       </div>
+      <div class="insp-statusline"><span class="pulse-pill idle" id="pulsePill"><span class="pulse-dot"></span>판단 펄스</span><span class="insp-log-count">감사 로그 (<span id="logCount">0</span>)</span></div>
       <div class="insp-body">
         <section>
           <div class="section-title">구성 요소 탐색</div>
@@ -575,12 +1006,16 @@
 (() => {
   let latest = null;
   let selectedId = 'decision';
-  let activeTab = 'detail';
+  let activeTab = 'overview';
   let repoFilter = 'all';
   let paused = false;
   let sseLive = false;
+  let factoryTrigger = null;
+  let factoryTriggerTimer = null;
+  const VIEW_MODES = ['topology', 'factory'];
   const WIRE_SHAPES = ['bezier', 'rounded', 'bus'];
   const WIRE_FLOWS = ['packet', 'comet', 'particle', 'chevron'];
+  const TOGGLE_STATES = ['on', 'off'];
   function readWirePref(key, fallback, allowed) {
     try {
       const value = window.localStorage.getItem(key);
@@ -589,14 +1024,25 @@
       return fallback;
     }
   }
+  function readRawPref(key) {
+    try { return window.localStorage.getItem(key); } catch (_) { return null; }
+  }
   function writeWirePref(key, value) {
     try { window.localStorage.setItem(key, value); } catch (_) {}
   }
-  let wireShape = readWirePref('dgate.wire.shape', 'bezier', WIRE_SHAPES);
+  function defaultWireShape(mode) { return mode === 'factory' ? 'rounded' : 'bezier'; }
+  let viewMode = readWirePref('dgate.view.mode', 'topology', VIEW_MODES);
+  let wireShapeManual = readRawPref('dgate.wire.shape') !== null;
+  let wireShape = readWirePref('dgate.wire.shape', defaultWireShape(viewMode), WIRE_SHAPES);
   let flowStyle = readWirePref('dgate.wire.flow', 'packet', WIRE_FLOWS);
+  let casingEnabled = readWirePref('dgate.wire.casing', 'on', TOGGLE_STATES) === 'on';
+  let portDotsEnabled = readWirePref('dgate.wire.ports', 'on', TOGGLE_STATES) === 'on';
 
   const $ = (id) => document.getElementById(id);
-  const C = { amber: '#f59e0b', gold: '#facc15', teal: '#2dd4bf', cyan: '#38bdf8', violet: '#c084fc', rose: '#fb7185' };
+  const C = {
+    amber: '#f59e0b', gold: '#facc15', teal: '#2dd4bf', cyan: '#38bdf8', violet: '#c084fc', rose: '#fb7185',
+    blue: '#3b82f6', indigo: '#6366f1', emerald: '#10b981', green: '#16a34a', red: '#ef4444', slate: '#64748b'
+  };
 
   const fallbackGates = [
     { label: 'dg hook --guard', gate: 'G1', active: false, detail: '코더 투입 전 브리프·범위·완료 기준 점검' },
@@ -642,35 +1088,67 @@
   function outcomeCounts(snap) {
     return snap?.outcomes || { pass: 0, rework: 0, fail: 0, waiting_human: 0 };
   }
+  function num(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  }
+  function localRepoData(snap) { return snap?.local_repo || {}; }
+  function localPipelineData(snap) { return localRepoData(snap).pipelines || {}; }
+  function systemData(snap) { return snap?.system || {}; }
+  function usageBarHtml(label, pct, value, color) {
+    const width = Math.max(0, Math.min(100, num(pct)));
+    return `<div class="usage-row">
+      <div class="usage-label">${esc(label)}</div>
+      <div class="bar-track"><div class="bar-fill" style="width:${width}%;background:${color};color:${color};"></div></div>
+      <div class="usage-value">${esc(value)}</div>
+    </div>`;
+  }
+  function activeCount(list) {
+    return (list || []).filter(w => w && w.active).length;
+  }
+  function firstActive(list) {
+    return (list || []).find(w => w && w.active) || (list || [])[0] || null;
+  }
+  function setText(id, text) {
+    const el = $(id);
+    if (el) el.textContent = text;
+  }
+  function setLiveClass(id, active) {
+    const el = $(id);
+    if (!el) return;
+    el.classList.toggle('active-live', Boolean(active));
+  }
 
-  $('pauseBtn').addEventListener('click', () => {
-    paused = !paused;
-    $('app').classList.toggle('paused', paused);
-    $('pauseBtn').classList.toggle('paused', paused);
-    $('pauseBtn').textContent = paused ? '▶ 흐름 재개' : '⏸ 흐름 일시정지';
-    const svg = $('wiresSvg');
-    if (svg && svg.pauseAnimations && svg.unpauseAnimations) {
-      if (paused) svg.pauseAnimations(); else svg.unpauseAnimations();
-    }
-  });
-  $('tabDetail').addEventListener('click', () => { activeTab = 'detail'; syncTabs(); renderInspector(); });
-  $('tabLogs').addEventListener('click', () => { activeTab = 'logs'; syncTabs(); renderInspector(); });
-  document.querySelectorAll('[data-shape]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      wireShape = btn.getAttribute('data-shape');
-      writeWirePref('dgate.wire.shape', wireShape);
-      syncWireSwitchers();
-      requestAnimationFrame(drawWires);
+  function syncViewChrome() {
+    document.body.classList.toggle('mode-factory', viewMode === 'factory');
+    document.body.classList.toggle('mode-topology', viewMode !== 'factory');
+    document.querySelectorAll('[data-view]').forEach(btn => {
+      const active = btn.getAttribute('data-view') === viewMode;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
     });
-  });
-  document.querySelectorAll('[data-flow]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      flowStyle = btn.getAttribute('data-flow');
-      writeWirePref('dgate.wire.flow', flowStyle);
-      syncWireSwitchers();
-      requestAnimationFrame(drawWires);
-    });
-  });
+    setText('brandName', viewMode === 'factory' ? 'dgate Factory' : 'dgate');
+    setText('brandSub', viewMode === 'factory' ? 'Factory Runtime' : 'Obsidian Signal');
+    document.title = viewMode === 'factory' ? 'dgate · Factory Runtime' : 'dgate · Obsidian Signal Topology';
+  }
+  function applyModeShapeDefault() {
+    if (wireShapeManual) return;
+    wireShape = defaultWireShape(viewMode);
+  }
+  function setViewMode(mode) {
+    if (!VIEW_MODES.includes(mode) || mode === viewMode) return;
+    viewMode = mode;
+    writeWirePref('dgate.view.mode', viewMode);
+    applyModeShapeDefault();
+    if (viewMode === 'factory' && !selectedId.startsWith('f-')) selectedId = 'f-decision';
+    if (viewMode === 'factory') activeTab = 'overview';
+    if (viewMode === 'topology' && selectedId.startsWith('f-')) selectedId = 'decision';
+    syncViewChrome();
+    syncWireSwitchers();
+    if (latest) render();
+    else requestAnimationFrame(drawWires);
+  }
+
   function syncWireSwitchers() {
     document.querySelectorAll('[data-shape]').forEach(btn => {
       const active = btn.getAttribute('data-shape') === wireShape;
@@ -682,14 +1160,94 @@
       btn.classList.toggle('active', active);
       btn.setAttribute('aria-pressed', active ? 'true' : 'false');
     });
+    document.querySelectorAll('[data-wire-toggle]').forEach(btn => {
+      const key = btn.getAttribute('data-wire-toggle');
+      const active = key === 'casing' ? casingEnabled : portDotsEnabled;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
   }
+  function redrawConnectors() {
+    syncWireSwitchers();
+    if (activeTab === 'connectors') renderInspector();
+    requestAnimationFrame(drawWires);
+  }
+  function setWireShape(shape) {
+    if (!WIRE_SHAPES.includes(shape)) return;
+    wireShape = shape;
+    wireShapeManual = true;
+    writeWirePref('dgate.wire.shape', wireShape);
+    redrawConnectors();
+  }
+  function setFlowStyle(flow) {
+    if (!WIRE_FLOWS.includes(flow)) return;
+    flowStyle = flow;
+    writeWirePref('dgate.wire.flow', flowStyle);
+    redrawConnectors();
+  }
+  function toggleWireFeature(key) {
+    if (key === 'casing') {
+      casingEnabled = !casingEnabled;
+      writeWirePref('dgate.wire.casing', casingEnabled ? 'on' : 'off');
+    } else if (key === 'ports') {
+      portDotsEnabled = !portDotsEnabled;
+      writeWirePref('dgate.wire.ports', portDotsEnabled ? 'on' : 'off');
+    }
+    redrawConnectors();
+  }
+
+  document.addEventListener('click', (ev) => {
+    const viewBtn = ev.target.closest('[data-view]');
+    if (viewBtn) { setViewMode(viewBtn.getAttribute('data-view')); return; }
+    const shapeBtn = ev.target.closest('[data-shape]');
+    if (shapeBtn) { setWireShape(shapeBtn.getAttribute('data-shape')); return; }
+    const flowBtn = ev.target.closest('[data-flow]');
+    if (flowBtn) { setFlowStyle(flowBtn.getAttribute('data-flow')); return; }
+    const toggleBtn = ev.target.closest('[data-wire-toggle]');
+    if (toggleBtn) { toggleWireFeature(toggleBtn.getAttribute('data-wire-toggle')); return; }
+    const triggerBtn = ev.target.closest('[data-local-trigger]');
+    if (triggerBtn) { triggerFactoryEvent(triggerBtn.getAttribute('data-local-trigger')); return; }
+    const liveBtn = ev.target.closest('[data-live-node]');
+    if (liveBtn) { selectNode(liveBtn.getAttribute('data-live-node')); }
+  });
+  function triggerFactoryEvent(kind) {
+    factoryTrigger = kind;
+    if (factoryTriggerTimer) clearTimeout(factoryTriggerTimer);
+    render();
+    factoryTriggerTimer = setTimeout(() => {
+      factoryTrigger = null;
+      factoryTriggerTimer = null;
+      if (latest) render();
+    }, 1800);
+  }
+
+  $('pauseBtn').addEventListener('click', () => {
+    paused = !paused;
+    $('app').classList.toggle('paused', paused);
+    $('pauseBtn').classList.toggle('paused', paused);
+    $('pauseBtn').textContent = paused ? '▶ 흐름 재개' : '⏸ 흐름 일시정지';
+    [$('wiresSvg'), $('factoryWiresSvg')].forEach(svg => {
+      if (svg && svg.pauseAnimations && svg.unpauseAnimations) {
+        if (paused) svg.pauseAnimations(); else svg.unpauseAnimations();
+      }
+    });
+  });
+  $('tabOverview').addEventListener('click', () => { activeTab = 'overview'; syncTabs(); renderInspector(); });
+  $('tabLive').addEventListener('click', () => { activeTab = 'live'; syncTabs(); renderInspector(); });
+  $('tabConnectors').addEventListener('click', () => { activeTab = 'connectors'; syncTabs(); renderInspector(); });
+  $('tabDetailLogs').addEventListener('click', () => { activeTab = 'detail'; syncTabs(); renderInspector(); });
   syncWireSwitchers();
   function syncTabs() {
-    $('tabDetail').classList.toggle('active', activeTab === 'detail');
-    $('tabLogs').classList.toggle('active', activeTab === 'logs');
+    $('tabOverview').classList.toggle('active', activeTab === 'overview');
+    $('tabLive').classList.toggle('active', activeTab === 'live');
+    $('tabConnectors').classList.toggle('active', activeTab === 'connectors');
+    $('tabDetailLogs').classList.toggle('active', activeTab === 'detail');
   }
   document.querySelectorAll('[data-node]').forEach(el => {
-    el.addEventListener('click', () => selectNode(el.getAttribute('data-node')));
+    el.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      selectNode(el.getAttribute('data-node'));
+    });
   });
   function selectNode(id) {
     selectedId = id;
@@ -697,6 +1255,9 @@
     syncTabs();
     render();
   }
+
+  syncViewChrome();
+  syncTabs();
 
   function render() {
     if (!latest) return;
@@ -711,8 +1272,10 @@
     renderStatusStrip(snap, oc);
     renderProviderPills(snap);
     $('logCount').textContent = (snap.recent_events || []).length;
+    $('liveCount').textContent = activeCount(allLiveNodes(snap));
     $('pulsePill').classList.toggle('idle', !snap.db_live && (snap.recent_events || []).length === 0);
 
+    renderFactory(snap, workers, oc);
     renderAdvisor(snap);
     renderLead(snap);
     renderVerifier(snap);
@@ -722,6 +1285,124 @@
     renderNavigator(workers);
     renderInspector();
     requestAnimationFrame(() => drawWires());
+  }
+
+  function renderFactory(snap, workers, oc) {
+    const local = localRepoData(snap);
+    const pipelines = localPipelineData(snap);
+    const liveNodes = allLiveNodes(snap);
+    const activeWorkers = activeCount(workers);
+    const activeCoders = activeCount(workers.filter(w => (w.slot || 'coder') === 'coder'));
+    const activeVerifiers = activeCount(snap.verifiers || []);
+    const activeAdvisors = activeCount(snap.advisors || []);
+    const activeSubleads = workers.filter(w => w.slot === 'sublead' && w.active).length;
+    const openForks = num(snap.open_forks);
+    const totalForks = num(snap.total_forks);
+    const gates = Array.isArray(snap.active_gates) && snap.active_gates.length ? snap.active_gates : fallbackGates;
+    const activeGates = gates.filter(g => g.active).length;
+    const mapped = num(snap.mapped_count);
+    const host = num(snap.host_process_count);
+    const trigger = factoryTrigger;
+
+    setText('fDispatchLive', `fork open ${openForks} · total ${totalForks}`);
+    setText('fBriefLive', snap.db_live ? 'Standards/Spec · local DB live' : 'Standards/Spec · gate idle');
+    setText('fReworkLive', `rework ${num(oc.rework)} · fail ${num(oc.fail)} · exit 3`);
+    setText('fOsHerdrLive', `mapped ${mapped} / host ${host}`);
+
+    setText('fDecisionBadge', `forks ${totalForks}`);
+    const sharp = (snap.routes || []).filter(r => !r.forced_split && num(r.p) >= 0.70).length;
+    const split = (snap.routes || []).filter(r => r.forced_split || num(r.p) < 0.70).length;
+    setText('fDecisionLive', `sharp ${sharp} · split ${split} · θ 0.70`);
+    setText('fSessionMode', snap.lead ? 'warm_reuse' : 'ephemeral');
+    setText('fSessionLive', snap.lead ? `${snap.lead.cli || 'lead'} · ${snap.lead.model || 'model'} · ${snap.lead.effort || 'effort'}` : 'warm_reuse 대기');
+
+    setText('fStepDispatchState', openForks > 0 ? 'live' : 'idle');
+    setText('fStepDispatchMeta', `open ${openForks} · mapped ${mapped} · isolated branches`);
+    setText('fCoderCount', `${activeCoders} active`);
+    const coder = firstActive(workers.filter(w => (w.slot || 'coder') === 'coder')) || firstActive(workers);
+    setText('fCoderMeta', coder ? telemetryOf(coder) : 'model 대기');
+    setText('fVerifierCount', `${activeVerifiers} active`);
+    const verifier = firstActive(snap.verifiers || []);
+    setText('fVerifierMeta', verifier ? telemetryOf(verifier) : 'model 대기');
+    setText('fAdvisorCount', `${activeAdvisors} active`);
+    const advisor = firstActive(snap.advisors || []);
+    setText('fAdvisorMeta', advisor ? `${activeAdvisors} advisor · gate watch` : '0 advisor · 게이트 대기');
+    setText('fBackpropState', `PASS ${num(oc.pass)}`);
+    setText('fBackpropMeta', `PASS ${num(oc.pass)} · rework ${num(oc.rework)} · fail ${num(oc.fail)}`);
+
+    setText('fSkillsCount', `${activeGates}/${gates.length}`);
+    setText('fSkillsLive', activeGates ? `${activeGates} gates active` : 'gate probe idle');
+    const podNodes = liveNodes.slice(0, 8);
+    setText('fAgentCount', `${liveNodes.length}`);
+    $('fAgentPodPills').innerHTML = podNodes.length ? podNodes.map(w => {
+      const role = w.slot || 'worker';
+      return `<span class="pod-pill ${w.active ? '' : 'idle'}">${esc(role)} · ${esc(w.cli || 'os')}</span>`;
+    }).join('') : '<span class="pod-pill empty">worker 대기</span>';
+
+    const rosterMap = new Map();
+    liveNodes.forEach(w => {
+      const key = telemetryOf(w);
+      rosterMap.set(key, (rosterMap.get(key) || 0) + 1);
+    });
+    const rosterEntries = Array.from(rosterMap.entries()).slice(0, 7);
+    setText('fRosterCount', `${rosterMap.size}`);
+    $('fModelRoster').innerHTML = rosterEntries.length ? rosterEntries.map(([tele, count]) =>
+      `<div class="roster-row"><span>${esc(tele)}</span><b>×${count}</b></div>`
+    ).join('') : '<div class="roster-empty">cli · model · effort</div>';
+
+    setText('fScannerMeta', `ps 1.5s poll · SSE · mapped ${mapped} / host ${host}`);
+    setText('fMapperMeta', `hc ls · dg wrap · herdr · os:<pid> · ${mapped}/${host}`);
+    setText('fOsDecisionMeta', `loop feedback · sharp ${sharp} / split ${split}`);
+
+    setText('fCommitLive', local.head || 'commit —');
+    setText('fVerdictLive', `PASS ${num(oc.pass)} · human ${num(oc.waiting_human)}`);
+    setText('fMergeLive', `ready_pr ${num(pipelines.ready_pr)} · running ${num(pipelines.running)}`);
+    setText('fAuditLive', `decision_events ${(snap.recent_events || []).length}`);
+
+    setLiveClass('f-node-dispatch', openForks > 0 || trigger === 'dispatch');
+    setLiveClass('f-node-brief', totalForks > 0 || snap.db_live || trigger === 'dispatch');
+    setLiveClass('f-node-rework', num(oc.rework) > 0 || num(oc.fail) > 0 || trigger === 'rework');
+    setLiveClass('f-node-osherdr', host > 0 || mapped > 0 || trigger === 'os');
+    setLiveClass('f-node-decision', totalForks > 0 || snap.db_live || Boolean(trigger));
+    setLiveClass('f-node-session', Boolean(snap.lead));
+    setLiveClass('f-node-step-dispatch', openForks > 0 || activeWorkers > 0 || trigger === 'dispatch');
+    setLiveClass('f-node-step-coder', activeCoders > 0 || trigger === 'dispatch');
+    setLiveClass('f-node-step-verifier', activeVerifiers > 0 || trigger === 'verify');
+    setLiveClass('f-node-step-advisor', activeAdvisors > 0 || trigger === 'verify' || trigger === 'rework');
+    setLiveClass('f-node-step-backprop', num(oc.pass) > 0 || num(oc.rework) > 0 || num(oc.fail) > 0 || trigger === 'verify' || trigger === 'rework');
+    setLiveClass('f-node-skills', activeGates > 0);
+    setLiveClass('f-node-agentpod', liveNodes.length > 0);
+    setLiveClass('f-node-roster', rosterEntries.length > 0);
+    setLiveClass('f-node-scanner', host > 0 || sseLive || trigger === 'os');
+    setLiveClass('f-node-mapper', mapped > 0 || activeSubleads > 0 || trigger === 'os');
+    setLiveClass('f-node-osdecision', totalForks > 0 || snap.db_live || trigger === 'os');
+    setLiveClass('f-node-readypr', Boolean(local.head) || num(oc.pass) > 0 || trigger === 'verify');
+    setLiveClass('f-node-human', num(oc.waiting_human) > 0 || num(oc.pass) > 0 || trigger === 'verify');
+    setLiveClass('f-node-merge', num(pipelines.ready_pr) > 0 || num(oc.pass) > 0 || trigger === 'verify');
+    setLiveClass('f-node-audit', totalForks > 0 || (snap.recent_events || []).length > 0 || trigger === 'rework');
+
+    const human = $('f-node-human');
+    if (human) {
+      human.classList.toggle('waiting', num(oc.waiting_human) > 0);
+      human.classList.toggle('clear', num(oc.waiting_human) === 0);
+    }
+    const triggerNodes = {
+      dispatch: ['f-node-dispatch', 'f-node-step-dispatch'],
+      os: ['f-node-osherdr', 'f-node-scanner', 'f-node-mapper', 'f-node-osdecision'],
+      verify: ['f-node-step-verifier', 'f-node-readypr', 'f-node-human'],
+      rework: ['f-node-rework', 'f-node-step-advisor', 'f-node-step-backprop', 'f-node-merge']
+    };
+    Object.values(triggerNodes).flat().forEach(id => {
+      const el = $(id);
+      if (el) el.classList.remove('trigger-pulse');
+    });
+    (triggerNodes[trigger] || []).forEach(id => {
+      const el = $(id);
+      if (el) el.classList.add('trigger-pulse');
+    });
+    document.querySelectorAll('.factory-node[data-node]').forEach(el => {
+      el.classList.toggle('selected', selectedId === el.getAttribute('data-node'));
+    });
   }
 
   function renderScopeTabs(snap) {
@@ -740,6 +1421,21 @@
   }
 
   function renderStatusStrip(snap, oc) {
+    if (viewMode === 'factory') {
+      const local = localRepoData(snap);
+      const pipelines = localPipelineData(snap);
+      const repo = local.name || snap.scope || 'local repo';
+      const branch = local.branch || 'branch —';
+      $('statusStrip').innerHTML = `
+        <span class="status-bit ${sseLive ? 'live' : 'fail'}">실시간 감지</span>
+        <span class="status-bit">설계 프리셋</span>
+        <span class="status-bit">${esc(repo)} · ${esc(branch)}</span>
+        <span class="status-bit">매핑 ${num(snap.mapped_count)} / 호스트 ${num(snap.host_process_count)}</span>
+        <span class="status-bit">워크트리 ${num(local.worktree_count)} · 파이프라인 ${num(pipelines.total)}</span>
+        ${(oc.waiting_human || 0) > 0 ? `<span class="status-bit warn">human ${oc.waiting_human}</span>` : ''}
+      `;
+      return;
+    }
     $('statusStrip').innerHTML = `
       <span class="status-bit">WATCH</span>
       <span class="status-bit ${sseLive ? 'live' : 'fail'}">${sseLive ? 'LIVE' : 'RECONNECT'}</span>
@@ -874,6 +1570,27 @@
   }
 
   function nodeChips(workers) {
+    if (viewMode === 'factory') {
+      return [
+        { id: 'f-dispatch', label: 'Dispatch' },
+        { id: 'f-brief', label: 'Brief Gate' },
+        { id: 'f-rework', label: 'Rework / Esc' },
+        { id: 'f-osherdr', label: 'OS / Herdr' },
+        { id: 'f-decision', label: 'Decision Gate' },
+        { id: 'f-session', label: 'Session Policy' },
+        { id: 'f-step-coder', label: 'Coder' },
+        { id: 'f-step-verifier', label: 'Verifier' },
+        { id: 'f-step-backprop', label: 'Backprop' },
+        { id: 'f-agentpod', label: 'Agent Pod' },
+        { id: 'f-roster', label: 'Model' },
+        { id: 'f-scanner', label: 'OS Scanner' },
+        { id: 'f-osdecision', label: 'Decision Loop' },
+        { id: 'f-readypr', label: 'Worktree Commit' },
+        { id: 'f-human', label: 'Verdict PASS' },
+        { id: 'f-merge', label: 'Checkpoint / Merge' },
+        { id: 'f-audit', label: 'DB Telemetry' }
+      ];
+    }
     return [
       { id: 'advisor', label: 'Advisor' },
       { id: 'lead', label: 'Lead' },
@@ -901,6 +1618,11 @@
     if (selectedId === 'lead') return latest.lead || null;
     if (selectedId === 'verifier') return (latest.verifiers || [])[0] || null;
     if (selectedId === 'advisor') return (latest.advisors || [])[0] || null;
+    if (selectedId === 'f-session') return latest.lead || null;
+    if (selectedId === 'f-step-coder') return firstActive((latest.workers || []).filter(w => (w.slot || 'coder') === 'coder')) || firstActive(latest.workers || []);
+    if (selectedId === 'f-step-verifier') return firstActive(latest.verifiers || []);
+    if (selectedId === 'f-step-advisor') return firstActive(latest.advisors || []);
+    if (selectedId === 'f-agentpod' || selectedId === 'f-roster' || selectedId === 'f-scanner' || selectedId === 'f-mapper') return firstActive(latest.workers || []) || latest.lead || null;
     return null;
   }
 
@@ -915,13 +1637,25 @@
       Repo: data?.repo_tag || latest?.scope || '—',
       CWD: data?.cwd || '—'
     };
-    if (id === 'decision') {
+    if (id === 'decision' || id === 'f-decision') {
       base.Telemetry = `forks ${latest.total_forks || 0} · open ${latest.open_forks || 0} · effort ${latest.effort_level || 'unknown'}`;
       base.Repo = latest.scope || 'all';
     }
-    if (id === 'back') {
+    if (id === 'back' || id === 'f-step-backprop') {
       base.Telemetry = `PASS ${oc.pass || 0} · rework ${oc.rework || 0} · fail ${oc.fail || 0} · human ${oc.waiting_human || 0}`;
     }
+    const local = localRepoData(latest);
+    const pipelines = localPipelineData(latest);
+    if (id === 'f-dispatch') base.Telemetry = `open forks ${latest.open_forks || 0} · total forks ${latest.total_forks || 0}`;
+    if (id === 'f-brief') base.Telemetry = `Standards/Spec gate · local DB ${latest.db_live ? 'live' : 'idle'}`;
+    if (id === 'f-rework') base.Telemetry = `rework ${oc.rework || 0} · fail ${oc.fail || 0} · escalated pipelines ${num(pipelines.escalated)}`;
+    if (id === 'f-osherdr') base.Telemetry = `mapped ${latest.mapped_count || 0} · host ${latest.host_process_count || 0}`;
+    if (id === 'f-scanner') base.Telemetry = `mapped ${(latest.workers || []).length} · live ${activeCount(latest.workers || [])} · SSE ${sseLive ? 'live' : 'reconnect'}`;
+    if (id === 'f-osdecision') base.Telemetry = `feedback loop · sharp/split routes ${(latest.routes || []).length}`;
+    if (id === 'f-readypr') base.Telemetry = `${local.name || 'repo'} · ${local.branch || 'branch —'} · ${local.head || 'commit —'}`;
+    if (id === 'f-human') base.Telemetry = `PASS ${oc.pass || 0} · waiting_human ${oc.waiting_human || 0}`;
+    if (id === 'f-merge') base.Telemetry = `pipelines total ${num(pipelines.total)} · running ${num(pipelines.running)} · ready_pr ${num(pipelines.ready_pr)}`;
+    if (id === 'f-audit') base.Telemetry = `decision_events ${(latest.recent_events || []).length} · forks ${latest.total_forks || 0}`;
     return base;
   }
 
@@ -931,26 +1665,219 @@
     verifier: '읽기 전용 교차 검증 계층입니다. 리드나 워커의 결과를 이종 모델/독립 세션으로 검사하고 회귀 루프 신호를 반환합니다.',
     decision: 'Decision Gate는 SQLite에 누적된 사후확률을 사용해 sharp/split 분기를 결정합니다. θ_sharp 70% 위에서 sharp, 아래에서 split으로 읽습니다.',
     back: '워커 결과를 리드로 되돌리는 수렴 지점입니다. PASS · rework · fail · human 결과를 합산해 다음 검증과 머지 루프로 연결합니다.',
-    worker: '하위 에이전트 OS 프로세스 카드입니다. PID, owner sublead, 활동 한 줄, 실측 CLI · 모델 · effort를 라이브로 표시합니다.'
+    worker: '하위 에이전트 OS 프로세스 카드입니다. PID, owner sublead, 활동 한 줄, 실측 CLI · 모델 · effort를 라이브로 표시합니다.',
+    'f-dispatch': 'dg dispatch가 로컬 fork를 발급하는 입력 트리거입니다. open fork가 있으면 활성 상태로 표시됩니다.',
+    'f-brief': 'Standards와 Spec을 확인하는 로컬 브리프 게이트입니다.',
+    'f-rework': 'verdict rework와 exit 3 에스컬레이션 입력입니다. 로컬 파이프라인의 escalated 수와 함께 표시됩니다.',
+    'f-osherdr': 'ps 1.5초 폴링, hc, herdr에서 수집한 OS 수준 입력입니다. 하단 OS Scanner로 연결됩니다.',
+    'f-runtime': 'DGATE 라이브 런타임 프레임입니다. 결정 게이트, 세션 정책, 파이프라인, 에이전트 리소스, OS 감지 루프를 한 묶음으로 표시합니다.',
+    'f-decision': 'EWMA Beta 사후확률 라우팅 게이트입니다. sharp/split 비율과 θ_sharp 0.70 기준을 실시간 decision.db 값으로 표시합니다.',
+    'f-session': 'dg suggest-session 정책 카드입니다. 리드가 감지되면 warm_reuse, 없으면 ephemeral 대기 상태로 읽습니다.',
+    'f-pipeline': '0-token 상태 기계 파이프라인입니다. dispatch부터 backprop까지 다섯 단계의 활성 상태를 실제 프로세스와 결과 카운터로 표시합니다.',
+    'f-step-dispatch': 'fork 발급과 격리 브랜치/워크트리 준비 단계입니다.',
+    'f-step-coder': '실제 코드를 구현하는 coder 단계입니다. 활성 coder 수와 primary cli · model · effort를 표시합니다.',
+    'f-step-verifier': '읽기 전용 cross-check verifier 단계입니다. 활성 verifier 수와 모델을 표시합니다.',
+    'f-step-advisor': 'G3 완료 관문 advisor 단계입니다. 활성 advisor 수와 로컬 게이트 상태를 표시합니다.',
+    'f-step-backprop': '결과를 역전파하고 READY_PR로 수렴하는 단계입니다. PASS · rework · fail 카운트를 표시합니다.',
+    'f-skills': 'dg hook --guard, dg wrap, dg checkpoint, dg backprop 등 스킬/게이트 리소스입니다.',
+    'f-agentpod': '활성 CLI, sublead, worker pill을 보여주는 격리된 에이전트 포드입니다. 읽기 전용 역할은 분리되어 표시됩니다.',
+    'f-roster': '라이브 프로세스에서 검출된 cli · model · effort 조합의 실시간 Model 카드입니다.',
+    'f-osbox': 'OS Scanner → Live Mapper → Decision Gate로 이어지는 로컬 피드백 루프 영역입니다.',
+    'f-scanner': '1.5초 ps 폴링과 SSE 스트림으로 live OS 프로세스를 감지하는 스캐너입니다.',
+    'f-mapper': 'hc ls, dg wrap, herdr, os:<pid> 규칙으로 감지 PID를 런타임 노드에 매핑합니다.',
+    'f-osdecision': 'Live Mapper의 PID 매핑을 다시 Decision Gate sharp/split 계산으로 되돌리는 로컬 피드백 루프입니다.',
+    'f-readypr': '로컬 워크트리 커밋 앵커입니다. 현재 브랜치와 최신 로컬 커밋을 표시합니다.',
+    'f-human': '교차검증을 통과한 Verdict PASS 결과와 사람 검토 대기 신호입니다.',
+    'f-merge': '로컬 체크포인트와 병합 준비 단계입니다. 파이프라인 running · ready_pr 상태를 표시합니다.',
+    'f-audit': 'decision_events 감사 로그와 fork 통계 출력입니다. 로컬 DB 텔레메트리만 사용합니다.'
+  };
+
+  const nodeTitles = {
+    advisor: 'Advisor · 결정론 가드 & 자문',
+    lead: 'Lead · 리드',
+    verifier: 'Verifier · 교차 검증',
+    decision: 'Decision Gate · 분기 계층',
+    back: '다시 Lead · 리드',
+    worker: '하위 에이전트',
+    'f-dispatch': 'Dispatch · fork 발급',
+    'f-brief': 'Brief Gate · Standards/Spec',
+    'f-rework': 'Rework / Esc · exit 3',
+    'f-osherdr': 'OS / Herdr · ps 1.5s · hc · herdr',
+    'f-runtime': 'DGATE / LIVE RUNTIME',
+    'f-decision': 'Decision Gate · EWMA Beta',
+    'f-session': 'Session Policy · dg suggest-session',
+    'f-pipeline': 'PIPELINE RUN · 0-token state machine',
+    'f-step-dispatch': 'Dispatch & Worktree',
+    'f-step-coder': 'Coder · Implement',
+    'f-step-verifier': 'Verifier · Cross-Check',
+    'f-step-advisor': 'Advisor · G3 Gate',
+    'f-step-backprop': 'Backprop & Summary',
+    'f-skills': 'Skills & Gates',
+    'f-agentpod': 'Agent Pod',
+    'f-roster': 'Model',
+    'f-osbox': 'Scheduled OS Detector',
+    'f-scanner': 'OS Scanner',
+    'f-mapper': 'Live Mapper',
+    'f-osdecision': 'Decision Gate Loop',
+    'f-readypr': 'Worktree Commit · 로컬 커밋',
+    'f-human': 'Verdict PASS · 교차검증 통과',
+    'f-merge': 'Checkpoint / Merge · 체크포인트·병합',
+    'f-audit': 'DB Telemetry · decision_events'
+  };
+  const nodeColors = {
+    advisor: 'var(--violet)', lead: 'var(--amber)', verifier: 'var(--gold)', decision: 'var(--teal)', back: 'var(--amber)', worker: 'var(--cyan)',
+    'f-dispatch': '#6366f1', 'f-brief': '#64748b', 'f-rework': '#ef4444', 'f-osherdr': '#10b981', 'f-runtime': '#3b82f6',
+    'f-decision': '#3b82f6', 'f-session': '#3b82f6', 'f-pipeline': '#f59e0b', 'f-step-dispatch': '#f59e0b', 'f-step-coder': '#f59e0b',
+    'f-step-verifier': '#f59e0b', 'f-step-advisor': '#f59e0b', 'f-step-backprop': '#f59e0b', 'f-skills': '#3b82f6',
+    'f-agentpod': '#6366f1', 'f-roster': '#475569', 'f-osbox': '#10b981', 'f-scanner': '#10b981', 'f-mapper': '#10b981', 'f-osdecision': '#10b981',
+    'f-readypr': '#16a34a', 'f-human': '#16a34a', 'f-merge': '#475569', 'f-audit': '#475569'
   };
 
   function kvHtml(meta) {
     return `<div class="kv">${Object.entries(meta).map(([k, v]) => `<div class="k">${esc(k)}</div><div class="v">${esc(v)}</div>`).join('')}</div>`;
   }
+  function routeBarsHtml(routes) {
+    return (routes || []).map(r => {
+      const isSplit = r.forced_split || r.p < 0.70;
+      const color = r.forced_split ? 'var(--rose)' : (isSplit ? 'var(--amber)' : 'var(--teal)');
+      const pct = Math.max(2, Math.min(100, Math.round((r.p || 0) * 100)));
+      return `<div class="sig-row">
+        <div class="sig-head"><b>${esc(r.name)}</b><span class="sig-stat" style="color:${color};">p=${(r.p || 0).toFixed(2)} ${isSplit ? 'split' : 'sharp'} · ${esc(r.basis || 'prior')} · m:${r.samples || 0}</span></div>
+        <div class="bar-track ${isSplit ? 'split' : ''}"><div class="bar-fill" style="width:${pct}%;background:${color};color:${color};"></div><div class="bar-thresh"></div></div>
+      </div>`;
+    }).join('');
+  }
 
-  function renderInspector() {
-    if (!latest) return;
-    const target = $('inspContent');
-    if (activeTab === 'logs') {
-      const logs = latest.recent_events || [];
-      target.innerHTML = `<div class="detail-card"><div class="section-title">감사 로그</div>${
-        logs.length
-          ? logs.map(l => `<div class="log-line">${esc(l)}</div>`).join('')
-          : '<div class="empty-detail">최근 decision_events 로그가 없습니다.</div>'
-      }</div>`;
-      return;
-    }
+  function renderOverviewTab(target) {
+    const local = localRepoData(latest);
+    const pipelines = localPipelineData(latest);
+    const pipelineRows = pipelines.recent || [];
+    const commits = local.recent_commits || [];
+    const sys = systemData(latest);
+    const disk = sys.disk || {};
+    const ram = sys.ram || {};
+    const oc = outcomeCounts(latest);
+    const diskTotal = num(disk.total_gb);
+    const diskFreePct = diskTotal > 0 ? (num(disk.free_gb) * 100 / diskTotal) : 0;
+    const metricTile = (label, value, color) => `<div class="outcome-tile"><div class="outcome-num" style="color:${color};">${num(value)}</div><div class="outcome-label">${label}</div></div>`;
+    const phaseColor = (phase) => {
+      if (phase === 'ready_pr') return 'var(--teal)';
+      if (phase === 'escalated' || phase === 'failed') return 'var(--rose)';
+      if (phase === 'rework_pending') return 'var(--amber)';
+      return 'var(--cyan)';
+    };
 
+    target.innerHTML = `<div class="detail-card local-panel">
+      <div class="section-title">상태 체크 (실시간 SSE · 로컬 DB)</div>
+      <div class="local-group-label">Fork Outcomes</div>
+      <div class="overview-grid local-metrics">${[
+        metricTile('PASS', oc.pass, 'var(--teal)'),
+        metricTile('rework', oc.rework, 'var(--amber)'),
+        metricTile('fail', oc.fail, 'var(--rose)'),
+        metricTile('human', oc.waiting_human, 'var(--violet)')
+      ].join('')}</div>
+      <div class="local-group-label">Local Runtime</div>
+      <div class="overview-grid local-metrics">${[
+        metricTile('전체 fork', latest.total_forks, 'var(--cyan)'),
+        metricTile('진행중 open', latest.open_forks, 'var(--teal)'),
+        metricTile('워크트리', local.worktree_count, 'var(--violet)'),
+        metricTile('파이프라인', pipelines.total, 'var(--amber)')
+      ].join('')}</div>
+      <div class="local-group-label">Host Disk &amp; RAM</div>
+      <div class="usage-stack">
+        ${usageBarHtml('하드디스크 용량', disk.pct, `${num(disk.used_gb).toFixed(1)}/${diskTotal.toFixed(1)} GB`, 'var(--cyan)')}
+        ${usageBarHtml('여유', diskFreePct, `${num(disk.free_gb).toFixed(1)} GB free`, 'var(--teal)')}
+        ${usageBarHtml('RAM', ram.pct, `${num(ram.used_mb)} MB/${num(ram.total_gb).toFixed(1)} GB`, 'var(--violet)')}
+      </div>
+      <div class="local-group-label">로컬 저장소</div>
+      <div class="repo-card"><b>${esc(local.name || 'local repo')}</b><br/>branch ${esc(local.branch || '—')} · worktrees ${num(local.worktree_count)}<div class="repo-anchor">anchor ${esc(local.head || 'commit —')}</div></div>
+      <div class="local-group-label">로컬 흐름 시뮬레이션</div>
+      <div class="trigger-grid">
+        <button class="trigger-card" type="button" data-local-trigger="dispatch"><b>Dispatch 실행</b><span>fork 발급 → Decision Gate</span></button>
+        <button class="trigger-card" type="button" data-local-trigger="os"><b>OS 프로세스 감지</b><span>OS Scanner → Live Mapper</span></button>
+        <button class="trigger-card" type="button" data-local-trigger="verify"><b>Verifier 교차검증</b><span>cross-check → Verdict PASS</span></button>
+        <button class="trigger-card" type="button" data-local-trigger="rework"><b>Rework / 에스컬레이션</b><span>exit 3 → advisor · backprop</span></button>
+      </div>
+      <div class="local-group-label">로컬 파이프라인 (${num(pipelines.total)})</div>
+      <div class="local-list">${pipelineRows.length ? pipelineRows.slice(0, 8).map(p => {
+        const color = phaseColor(p.phase || '');
+        return `<div class="local-link"><div class="local-row-head"><span class="local-link-title">${esc(p.run_id || 'run')}</span><span class="phase-badge" style="color:${color};">${esc(p.phase || 'unknown')}</span></div><span class="local-link-meta">${esc(p.branch || 'branch —')} · attempt ${num(p.attempt)}</span></div>`;
+      }).join('') : '<div class="empty-detail">로컬 파이프라인 상태 파일이 없습니다.</div>'}</div>
+      <div class="local-group-label">최근 로컬 커밋 (${commits.length})</div>
+      <div class="local-list">${commits.length ? commits.slice(0, 6).map(commit =>
+        `<div class="local-link"><span class="local-link-title"><b>${esc(commit.hash || '')}</b> ${esc(commit.subject || '')}</span><span class="local-link-meta">${esc(commit.rel_time || '')}</span></div>`
+      ).join('') : '<div class="empty-detail">최근 로컬 커밋을 읽지 못했습니다.</div>'}</div>
+    </div>`;
+  }
+
+  function liveSelectionFor(node, index) {
+    if (!node) return `worker:unknown-${index}`;
+    if (latest.lead && node.address === latest.lead.address) return 'lead';
+    if ((latest.verifiers || []).some(v => v.address === node.address)) return 'verifier';
+    if ((latest.advisors || []).some(a => a.address === node.address)) return 'advisor';
+    return `worker:${node.address}`;
+  }
+  function renderLiveTab(target) {
+    const nodes = allLiveNodes(latest);
+    target.innerHTML = `<div class="detail-card">
+      <div class="section-title">실시간 매핑 프로세스 · ${activeCount(nodes)} active / ${nodes.length} total</div>
+      <div class="live-list">${nodes.length ? nodes.map((w, i) => {
+        const sid = liveSelectionFor(w, i);
+        const owner = w.owner_badge || (w.owner_address ? `↳ ${w.owner_address}` : '');
+        return `<button class="live-row ${selectedId === sid ? 'active' : ''}" type="button" data-live-node="${esc(sid)}">
+          <div class="live-head"><span>${circledNumber(i + 1)} ${esc(w.name || w.slot || 'process')}</span><span>${w.pid ? `PID ${w.pid}` : esc(w.address || '—')}</span></div>
+          <div class="live-meta">${esc(w.slot || 'worker')}${owner ? ` · ${esc(owner)}` : ''} · ${esc(telemetryOf(w))}</div>
+          <div class="live-activity">${esc(w.activity || w.status || '활동 신호 대기')}</div>
+        </button>`;
+      }).join('') : '<div class="empty-detail">실시간 매핑된 프로세스가 없습니다.</div>'}</div>
+    </div>`;
+  }
+
+  function studioButtons(values, attr, active) {
+    return values.map(([value, label]) => `<button class="wire-seg ${active === value ? 'active' : ''}" type="button" data-${attr}="${value}">${label}</button>`).join('');
+  }
+  function renderConnectorStudio(target) {
+    target.innerHTML = `<div class="detail-card">
+      <div class="section-title">연결선 · Connector Studio</div>
+      <div class="studio-block">
+        <div class="studio-title">fiv.co.kr/diagram/ routing shape</div>
+        <div class="studio-row"><div class="wire-segmented">${studioButtons([
+          ['rounded', '둥근 엘보'], ['bezier', '곡선'], ['bus', '버스']
+        ], 'shape', wireShape)}</div></div>
+        <div class="studio-note">현재 기본값은 뷰에 따라 다릅니다: 팩토리 둥근 엘보 · 토폴로지 곡선. 선택은 localStorage에 유지됩니다.</div>
+      </div>
+      <div class="studio-block">
+        <div class="studio-title">flow animation</div>
+        <div class="studio-row"><div class="wire-segmented">${studioButtons([
+          ['packet', '패킷'], ['comet', '혜성'], ['particle', '알갱이'], ['chevron', '셰브런']
+        ], 'flow', flowStyle)}</div></div>
+        <div class="studio-note">흐름 일시정지 버튼은 모든 SVG 애니메이션을 즉시 멈춥니다.</div>
+      </div>
+      <div class="studio-block">
+        <div class="studio-title">depth &amp; ports</div>
+        <div class="studio-row">
+          <button class="toggle-pill ${casingEnabled ? 'active' : ''}" type="button" data-wire-toggle="casing">casing halo ${casingEnabled ? 'ON' : 'OFF'}</button>
+          <button class="toggle-pill ${portDotsEnabled ? 'active' : ''}" type="button" data-wire-toggle="ports">port dots ${portDotsEnabled ? 'ON' : 'OFF'}</button>
+        </div>
+        <div class="studio-note">6px 테마 인식 casing halo는 dark에서는 #090c12, light에서는 #f8fafc를 사용하고, sv-route-port 점은 시작/분기 포트를 표시합니다.</div>
+      </div>
+      <div class="studio-block">
+        <div class="studio-title">OS process → node mapping rules</div>
+        <table class="mapping-table">
+          <thead><tr><th>source</th><th>rule</th><th>node</th></tr></thead>
+          <tbody>
+            <tr><td>hc ls</td><td>named harness seat</td><td>Lead / sublead / worker slot</td></tr>
+            <tr><td>dg wrap</td><td>wrapped CLI pid</td><td>Coder · Implement</td></tr>
+            <tr><td>herdr</td><td>independent review role</td><td>Advisor / Verifier</td></tr>
+            <tr><td>os:&lt;pid&gt;</td><td>unowned live process</td><td>OS Scanner → Agent Pod</td></tr>
+          </tbody>
+        </table>
+        <div class="studio-note">이 표는 실시간 탭의 프로세스가 Factory 노드에 연결되는 해석 규칙입니다.</div>
+      </div>
+    </div>`;
+  }
+
+  function renderDetailTab(target) {
     const data = selectedNodeData();
     if (selectedId.startsWith('worker:') && !data) {
       target.innerHTML = '<div class="detail-card"><div class="empty-detail">선택한 워커가 종료되었습니다.</div></div>';
@@ -958,53 +1885,55 @@
     }
 
     const key = selectedId.startsWith('worker:') ? 'worker' : selectedId;
-    const titles = {
-      advisor: 'Advisor · 결정론 가드 & 자문',
-      lead: data ? `Lead · ${data.name}` : 'Lead · 리드',
-      verifier: data ? `Verifier · ${data.name}` : 'Verifier · 교차 검증',
-      decision: 'Decision Gate · 분기 계층',
-      back: '다시 Lead · 리드',
-      worker: data ? data.name : '하위 에이전트'
-    };
-    const colors = { advisor: 'var(--violet)', lead: 'var(--amber)', verifier: 'var(--gold)', decision: 'var(--teal)', back: 'var(--amber)', worker: 'var(--cyan)' };
+    const titles = { ...nodeTitles };
+    if (key === 'lead' && data) titles.lead = `Lead · ${data.name}`;
+    if (key === 'verifier' && data) titles.verifier = `Verifier · ${data.name}`;
+    if (key === 'worker' && data) titles.worker = data.name;
     const meta = nodeMeta(key, data);
     let extra = '';
-    if (key === 'decision') {
-      extra = `<div class="signal-list"><div class="section-title">신호 분해 · θ_sharp 70%</div>${(latest.routes || []).map(r => {
-        const isSplit = r.forced_split || r.p < 0.70;
-        const color = r.forced_split ? 'var(--rose)' : (isSplit ? 'var(--amber)' : 'var(--teal)');
-        const pct = Math.max(2, Math.min(100, Math.round((r.p || 0) * 100)));
-        return `<div class="sig-row">
-          <div class="sig-head"><b>${esc(r.name)}</b><span class="sig-stat" style="color:${color};">p=${(r.p || 0).toFixed(2)} ${isSplit ? 'split' : 'sharp'} · ${esc(r.basis || 'prior')} · m:${r.samples || 0}</span></div>
-          <div class="bar-track ${isSplit ? 'split' : ''}"><div class="bar-fill" style="width:${pct}%;background:${color};color:${color};"></div><div class="bar-thresh"></div></div>
-        </div>`;
-      }).join('')}</div>`;
+    if (key === 'decision' || key === 'f-decision') {
+      extra = `<div class="signal-list"><div class="section-title">신호 분해 · θ_sharp 70%</div>${routeBarsHtml(latest.routes || [])}</div>`;
     }
-    if (key === 'advisor') {
+    if (key === 'advisor' || key === 'f-skills' || key === 'f-step-advisor') {
       const gates = Array.isArray(latest.active_gates) && latest.active_gates.length ? latest.active_gates : fallbackGates;
       extra = `<div class="signal-list"><div class="section-title">활성 게이트 · 프로브</div>${gates.map(g =>
         `<div class="log-line"><b style="color:${g.active ? 'var(--violet)' : 'var(--soft)'};">${esc(g.gate || '')} · ${esc(g.label)}</b><br/>${esc(g.detail || '')} — ${g.active ? 'active' : 'idle'}</div>`
       ).join('')}</div>`;
     }
-    if (key === 'verifier' && (latest.verifiers || []).length > 1) {
+    if ((key === 'verifier' || key === 'f-step-verifier') && (latest.verifiers || []).length > 1) {
       extra = `<div class="signal-list"><div class="section-title">활성 Verifier 세션</div>${(latest.verifiers || []).map(v =>
         `<div class="log-line"><b style="color:var(--gold);">${esc(v.name)}</b><br/>${esc(telemetryOf(v))}<br/>${esc(v.activity || '')}</div>`
       ).join('')}</div>`;
     }
+    const logs = latest.recent_events || [];
+    const logsHtml = `<div class="signal-list"><div class="section-title">감사 로그</div>${
+      logs.length ? logs.map(l => `<div class="log-line">${esc(l)}</div>`).join('') : '<div class="empty-detail">최근 decision_events 로그가 없습니다.</div>'
+    }</div>`;
 
     target.innerHTML = `<div class="detail-card">
-      <div class="detail-title" style="color:${colors[key] || 'var(--text)'};">${esc(titles[key] || titles.worker)}</div>
+      <div class="section-title">라우팅 상세</div>
+      <div class="detail-title" style="color:${nodeColors[key] || 'var(--text)'};">${esc(titles[key] || titles.worker)}</div>
       <div class="detail-desc">${esc(nodeDescriptions[key] || nodeDescriptions.worker)}</div>
       ${kvHtml(meta)}
       ${extra}
+      ${logsHtml}
     </div>`;
   }
 
-  function markerDefs() {
+  function renderInspector() {
+    if (!latest) return;
+    const target = $('inspContent');
+    if (activeTab === 'overview') return renderOverviewTab(target);
+    if (activeTab === 'live') return renderLiveTab(target);
+    if (activeTab === 'connectors') return renderConnectorStudio(target);
+    return renderDetailTab(target);
+  }
+
+  function markerDefs(prefix = 'wire') {
     return `<defs>
-      <filter id="orbGlow" x="-120%" y="-120%" width="340%" height="340%"><feGaussianBlur stdDeviation="3.2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-      <marker id="wire-arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M 1 1.2 L 9 5 L 1 8.8 L 3 5 z" fill="context-stroke"/></marker>
-      <marker id="wire-arrow-start" viewBox="0 0 10 10" refX="1.5" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M 1 1.2 L 9 5 L 1 8.8 L 3 5 z" fill="context-stroke"/></marker>
+      <filter id="${prefix}-orbGlow" x="-120%" y="-120%" width="340%" height="340%"><feGaussianBlur stdDeviation="3.2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      <marker id="${prefix}-wire-arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M 1 1.2 L 9 5 L 1 8.8 L 3 5 z" fill="context-stroke"/></marker>
+      <marker id="${prefix}-wire-arrow-start" viewBox="0 0 10 10" refX="1.5" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M 1 1.2 L 9 5 L 1 8.8 L 3 5 z" fill="context-stroke"/></marker>
     </defs>`;
   }
 
@@ -1103,15 +2032,15 @@
     const mid = topY + (bottomY - topY) * 0.48;
     return Math.min(bottomY - 22, Math.max(topY + 18, mid));
   }
-  function orbMotion(pathId, color, r, opacity, begin = '0s', hiddenUntilBegin = false) {
+  function orbMotion(pathId, color, r, opacity, begin = '0s', hiddenUntilBegin = false, prefix = 'wire') {
     const hidden = hiddenUntilBegin ? ' visibility="hidden"' : '';
     const reveal = hiddenUntilBegin ? `<set attributeName="visibility" to="visible" begin="${begin}"/>` : '';
-    return `<circle class="wire-orb" r="${r}" fill="${color}" opacity="${opacity}"${hidden}>${reveal}<animateMotion dur="3.8s" repeatCount="indefinite" rotate="auto" begin="${begin}"><mpath href="#${pathId}"/></animateMotion></circle>`;
+    return `<circle class="wire-orb" filter="url(#${prefix}-orbGlow)" r="${r}" fill="${color}" opacity="${opacity}"${hidden}>${reveal}<animateMotion dur="3.8s" repeatCount="indefinite" rotate="auto" begin="${begin}"><mpath href="#${pathId}"/></animateMotion></circle>`;
   }
   function mountChevrons(svg, sources) {
     if (!sources.length) return;
     const ns = 'http://www.w3.org/2000/svg';
-    const labelLayer = svg.querySelector('#wire-label-layer');
+    const labelLayer = svg.querySelector('.wire-label-layer');
     sources.forEach(source => {
       const path = svg.querySelector(`#${source.id}`);
       if (!path || !path.getTotalLength || !path.getPointAtLength) return;
@@ -1137,16 +2066,29 @@
     });
   }
 
-  function drawWires() {
-    const svg = $('wiresSvg');
-    const stage = $('stage');
-    if (!svg || !stage || !latest) return;
+  function firstPointOfD(d) {
+    const m = /M\s*(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)/.exec(d || '');
+    return m ? { x: Number(m[1]), y: Number(m[2]) } : null;
+  }
+  function createWireContext(svg, stage) {
+    if (!svg || !stage) return null;
     const sr = stage.getBoundingClientRect();
+    if (!Number.isFinite(sr.width) || sr.width < 20 || sr.height < 20) return null;
     const width = Math.max(stage.scrollWidth, Math.ceil(sr.width));
     const height = Math.max(stage.scrollHeight, Math.ceil(sr.height));
     svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
     svg.style.width = `${width}px`;
     svg.style.height = `${height}px`;
+
+    const prefix = svg.id === 'factoryWiresSvg' ? 'factory-wire' : 'wire';
+    const parts = [markerDefs(prefix)];
+    const labels = [];
+    const chevronSources = [];
+    const busJunctions = new Map();
+    const portDots = [];
+    const portKeys = new Set();
+    const placedLabels = [];
+    let wireIndex = 0;
 
     const rectOf = (el) => {
       if (!el) return null;
@@ -1159,26 +2101,53 @@
         cy: (r.top + r.bottom) / 2 - sr.top
       };
     };
-    const box = (id) => rectOf($(id));
-    const adv = box('node-advisor');
-    const lead = box('node-lead');
-    const ver = box('node-verifier');
-    const dec = box('node-decision');
-    const wbox = box('workersBox');
-    const back = box('node-back');
-    if (!adv || !lead || !ver || !dec || !wbox || !back) return;
+    const box = (id) => rectOf(document.getElementById(id));
 
-    const parts = [markerDefs()];
-    const labels = [];
-    const chevronSources = [];
-    const busJunctions = new Map();
-    let wireIndex = 0;
-    function addLabel(x, y, text, width, color) {
-      labels.push(`<rect class="wire-label-bg" x="${x - width / 2}" y="${y - 10}" width="${width}" height="20" rx="10" stroke="${color}" stroke-opacity="0.32"/>`);
-      labels.push(`<text class="wire-label-txt" x="${x}" y="${y + 0.5}">${esc(text)}</text>`);
+    function labelRect(x, y, width) {
+      return { l: x - width / 2 - 3, r: x + width / 2 + 3, t: y - 12, b: y + 12 };
     }
-    function addBusJunction(x, y) {
-      busJunctions.set(`${Math.round(x)}:${Math.round(y)}`, { x, y });
+    function rectsOverlap(a, b) {
+      return !(a.r < b.l || a.l > b.r || a.b < b.t || a.t > b.b);
+    }
+    function resolveLabelPosition(x, y, labelW) {
+      const minX = labelW / 2 + 8;
+      const maxX = Math.max(minX, width - labelW / 2 - 8);
+      const safeX = Math.min(Math.max(minX, x), maxX);
+      for (let step = 0; step < 15; step++) {
+        const magnitude = Math.ceil(step / 2) * 24;
+        const dy = step === 0 ? 0 : (step % 2 === 1 ? -magnitude : magnitude);
+        const cy = Math.min(Math.max(14, y + dy), Math.max(14, height - 14));
+        const candidate = labelRect(safeX, cy, labelW);
+        if (!placedLabels.some(r => rectsOverlap(candidate, r))) return { x: safeX, y: cy, rect: candidate };
+      }
+      for (let step = 0; step < 15; step++) {
+        const magnitude = Math.ceil(step / 2) * 24;
+        const dy = step === 0 ? 0 : (step % 2 === 1 ? -magnitude : magnitude);
+        const shifted = x + (step % 2 === 1 ? labelW + 18 : -(labelW + 18));
+        const cx = Math.min(Math.max(minX, shifted), maxX);
+        const cy = Math.min(Math.max(14, y + dy), Math.max(14, height - 14));
+        const candidate = labelRect(cx, cy, labelW);
+        if (!placedLabels.some(r => rectsOverlap(candidate, r))) return { x: cx, y: cy, rect: candidate };
+      }
+      const fallback = labelRect(safeX, y, labelW);
+      return { x: safeX, y, rect: fallback };
+    }
+    function addLabel(x, y, text, width, color) {
+      const pos = resolveLabelPosition(x, y, width);
+      placedLabels.push(pos.rect);
+      labels.push(`<rect class="wire-label-bg" x="${nf(pos.x - width / 2)}" y="${nf(pos.y - 10)}" width="${nf(width)}" height="20" rx="10" stroke="${color}" stroke-opacity="0.32"/>`);
+      labels.push(`<text class="wire-label-txt" x="${nf(pos.x)}" y="${nf(pos.y + 0.5)}">${esc(text)}</text>`);
+    }
+    function addPort(x, y, color) {
+      if (!portDotsEnabled || !Number.isFinite(x) || !Number.isFinite(y)) return;
+      const key = `${Math.round(x)}:${Math.round(y)}:${color}`;
+      if (portKeys.has(key)) return;
+      portKeys.add(key);
+      portDots.push(`<circle class="sv-route-port" cx="${nf(x)}" cy="${nf(y)}" r="3" fill="${color}"/>`);
+    }
+    function addBusJunction(x, y, color = C.cyan) {
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      busJunctions.set(`${Math.round(x)}:${Math.round(y)}:${color}`, { x, y, color });
     }
     function appendFlow(pathId, d, color, active) {
       if (!active) return;
@@ -1186,24 +2155,64 @@
         parts.push(`<path class="wire-flow wire-flow-packet-body" d="${d}" stroke="${color}" style="color:${color}"/>`);
         parts.push(`<path class="wire-flow wire-flow-packet-head" d="${d}" stroke="${color}" style="color:${color}"/>`);
       } else if (flowStyle === 'comet') {
-        parts.push(orbMotion(pathId, color, 3.4, 0.98));
-        parts.push(orbMotion(pathId, color, 2.5, 0.62, '0.14s', true));
-        parts.push(orbMotion(pathId, color, 1.8, 0.38, '0.28s', true));
-        parts.push(orbMotion(pathId, color, 1.2, 0.22, '0.42s', true));
+        parts.push(orbMotion(pathId, color, 3.4, 0.98, '0s', false, prefix));
+        parts.push(orbMotion(pathId, color, 2.5, 0.62, '0.14s', true, prefix));
+        parts.push(orbMotion(pathId, color, 1.8, 0.38, '0.28s', true, prefix));
+        parts.push(orbMotion(pathId, color, 1.2, 0.22, '0.42s', true, prefix));
       } else if (flowStyle === 'particle') {
-        parts.push(orbMotion(pathId, color, 3.2, 0.96));
+        parts.push(orbMotion(pathId, color, 3.2, 0.96, '0s', false, prefix));
       }
     }
-    function addWire({ d, color, active = false, dotted = false, startArrow = false, arrow = true, label = null, labelX = 0, labelY = 0, labelW = 88 }) {
+    function addWire({ d, color, active = false, dotted = false, startArrow = false, arrow = true, label = null, labelX = 0, labelY = 0, labelW = 88, startPort = true, ports = [] }) {
+      if (!d) return;
       const idx = wireIndex++;
-      const pathId = `wire-path-${idx}`;
+      const pathId = `${prefix}-path-${idx}`;
       const cls = `wire-path ${active ? 'active' : ''} ${dotted ? 'dotted' : ''}`;
-      parts.push(`<path class="wire-casing" d="${d}"/>`);
-      parts.push(`<path id="${pathId}" class="${cls}" d="${d}" stroke="${color}" style="color:${color}" ${arrow ? 'marker-end="url(#wire-arrow)"' : ''} ${startArrow ? 'marker-start="url(#wire-arrow-start)"' : ''}/>`);
+      if (casingEnabled) parts.push(`<path class="sv-casing wire-casing" d="${d}"/>`);
+      parts.push(`<path id="${pathId}" class="${cls}" d="${d}" stroke="${color}" style="color:${color}" ${arrow ? `marker-end="url(#${prefix}-wire-arrow)"` : ''} ${startArrow ? `marker-start="url(#${prefix}-wire-arrow-start)"` : ''}/>`);
       if (flowStyle === 'chevron') chevronSources.push({ id: pathId, color, active });
       appendFlow(pathId, d, color, active);
+      if (startPort) {
+        const p0 = firstPointOfD(d);
+        if (p0) addPort(p0.x, p0.y, color);
+      }
+      (ports || []).forEach(pt => addPort(pt.x, pt.y, color));
       if (label) addLabel(labelX, labelY, label, labelW, color);
     }
+    function finish() {
+      if (portDotsEnabled && busJunctions.size) {
+        Array.from(busJunctions.values()).forEach(j => addPort(j.x, j.y, j.color));
+      }
+      if (portDotsEnabled && portDots.length) {
+        parts.push(`<g class="sv-route-ports">${portDots.join('')}</g>`);
+      }
+      parts.push(`<g id="${prefix}-label-layer" class="wire-label-layer">${labels.join('')}</g>`);
+      svg.innerHTML = parts.join('');
+      if (flowStyle === 'chevron') mountChevrons(svg, chevronSources);
+      if (paused && svg.pauseAnimations) svg.pauseAnimations();
+    }
+    return { width, height, rectOf, box, addWire, addBusJunction, finish };
+  }
+
+  function drawWires() {
+    if (viewMode === 'factory') drawFactoryWires();
+    else drawTopologyWires();
+  }
+
+  function drawTopologyWires() {
+    const svg = $('wiresSvg');
+    const stage = $('stage');
+    if (!latest) return;
+    const ctx = createWireContext(svg, stage);
+    if (!ctx) return;
+    const { width, box, rectOf, addWire, addBusJunction } = ctx;
+    const adv = box('node-advisor');
+    const lead = box('node-lead');
+    const ver = box('node-verifier');
+    const dec = box('node-decision');
+    const wbox = box('workersBox');
+    const back = box('node-back');
+    if (!adv || !lead || !ver || !dec || !wbox || !back) return;
 
     const advActive = (latest.advisors || []).some(a => a.active);
     const verActive = (latest.verifiers || []).some(v => v.active);
@@ -1262,8 +2271,8 @@
       const ex = w.r.cx;
       const ey = w.r.t - 4;
       if (wireShape === 'bus') {
-        addBusJunction(sx, fanoutBusY);
-        addBusJunction(ex, fanoutBusY);
+        addBusJunction(sx, fanoutBusY, C.cyan);
+        addBusJunction(ex, fanoutBusY, C.cyan);
       }
       addWire({
         d: routeVertical(sx, sy, ex, ey, wireShape === 'bus' ? { midY: fanoutBusY, radius: 9, landing: 10 } : { landing: 10 }),
@@ -1278,8 +2287,8 @@
       const ex = wireShape === 'bus' ? back.cx : (returnPorts[i] || back.cx);
       const ey = back.t - 4;
       if (wireShape === 'bus') {
-        addBusJunction(sx, faninBusY);
-        addBusJunction(ex, faninBusY);
+        addBusJunction(sx, faninBusY, C.cyan);
+        addBusJunction(ex, faninBusY, C.cyan);
       }
       addWire({
         d: routeVertical(sx, sy, ex, ey, wireShape === 'bus' ? { midY: faninBusY, radius: 9, landing: 12 } : { landing: 12 }),
@@ -1304,16 +2313,241 @@
       label: '교차검증 · 회귀루프', labelX: Math.max(76, loopX - 58), labelY: (back.cy + ver.cy) / 2, labelW: 116
     });
 
-    if (wireShape === 'bus' && busJunctions.size) {
-      parts.push(Array.from(busJunctions.values()).map(j =>
-        `<circle class="wire-junction" cx="${nf(j.x)}" cy="${nf(j.y)}" r="2.8" fill="${C.cyan}"/>`
-      ).join(''));
-    }
+    ctx.finish();
+  }
 
-    parts.push(`<g id="wire-label-layer">${labels.join('')}</g>`);
-    svg.innerHTML = parts.join('');
-    if (flowStyle === 'chevron') mountChevrons(svg, chevronSources);
-    if (paused && svg.pauseAnimations) svg.pauseAnimations();
+  function drawFactoryWires() {
+    const svg = $('factoryWiresSvg');
+    const stage = $('factoryStage');
+    if (!latest) return;
+    const ctx = createWireContext(svg, stage);
+    if (!ctx) return;
+    const { box, addWire, addBusJunction } = ctx;
+
+    const inputs = box('f-inputs');
+    const runtime = box('f-runtime');
+    const outputs = box('f-outputs');
+    const dispatch = box('f-node-dispatch');
+    const brief = box('f-node-brief');
+    const rework = box('f-node-rework');
+    const osherdr = box('f-node-osherdr');
+    const dec = box('f-node-decision');
+    const session = box('f-node-session');
+    const stepDispatch = box('f-node-step-dispatch');
+    const stepCoder = box('f-node-step-coder');
+    const stepVerifier = box('f-node-step-verifier');
+    const stepAdvisor = box('f-node-step-advisor');
+    const stepBackprop = box('f-node-step-backprop');
+    const skills = box('f-node-skills');
+    const pod = box('f-node-agentpod');
+    const roster = box('f-node-roster');
+    const osbox = box('f-osbox');
+    const scanner = box('f-node-scanner');
+    const mapper = box('f-node-mapper');
+    const osDecision = box('f-node-osdecision');
+    const ready = box('f-node-readypr');
+    const human = box('f-node-human');
+    const merge = box('f-node-merge');
+    const audit = box('f-node-audit');
+    const boxes = [inputs, runtime, outputs, dispatch, brief, rework, osherdr, dec, session, stepDispatch, stepCoder, stepVerifier, stepAdvisor, stepBackprop, skills, pod, roster, osbox, scanner, mapper, osDecision, ready, human, merge, audit];
+    if (boxes.some(b => !b)) return;
+
+    const oc = outcomeCounts(latest);
+    const workers = filteredWorkers(latest);
+    const activeWorkers = activeCount(workers);
+    const openActive = (latest.open_forks || 0) > 0;
+    const reworkActive = (oc.rework || 0) > 0;
+    const decisionActive = (latest.total_forks || 0) > 0 || latest.db_live;
+    const leadActive = Boolean(latest.lead);
+    const coderActive = activeCount(workers.filter(w => (w.slot || 'coder') === 'coder')) > 0;
+    const verifierActive = activeCount(latest.verifiers || []) > 0;
+    const advisorActive = activeCount(latest.advisors || []) > 0;
+    const passActive = (oc.pass || 0) > 0;
+    const humanActive = (oc.waiting_human || 0) > 0;
+    const triggerActive = Boolean(factoryTrigger);
+    const osActive = activeWorkers > 0 || num(latest.host_process_count) > 0;
+
+    // INPUT → Decision Gate: semantic local trigger elbows with separated target ports.
+    const inputSources = [
+      { b: dispatch, color: C.indigo, active: openActive || factoryTrigger === 'dispatch', label: 'fork 발급', dy: -18, ty: dec.t + dec.h * 0.18, w: 70 },
+      { b: brief, color: C.cyan, active: decisionActive || factoryTrigger === 'dispatch', label: 'Standards/Spec', dy: 0, ty: dec.t + dec.h * 0.39, w: 92 },
+      { b: rework, color: C.violet, active: reworkActive || factoryTrigger === 'rework', label: 'exit 3 · rework', dy: 18, ty: dec.t + dec.h * 0.61, w: 98 },
+      { b: osherdr, color: C.emerald, active: osActive || factoryTrigger === 'os', label: 'ps · hc · herdr', dy: 24, ty: dec.t + dec.h * 0.82, w: 92 }
+    ];
+    const inputBusX = inputs.r + (runtime.l - inputs.r) * 0.54;
+    inputSources.forEach((src, i) => {
+      const sx = src.b.r + 3;
+      const sy = src.b.cy + (src.dy * 0.18);
+      const ex = dec.l - 5;
+      const ey = src.ty;
+      const midX = wireShape === 'bus' ? inputBusX : sx + (ex - sx) * (0.46 + i * 0.035);
+      if (wireShape === 'bus') {
+        addBusJunction(midX, sy, src.color);
+        addBusJunction(midX, ey, src.color);
+      }
+      addWire({
+        d: routeHorizontal(sx, sy, ex, ey, { midX, radius: wireShape === 'bus' ? 8 : 10 }),
+        color: src.color,
+        active: src.active,
+        label: src.label,
+        labelX: sx + (ex - sx) * 0.47,
+        labelY: sy + (i - 1) * 7,
+        labelW: src.w
+      });
+    });
+
+    // Decision Gate ↔ Session Policy → first pipeline step.
+    addWire({
+      d: routeVertical(dec.cx, dec.b + 3, session.cx, session.t - 4, { landing: 10 }),
+      color: C.blue, active: decisionActive, startArrow: true,
+      label: 'route policy', labelX: dec.cx + 61, labelY: (dec.b + session.t) / 2, labelW: 76
+    });
+    addWire({
+      d: routeHorizontal(session.r + 3, session.cy, stepDispatch.l - 5, stepDispatch.cy),
+      color: C.blue, active: leadActive || openActive,
+      label: 'session seat', labelX: (session.r + stepDispatch.l) / 2, labelY: session.cy - 2, labelW: 82
+    });
+
+    // Five-step pipeline state machine vertical chain.
+    const chain = [
+      [stepDispatch, stepCoder, openActive || activeWorkers > 0],
+      [stepCoder, stepVerifier, coderActive],
+      [stepVerifier, stepAdvisor, verifierActive],
+      [stepAdvisor, stepBackprop, advisorActive || passActive || reworkActive]
+    ];
+    chain.forEach(([a, b, active], chainIndex) => {
+      const pulseForStep =
+        (factoryTrigger === 'dispatch' && chainIndex === 0) ||
+        (factoryTrigger === 'verify' && chainIndex >= 1) ||
+        (factoryTrigger === 'rework' && chainIndex >= 2);
+      addWire({
+        d: routeVertical(a.cx, a.b + 3, b.cx, b.t - 4, { landing: 8 }),
+        color: C.amber,
+        active: active || pulseForStep
+      });
+    });
+
+    // Skills & Gates → Coder; Agent Pod ↔ Model Roster; Agent Pod → Verifier.
+    addWire({
+      d: routeHorizontal(skills.l - 3, skills.cy, stepCoder.r + 5, stepCoder.cy - 5, { midX: (skills.l + stepCoder.r) / 2 }),
+      color: C.blue, active: coderActive,
+      label: 'skills & gates', labelX: pod.cx - 28, labelY: skills.b + Math.max(10, (pod.t - skills.b) / 2), labelW: 80
+    });
+    addWire({
+      d: routeHorizontal(pod.r + 2, pod.cy, roster.l - 2, roster.cy),
+      color: C.indigo, active: activeWorkers > 0, startArrow: true,
+      label: 'prompt / effort', labelX: (pod.r + roster.l) / 2, labelY: pod.t - 10, labelW: 94
+    });
+    addWire({
+      d: routeHorizontal(pod.l - 3, pod.cy + 8, stepVerifier.r + 5, stepVerifier.cy + 4, { midX: (pod.l + stepVerifier.r) / 2 }),
+      color: C.indigo, active: verifierActive,
+      label: 'skills & gates', labelX: pod.cx - 28, labelY: pod.b + 17, labelW: 80
+    });
+
+    // Pipeline outputs → right results column. Drop into the open lane below the resource cards,
+    // then use one shared riser in the runtime/output gap so result wires never cut through cards.
+    const outputBusX = runtime.r + (outputs.l - runtime.r) * 0.52;
+    const resourceClearY = Math.min(osbox.t - 24, pod.b + 34);
+    function addOutputWire(step, target, opts) {
+      const sx = step.r + 4;
+      const sy = step.cy + (opts.syOffset || 0);
+      const ex = target.l - 5;
+      const ey = target.cy + (opts.eyOffset || 0);
+      const laneY = resourceClearY + (opts.laneOffset || 0);
+      const innerRiserX = Math.min(step.r + 22, pod.l - 10);
+      const points = [
+        { x: sx, y: sy },
+        { x: innerRiserX, y: sy },
+        { x: innerRiserX, y: laneY },
+        { x: outputBusX, y: laneY },
+        { x: outputBusX, y: ey },
+        { x: ex, y: ey }
+      ];
+      if (wireShape === 'bus') {
+        addBusJunction(outputBusX, laneY, opts.color);
+        addBusJunction(outputBusX, ey, opts.color);
+      }
+      addWire({
+        d: roundedPath(points, wireShape === 'bus' ? 8 : (wireShape === 'bezier' ? 18 : 12)),
+        color: opts.color,
+        active: opts.active,
+        label: opts.label,
+        labelX: innerRiserX + (outputBusX - innerRiserX) * 0.52,
+        labelY: laneY - 13,
+        labelW: opts.labelW || 108
+      });
+    }
+    addOutputWire(stepVerifier, ready, {
+      color: C.green, active: verifierActive || passActive || factoryTrigger === 'verify', label: '로컬 커밋', labelW: 76, syOffset: -3, laneOffset: 0
+    });
+    addOutputWire(stepBackprop, human, {
+      color: C.green, active: passActive || humanActive || factoryTrigger === 'verify', label: 'Verdict PASS', labelW: 88, syOffset: -8, laneOffset: 28
+    });
+    addOutputWire(stepBackprop, audit, {
+      color: C.slate, active: (latest.total_forks || 0) > 0 || factoryTrigger === 'rework', label: 'decision_events', labelW: 104, syOffset: 9, laneOffset: 56
+    });
+
+    // Output column result chain (small, quiet slate rails).
+    addWire({
+      d: routeVertical(ready.cx, ready.b + 3, human.cx, human.t - 4, { landing: 8 }),
+      color: C.green, active: passActive || humanActive, arrow: true
+    });
+    addWire({
+      d: routeVertical(human.cx, human.b + 3, merge.cx, merge.t - 4, { landing: 8 }),
+      color: C.slate, active: passActive, arrow: true
+    });
+
+    // Scanner → mapper is internal to Live Runtime; the local OS/Herdr card feeds Decision Gate above.
+    addWire({
+      d: routeHorizontal(scanner.r + 3, scanner.cy, mapper.l - 5, mapper.cy),
+      color: C.emerald, active: activeWorkers > 0 || factoryTrigger === 'os',
+      label: 'detected pids', labelX: (scanner.r + mapper.l) / 2, labelY: scanner.t - 10, labelW: 88
+    });
+
+    // Live Mapper sweeping emerald return bus around the runtime frame, then back into Decision Gate
+    // through the gate-rail whitespace. This keeps the feedback bus clear of Skills/Pod/Roster cards.
+    const returnX = runtime.r - 12;
+    const returnTopY = runtime.t - 8;
+    const decisionApproachX = dec.r + 8;
+    const returnPoints = [
+      { x: mapper.r + 4, y: mapper.cy },
+      { x: returnX, y: mapper.cy },
+      { x: returnX, y: returnTopY },
+      { x: decisionApproachX, y: returnTopY },
+      { x: decisionApproachX, y: dec.cy },
+      { x: dec.r + 4, y: dec.cy }
+    ];
+    const returnD = roundedPath(returnPoints, wireShape === 'bus' ? 8 : (wireShape === 'bezier' ? 18 : 12));
+    if (wireShape === 'bus') {
+      addBusJunction(returnX, mapper.cy, C.emerald);
+      addBusJunction(returnX, returnTopY, C.emerald);
+      addBusJunction(decisionApproachX, returnTopY, C.emerald);
+      addBusJunction(decisionApproachX, dec.cy, C.emerald);
+    }
+    addWire({
+      d: returnD,
+      color: C.emerald,
+      active: activeWorkers > 0 || factoryTrigger === 'os',
+      label: 'live pid map',
+      labelX: decisionApproachX + (returnX - decisionApproachX) * 0.54,
+      labelY: returnTopY - 13,
+      labelW: 84
+    });
+
+    // Dashed vertical equivalence link: Agent Pod ↔ live OS detector.
+    addWire({
+      d: routeVertical(pod.cx, pod.b + 4, pod.cx, osbox.t - 4, { landing: 10 }),
+      color: C.emerald,
+      active: activeWorkers > 0,
+      dotted: true,
+      startArrow: true,
+      label: 'same agent + model',
+      labelX: pod.cx + 66,
+      labelY: (pod.b + osbox.t) / 2,
+      labelW: 118
+    });
+
+    ctx.finish();
   }
 
   window.addEventListener('resize', () => { if (latest) requestAnimationFrame(drawWires); });

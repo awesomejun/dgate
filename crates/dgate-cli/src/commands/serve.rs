@@ -6,11 +6,12 @@
 //! - `GET /api/stream` — `text/event-stream` (SSE) 주기적 스냅숏 스트리밍
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -33,7 +34,8 @@ const ROUTES: [(&str, RouteId, &str); 4] = [
 ];
 
 fn parse_pid_from_address(addr: &str) -> Option<u64> {
-    addr.strip_prefix("pid:").and_then(|s| s.parse::<u64>().ok())
+    addr.strip_prefix("pid:")
+        .and_then(|s| s.parse::<u64>().ok())
 }
 
 fn worker_to_json(
@@ -76,12 +78,470 @@ fn format_hms_utc_offset(ms: i64) -> String {
     )
 }
 
+fn round1(v: f64) -> f64 {
+    (v * 10.0).round() / 10.0
+}
+
+fn run_command_capture(program: &str, args: &[&str], timeout: Duration) -> Option<String> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        stdout.read_to_end(&mut buf).ok()?;
+        Some(String::from_utf8_lossy(&buf).to_string())
+    });
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let _ = child.wait();
+                return reader.join().ok().flatten().map(|s| s.trim().to_string());
+            }
+            Ok(None) => {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+fn parse_git_worktree_count(output: &str) -> usize {
+    output
+        .lines()
+        .filter(|line| line.starts_with("worktree "))
+        .count()
+}
+
+fn parse_recent_commits_output(output: &str) -> Vec<Value> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, '\u{1f}');
+            let hash = parts.next()?.trim();
+            let subject = parts.next()?.trim();
+            let rel_time = parts.next()?.trim();
+            if hash.is_empty() {
+                return None;
+            }
+            Some(json!({
+                "hash": hash,
+                "subject": subject,
+                "rel_time": rel_time,
+            }))
+        })
+        .collect()
+}
+
+fn git_output(repo_dir: &Path, args: &[&str], timeout: Duration) -> Option<String> {
+    let dir = repo_dir.to_str()?;
+    let mut full_args = vec!["-C", dir];
+    full_args.extend_from_slice(args);
+    run_command_capture("git", &full_args, timeout).filter(|out| !out.is_empty())
+}
+
+fn repo_display_name(repo_dir: &Path) -> String {
+    let canonical = repo_dir
+        .canonicalize()
+        .unwrap_or_else(|_| repo_dir.to_path_buf());
+    canonical
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("repo")
+        .to_string()
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct LocalPipelineSummary {
+    run_id: String,
+    phase: String,
+    branch: String,
+    attempt: u64,
+    modified_ms: u128,
+}
+
+impl LocalPipelineSummary {
+    fn to_json(&self) -> Value {
+        json!({
+            "run_id": self.run_id,
+            "phase": self.phase,
+            "branch": self.branch,
+            "attempt": self.attempt,
+        })
+    }
+}
+
+fn parse_pipeline_state_document(text: &str) -> Option<(String, String, String, u64)> {
+    let value = serde_json::from_str::<Value>(text).ok()?;
+    let run_id = value.get("run_id").and_then(Value::as_str)?.trim();
+    if run_id.is_empty() {
+        return None;
+    }
+    let phase = value
+        .get("phase")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let branch = value
+        .get("branch")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let attempt = value.get("attempt").and_then(Value::as_u64).unwrap_or(0);
+    Some((run_id.to_string(), phase, branch, attempt))
+}
+
+fn file_modified_ms(path: &Path) -> u128 {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
+
+fn read_pipeline_summary(path: &Path) -> Option<LocalPipelineSummary> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let (run_id, phase, branch, attempt) = parse_pipeline_state_document(&text)?;
+    Some(LocalPipelineSummary {
+        run_id,
+        phase,
+        branch,
+        attempt,
+        modified_ms: file_modified_ms(path),
+    })
+}
+
+fn collect_pipeline_summaries(pipelines_dir: &Path) -> Vec<LocalPipelineSummary> {
+    let mut summaries: Vec<LocalPipelineSummary> = std::fs::read_dir(pipelines_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("json"))
+        .filter_map(|path| read_pipeline_summary(&path))
+        .collect();
+    summaries.sort_by(|a, b| {
+        b.modified_ms
+            .cmp(&a.modified_ms)
+            .then_with(|| a.run_id.cmp(&b.run_id))
+    });
+    summaries
+}
+
+fn collect_pipelines_json(pipelines_dir: &Path) -> Value {
+    let summaries = collect_pipeline_summaries(pipelines_dir);
+    let terminal = |phase: &str| matches!(phase, "ready_pr" | "escalated" | "failed");
+    let total = summaries.len();
+    let running = summaries
+        .iter()
+        .filter(|item| !terminal(item.phase.as_str()))
+        .count();
+    let ready_pr = summaries
+        .iter()
+        .filter(|item| item.phase == "ready_pr")
+        .count();
+    let escalated = summaries
+        .iter()
+        .filter(|item| item.phase == "escalated")
+        .count();
+    let recent: Vec<Value> = summaries
+        .iter()
+        .take(8)
+        .map(LocalPipelineSummary::to_json)
+        .collect();
+    json!({
+        "total": total,
+        "running": running,
+        "ready_pr": ready_pr,
+        "escalated": escalated,
+        "recent": recent,
+    })
+}
+
+fn collect_local_repo(repo_dir: &Path) -> Value {
+    let branch = git_output(
+        repo_dir,
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+        Duration::from_secs(2),
+    );
+    let head = git_output(
+        repo_dir,
+        &["log", "-1", "--format=%h %s"],
+        Duration::from_secs(2),
+    );
+    let worktree_count = git_output(
+        repo_dir,
+        &["worktree", "list", "--porcelain"],
+        Duration::from_secs(2),
+    )
+    .map(|out| parse_git_worktree_count(&out))
+    .unwrap_or(0);
+    let recent_commits = git_output(
+        repo_dir,
+        &["log", "-6", "--format=%h%x1f%s%x1f%cr"],
+        Duration::from_secs(2),
+    )
+    .map(|out| parse_recent_commits_output(&out))
+    .unwrap_or_default();
+    let pipelines = collect_pipelines_json(&repo_dir.join(".herdr").join("pipelines"));
+
+    json!({
+        "name": repo_display_name(repo_dir),
+        "branch": branch,
+        "head": head,
+        "worktree_count": worktree_count,
+        "recent_commits": recent_commits,
+        "pipelines": pipelines,
+        "fetched_at": format_hms_utc_offset(now_ms()),
+    })
+}
+
+struct LocalRepoCache {
+    last_refresh: Option<Instant>,
+    data: Value,
+}
+
+impl LocalRepoCache {
+    fn new() -> Self {
+        Self {
+            last_refresh: None,
+            data: json!({}),
+        }
+    }
+
+    fn snapshot(&mut self, repo_dir: &Path) -> Value {
+        let stale = self
+            .last_refresh
+            .map(|at| at.elapsed() >= Duration::from_secs(5))
+            .unwrap_or(true);
+        if stale {
+            self.data = collect_local_repo(repo_dir);
+            self.last_refresh = Some(Instant::now());
+        }
+        self.data.clone()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DiskUsage {
+    used_kb: u64,
+    total_kb: u64,
+    free_kb: u64,
+    pct: f64,
+}
+
+fn parse_df_k_output(output: &str) -> Option<DiskUsage> {
+    let mut fallback = None;
+    for line in output.lines().skip(1) {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 5 {
+            continue;
+        }
+        let (Ok(total_kb), Ok(used_kb), Ok(free_kb)) = (
+            cols[1].parse::<u64>(),
+            cols[2].parse::<u64>(),
+            cols[3].parse::<u64>(),
+        ) else {
+            continue;
+        };
+        let pct = cols[4]
+            .trim_end_matches('%')
+            .parse::<f64>()
+            .unwrap_or_else(|_| {
+                if total_kb == 0 {
+                    0.0
+                } else {
+                    used_kb as f64 * 100.0 / total_kb as f64
+                }
+            });
+        let usage = DiskUsage {
+            used_kb,
+            total_kb,
+            free_kb,
+            pct,
+        };
+        if cols.last() == Some(&"/") {
+            return Some(usage);
+        }
+        if fallback.is_none() {
+            fallback = Some(usage);
+        }
+    }
+    fallback
+}
+
+fn kb_to_gb(kb: u64) -> f64 {
+    kb as f64 / 1024.0 / 1024.0
+}
+
+fn collect_disk_usage() -> Value {
+    let usage = run_command_capture("df", &["-k", "/"], Duration::from_secs(2))
+        .as_deref()
+        .and_then(parse_df_k_output);
+    match usage {
+        Some(d) => json!({
+            "ok": true,
+            "used_gb": round1(kb_to_gb(d.used_kb)),
+            "total_gb": round1(kb_to_gb(d.total_kb)),
+            "free_gb": round1(kb_to_gb(d.free_kb)),
+            "pct": round1(d.pct),
+        }),
+        None => json!({ "ok": false, "used_gb": 0, "total_gb": 0, "free_gb": 0, "pct": 0 }),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RamUsage {
+    used_bytes: u64,
+    total_bytes: u64,
+}
+
+fn bytes_to_gb(bytes: u64) -> f64 {
+    bytes as f64 / 1024.0 / 1024.0 / 1024.0
+}
+
+fn bytes_to_mb(bytes: u64) -> u64 {
+    bytes / 1024 / 1024
+}
+
+fn parse_macos_vm_stat(output: &str, total_bytes: u64) -> Option<RamUsage> {
+    let mut page_size = 4096u64;
+    let mut active = 0u64;
+    let mut wired = 0u64;
+    let mut compressed = 0u64;
+    for line in output.lines() {
+        if line.contains("page size of") {
+            page_size = line
+                .split_whitespace()
+                .filter_map(|tok| tok.parse::<u64>().ok())
+                .next()
+                .unwrap_or(4096);
+            continue;
+        }
+        let Some((name, raw_pages)) = line.split_once(':') else {
+            continue;
+        };
+        let pages = raw_pages
+            .trim()
+            .trim_end_matches('.')
+            .parse::<u64>()
+            .unwrap_or(0);
+        match name.trim() {
+            "Pages active" => active = pages,
+            "Pages wired down" => wired = pages,
+            "Pages occupied by compressor" => compressed = pages,
+            _ => {}
+        }
+    }
+    if total_bytes == 0 {
+        return None;
+    }
+    Some(RamUsage {
+        used_bytes: active.saturating_add(wired).saturating_add(compressed) * page_size,
+        total_bytes,
+    })
+}
+
+fn parse_linux_meminfo(output: &str) -> Option<RamUsage> {
+    let mut total_kb = None;
+    let mut available_kb = None;
+    for line in output.lines() {
+        let mut parts = line.split_whitespace();
+        match (parts.next(), parts.next()) {
+            (Some("MemTotal:"), Some(v)) => total_kb = v.parse::<u64>().ok(),
+            (Some("MemAvailable:"), Some(v)) => available_kb = v.parse::<u64>().ok(),
+            _ => {}
+        }
+    }
+    let total = total_kb? * 1024;
+    let available = available_kb? * 1024;
+    Some(RamUsage {
+        used_bytes: total.saturating_sub(available),
+        total_bytes: total,
+    })
+}
+
+fn collect_ram_usage() -> Value {
+    let usage = if cfg!(target_os = "macos") {
+        let total = run_command_capture("sysctl", &["-n", "hw.memsize"], Duration::from_secs(2))
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        run_command_capture("vm_stat", &[], Duration::from_secs(2))
+            .as_deref()
+            .and_then(|out| parse_macos_vm_stat(out, total))
+    } else {
+        std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .as_deref()
+            .and_then(parse_linux_meminfo)
+    };
+
+    match usage {
+        Some(ram) if ram.total_bytes > 0 => json!({
+            "ok": true,
+            "used_mb": bytes_to_mb(ram.used_bytes),
+            "total_gb": round1(bytes_to_gb(ram.total_bytes)),
+            "pct": round1(ram.used_bytes as f64 * 100.0 / ram.total_bytes as f64),
+        }),
+        _ => json!({ "ok": false, "used_mb": 0, "total_gb": 0, "pct": 0 }),
+    }
+}
+
+fn collect_system_telemetry() -> Value {
+    json!({
+        "fetched_at": format_hms_utc_offset(now_ms()),
+        "disk": collect_disk_usage(),
+        "ram": collect_ram_usage(),
+    })
+}
+
+struct SystemTelemetryCache {
+    last_refresh: Option<Instant>,
+    data: Value,
+}
+
+impl SystemTelemetryCache {
+    fn new() -> Self {
+        Self {
+            last_refresh: None,
+            data: json!({ "disk": {}, "ram": {} }),
+        }
+    }
+
+    fn snapshot(&mut self) -> Value {
+        let stale = self
+            .last_refresh
+            .map(|at| at.elapsed() >= Duration::from_secs(5))
+            .unwrap_or(true);
+        if stale {
+            self.data = collect_system_telemetry();
+            self.last_refresh = Some(Instant::now());
+        }
+        self.data.clone()
+    }
+}
+
 fn build_web_snapshot(
     db_path: Option<&str>,
     repo_filter: Option<&PathBuf>,
     snapshotter: &mut LiveSyncSnapshotter,
+    repo_dir: &Path,
+    local_repo_cache: &mut LocalRepoCache,
+    system_cache: &mut SystemTelemetryCache,
 ) -> Value {
     let mut merged = snapshotter.tick_now();
+    let host_process_count = merged.workers.len();
     if let Some(dir) = repo_filter {
         let dir_s = dir.to_string_lossy().into_owned();
         merged
@@ -176,6 +636,11 @@ fn build_web_snapshot(
     let active_worker_count = ordered_workers
         .iter()
         .filter(|w| w.get("active").and_then(Value::as_bool).unwrap_or(false))
+        .count();
+    let mapped_count = merged
+        .workers
+        .iter()
+        .filter(|w| !matches!(w.status.as_deref(), Some("done" | "idle" | "error")))
         .count();
     let effort_level = lead
         .as_ref()
@@ -284,6 +749,8 @@ fn build_web_snapshot(
     };
 
     let failure_pressure = outcomes.rework + outcomes.fail > 0;
+    let local_repo_data = local_repo_cache.snapshot(repo_dir);
+    let system_data = system_cache.snapshot();
     let active_gates = vec![
         json!({
             "id": "g1-hook-guard",
@@ -344,10 +811,14 @@ fn build_web_snapshot(
         "advisors": advisors,
         "workers": ordered_workers,
         "recent_events": recent_events,
+        "local_repo": local_repo_data,
+        "system": system_data,
+        "host_process_count": host_process_count,
+        "mapped_count": mapped_count,
     })
 }
 
-fn read_request_path(stream: &mut TcpStream) -> Option<String> {
+fn read_request_target(stream: &mut TcpStream) -> Option<String> {
     let mut reader = BufReader::new(stream.try_clone().ok()?);
     let mut line = String::new();
     reader.read_line(&mut line).ok()?;
@@ -356,18 +827,26 @@ fn read_request_path(stream: &mut TcpStream) -> Option<String> {
     if method != "GET" {
         return None;
     }
-    let path = parts.next()?.split('?').next()?.to_string();
-    Some(path)
+    let target = parts.next()?;
+    let mut split = target.splitn(2, '?');
+    Some(split.next()?.to_string())
 }
 
-fn handle_client(
-    mut stream: TcpStream,
-    shared_json: Arc<Mutex<String>>,
-    poll_ms: u64,
-) {
+fn write_json_response(stream: &mut TcpStream, status: &str, body: String) {
+    let header = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(body.as_bytes());
+}
+
+fn handle_client(mut stream: TcpStream, shared_json: Arc<Mutex<String>>, poll_ms: u64) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
-    let Some(path) = read_request_path(&mut stream) else {
-        let _ = stream.write_all(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    let Some(path) = read_request_target(&mut stream) else {
+        let _ = stream.write_all(
+            b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
         return;
     };
 
@@ -386,12 +865,7 @@ fn handle_client(
                 .lock()
                 .map(|g| g.clone())
                 .unwrap_or_else(|_| "{}".to_string());
-            let header = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            let _ = stream.write_all(header.as_bytes());
-            let _ = stream.write_all(body.as_bytes());
+            write_json_response(&mut stream, "200 OK", body);
         }
         "/api/stream" => {
             let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
@@ -446,11 +920,20 @@ pub fn cmd_serve(args: &ParsedArgs, _json: bool) -> CmdResult {
     let listener = TcpListener::bind(&addr)
         .map_err(|e| DgError::Fatal(format!("localhost {addr} 바인드 실패: {e}")))?;
 
-    let mut opts = LiveSyncOptions::new(repo_dir);
+    let mut opts = LiveSyncOptions::new(repo_dir.clone());
     opts.repo_filter_dir = repo_filter.clone();
     let mut snapshotter = LiveSyncSnapshotter::new(opts);
+    let mut system_cache = SystemTelemetryCache::new();
+    let mut local_repo_cache = LocalRepoCache::new();
 
-    let initial = build_web_snapshot(db_path.as_deref(), repo_filter.as_ref(), &mut snapshotter);
+    let initial = build_web_snapshot(
+        db_path.as_deref(),
+        repo_filter.as_ref(),
+        &mut snapshotter,
+        &repo_dir,
+        &mut local_repo_cache,
+        &mut system_cache,
+    );
     let shared_json = Arc::new(Mutex::new(
         serde_json::to_string(&initial).unwrap_or_else(|_| "{}".to_string()),
     ));
@@ -459,9 +942,17 @@ pub fn cmd_serve(args: &ParsedArgs, _json: bool) -> CmdResult {
     let bg_json = Arc::clone(&shared_json);
     let bg_db = db_path.clone();
     let bg_repo = repo_filter.clone();
+    let bg_repo_dir = repo_dir.clone();
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_millis(poll_ms));
-        let snap = build_web_snapshot(bg_db.as_deref(), bg_repo.as_ref(), &mut snapshotter);
+        let snap = build_web_snapshot(
+            bg_db.as_deref(),
+            bg_repo.as_ref(),
+            &mut snapshotter,
+            &bg_repo_dir,
+            &mut local_repo_cache,
+            &mut system_cache,
+        );
         if let Ok(text) = serde_json::to_string(&snap) {
             if let Ok(mut guard) = bg_json.lock() {
                 *guard = text;
@@ -516,7 +1007,94 @@ mod tests {
             "판단 펄스",
             "animateMotion",
         ] {
-            assert!(WEB_HTML.contains(needle), "missing dashboard contract: {needle}");
+            assert!(
+                WEB_HTML.contains(needle),
+                "missing dashboard contract: {needle}"
+            );
         }
+    }
+
+    #[test]
+    fn embedded_web_html_contains_local_factory_contract() {
+        for needle in [
+            "LOCAL TRIGGERS",
+            "DGATE / LIVE RUNTIME",
+            "LOCAL RESULTS",
+            "Dispatch",
+            "Brief Gate",
+            "Rework / Esc",
+            "OS / Herdr",
+            "Worktree Commit",
+            "Verdict PASS",
+            "Checkpoint / Merge",
+            "DB Telemetry",
+            "로컬 상태",
+            "로컬 흐름 시뮬레이션",
+            "로컬 파이프라인",
+            "최근 로컬 커밋",
+            "fiv.co.kr/diagram/",
+        ] {
+            assert!(
+                WEB_HTML.contains(needle),
+                "missing local factory contract: {needle}"
+            );
+        }
+        assert!(!WEB_HTML.to_lowercase().contains(concat!("git", "hub")));
+    }
+
+    #[test]
+    fn parse_df_k_output_reads_root_disk_usage() {
+        let fixture = "Filesystem   1024-blocks      Used  Available Capacity iused ifree %iused  Mounted on\n/dev/disk3s1    971563008 245760000 725803000    26%  1000  2000     1%   /\n";
+        let usage = parse_df_k_output(fixture).expect("df fixture should parse");
+        assert_eq!(usage.total_kb, 971_563_008);
+        assert_eq!(usage.used_kb, 245_760_000);
+        assert_eq!(usage.free_kb, 725_803_000);
+        assert_eq!(usage.pct, 26.0);
+    }
+
+    #[test]
+    fn parse_git_worktree_count_reads_porcelain_entries() {
+        let fixture = "worktree /tmp/repo\nHEAD abc123\nbranch refs/heads/main\n\nworktree /tmp/repo-wt\nHEAD def456\nbranch refs/heads/feat/x\n";
+        assert_eq!(parse_git_worktree_count(fixture), 2);
+        assert_eq!(parse_git_worktree_count("branch refs/heads/main\n"), 0);
+    }
+
+    #[test]
+    fn parse_recent_commits_output_reads_hash_subject_and_relative_time() {
+        let fixture = "abc1234\u{1f}implement local repo card\u{1f}2 hours ago\ndef5678\u{1f}fix pipeline parser\u{1f}3 days ago\n";
+        let commits = parse_recent_commits_output(fixture);
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0]["hash"], "abc1234");
+        assert_eq!(commits[0]["subject"], "implement local repo card");
+        assert_eq!(commits[0]["rel_time"], "2 hours ago");
+    }
+
+    #[test]
+    fn pipeline_summary_parser_reads_local_state_files() {
+        let dir = tempfile::tempdir().expect("temp pipeline dir");
+        std::fs::write(
+            dir.path().join("run-a.json"),
+            r#"{"schema_version":1,"run_id":"run-a","fork_id":"fk_a","brief_path":"brief.md","branch":"feat/a","phase":"coder_running","attempt":1,"max_reworks":2,"coder_model":"m1","verifier_model":"m2","history":[]}"#,
+        )
+        .expect("write running pipeline");
+        std::fs::write(
+            dir.path().join("run-b.json"),
+            r#"{"schema_version":1,"run_id":"run-b","fork_id":"fk_b","brief_path":"brief.md","branch":"feat/b","phase":"ready_pr","attempt":0,"max_reworks":2,"coder_model":"m1","verifier_model":"m2","history":[]}"#,
+        )
+        .expect("write ready pipeline");
+        std::fs::write(dir.path().join("ignored.txt"), "{}").expect("write non-json");
+
+        let summaries = collect_pipeline_summaries(dir.path());
+        assert_eq!(summaries.len(), 2);
+        assert!(summaries.iter().any(|item| item.run_id == "run-a"
+            && item.phase == "coder_running"
+            && item.branch == "feat/a"
+            && item.attempt == 1));
+        let aggregate = collect_pipelines_json(dir.path());
+        assert_eq!(aggregate["total"], 2);
+        assert_eq!(aggregate["running"], 1);
+        assert_eq!(aggregate["ready_pr"], 1);
+        assert_eq!(aggregate["escalated"], 0);
+        assert_eq!(aggregate["recent"].as_array().map(Vec::len), Some(2));
     }
 }
