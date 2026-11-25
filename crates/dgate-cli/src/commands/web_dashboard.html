@@ -899,7 +899,7 @@
   function markerDefs() {
     return `<defs>
       <filter id="orbGlow" x="-120%" y="-120%" width="340%" height="340%"><feGaussianBlur stdDeviation="3.2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-      ${Object.entries(C).map(([name, color]) => `<marker id="arrow-${name}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="${color}"/></marker><marker id="arrow-${name}-start" viewBox="0 0 10 10" refX="2" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="${color}"/></marker>`).join('')}
+      ${Object.entries(C).map(([name, color]) => `<marker id="arrow-${name}" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M 1 1.2 L 9 5 L 1 8.8 L 3 5 z" fill="${color}"/></marker><marker id="arrow-${name}-start" viewBox="0 0 10 10" refX="1.5" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M 1 1.2 L 9 5 L 1 8.8 L 3 5 z" fill="${color}"/></marker>`).join('')}
     </defs>`;
   }
 
@@ -981,11 +981,15 @@
       label: '읽기전용 격리', labelX: (lead.r + ver.l) / 2, labelY: lead.cy, labelW: 88
     });
 
-    // Lead → Decision Gate.
+    // Lead → Decision Gate (수직 랜딩 스텁으로 화살촉 정중앙에 90° 직입).
+    const ldSy = lead.b + 3;
+    const ldEy = dec.t - 4;
+    const ldLand = Math.max(ldSy + 10, ldEy - 12);
+    const ldMid = (ldSy + ldLand) / 2;
     addWire({
-      d: `M ${lead.cx} ${lead.b + 3} C ${lead.cx} ${lead.b + 34}, ${dec.cx} ${dec.t - 34}, ${dec.cx} ${dec.t - 5}`,
+      d: `M ${lead.cx} ${ldSy} C ${lead.cx} ${ldMid}, ${dec.cx} ${ldMid}, ${dec.cx} ${ldLand} L ${dec.cx} ${ldEy}`,
       color: C.amber, colorName: 'amber', active: leadActive,
-      label: '분기 질의', labelX: (lead.cx + dec.cx) / 2, labelY: (lead.b + dec.t) / 2, labelW: 70
+      label: '분기 질의', labelX: (lead.cx + dec.cx) / 2, labelY: ldMid, labelW: 70
     });
 
     // Decision Gate → each visible worker card.
@@ -1001,10 +1005,12 @@
       const sx = dec.cx + spread;
       const sy = dec.b + 4;
       const ex = w.r.cx;
-      const ey = w.r.t - 5;
-      const fanY = Math.max(sy + 34, (workerLabelRect ? workerLabelRect.b : wbox.t) + 10);
+      const ey = w.r.t - 4;
+      const landY = Math.max(sy + 20, ey - 12);
+      const fanY = Math.min(landY - 12, Math.max(sy + 22, (workerLabelRect ? workerLabelRect.b : wbox.t) + 8));
+      const midY = (fanY + landY) / 2;
       addWire({
-        d: `M ${sx} ${sy} C ${sx} ${sy + 16}, ${sx} ${fanY - 16}, ${sx} ${fanY} C ${sx} ${fanY + 18}, ${ex} ${ey - 18}, ${ex} ${ey}`,
+        d: `M ${sx} ${sy} L ${sx} ${fanY} C ${sx} ${midY}, ${ex} ${midY}, ${ex} ${landY} L ${ex} ${ey}`,
         color: C.cyan, colorName: 'cyan', active: w.active
       });
     });
@@ -1014,18 +1020,20 @@
       const sx = w.r.cx;
       const sy = w.r.b + 4;
       const ex = back.l + back.w * (workerCards.length <= 1 ? 0.5 : 0.16 + 0.68 * (i / (workerCards.length - 1)));
-      const ey = back.t - 5;
-      const dy = Math.max(36, ey - sy);
+      const ey = back.t - 4;
+      const landY = Math.max(sy + 12, ey - 12);
+      const midY = (sy + landY) / 2;
       addWire({
-        d: `M ${sx} ${sy} C ${sx} ${sy + dy * 0.46}, ${ex} ${ey - dy * 0.48}, ${ex} ${ey}`,
+        d: `M ${sx} ${sy} C ${sx} ${midY}, ${ex} ${midY}, ${ex} ${landY} L ${ex} ${ey}`,
         color: C.cyan, colorName: 'cyan', active: w.active
       });
     });
 
-    // Bottom Return → Verifier, sweeping up the right side.
-    const loopX = Math.min(width - 20, Math.max(ver.r, back.r) + 30);
+    // Bottom Return → Verifier, sweeping up the right side with clean horizontal landing.
+    const loopX = Math.min(width - 18, Math.max(ver.r, back.r) + 32);
+    const verY = ver.cy + 10;
     addWire({
-      d: `M ${back.r + 4} ${back.cy} C ${loopX} ${back.cy}, ${loopX} ${ver.cy + 44}, ${ver.r + 5} ${ver.cy + 12}`,
+      d: `M ${back.r + 4} ${back.cy} C ${loopX} ${back.cy}, ${loopX} ${verY}, ${ver.r + 18} ${verY} L ${ver.r + 4} ${verY}`,
       color: C.gold, colorName: 'gold', active: verActive,
       label: '교차검증 · 회귀루프', labelX: Math.max(76, loopX - 58), labelY: (back.cy + ver.cy) / 2, labelW: 116
     });
