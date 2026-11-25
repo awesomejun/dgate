@@ -477,7 +477,8 @@ fn verifier_prompt(state: &PipelineState, verdict_path: &Path) -> String {
     )
 }
 
-/// 검증자 내부 argv — spec 계약: `pi --provider opencodex --model <verifier_model>`.
+/// 검증자 내부 argv — spec 계약: `pi --provider opencodex --model <verifier_model>
+/// --no-session --no-extensions --no-mcp -p <prompt>` (`pi`는 `--no-approve` 미지원).
 fn verifier_inner_argv(state: &PipelineState, verdict_path: &Path) -> Vec<String> {
     let mut a = vec![
         roster::resolve_worker_bin(roster::WorkerCliKind::Pi, None),
@@ -489,7 +490,7 @@ fn verifier_inner_argv(state: &PipelineState, verdict_path: &Path) -> Vec<String
         a.push(state.verifier_model.clone());
     }
     a.extend(
-        ["--no-extensions", "--no-mcp", "--no-approve"]
+        ["--no-session", "--no-extensions", "--no-mcp", "-p"]
             .iter()
             .map(|s| s.to_string()),
     );
@@ -532,9 +533,10 @@ fn advisor_inner_argv(cfg: &ExecConfig, state: &PipelineState) -> Vec<String> {
             roster::resolve_worker_bin(roster::WorkerCliKind::Pi, None),
             "--provider".to_string(),
             "opencodex".to_string(),
+            "--no-session".to_string(),
             "--no-extensions".to_string(),
             "--no-mcp".to_string(),
-            "--no-approve".to_string(),
+            "-p".to_string(),
             prompt,
         ]
     }
@@ -579,16 +581,25 @@ fn wrap_inner_command(is_windows: bool, role: &str, inner: &[String]) -> Vec<Str
             "set".to_string(),
             "HERDR_DELEGATE_MODE=hc&&".to_string(),
         ];
+        if role == "verifier" {
+            argv.push("set".to_string());
+            argv.push(r"PI_CODING_AGENT_DIR=%USERPROFILE%\.pi\agent-verify&&".to_string());
+        }
         argv.extend(inner.iter().map(|a| cmd_escape_token(a)));
         argv.push("<".to_string());
         argv.push("NUL".to_string());
         argv
     } else {
+        let verifier_env = if role == "verifier" {
+            r#" PI_CODING_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent-verify}""#
+        } else {
+            ""
+        };
         vec![
             "sh".to_string(),
             "-c".to_string(),
             format!(
-                "exec env HERDR_ROLE={role} HERDR_DELEGATE_MODE=hc {} </dev/null",
+                "exec env HERDR_ROLE={role} HERDR_DELEGATE_MODE=hc{verifier_env} {} </dev/null",
                 inner
                     .iter()
                     .map(|a| sh_quote(a))
@@ -1467,6 +1478,10 @@ mod run_tests {
         let joined = cmds.iter().map(|c| c.join(" ")).collect::<Vec<_>>().join("\n");
         assert!(joined.contains("--role verifier"));
         assert!(joined.contains("opencodex") && joined.contains("glm-5.3"));
+        assert!(joined.contains("--no-session"));
+        assert!(joined.contains("-p"));
+        assert!(joined.contains("PI_CODING_AGENT_DIR="));
+        assert!(!joined.contains("--no-approve"));
 
         // advisor_g3_running — dg wrap --role advisor + gh pr create 계획 포함
         let mut s3 = state.clone();
