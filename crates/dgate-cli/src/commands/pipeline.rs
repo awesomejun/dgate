@@ -478,7 +478,8 @@ fn verifier_prompt(state: &PipelineState, verdict_path: &Path) -> String {
 }
 
 /// 검증자 내부 argv — spec 계약: `pi --provider opencodex --model <verifier_model>
-/// --no-session --no-extensions --no-mcp -p <prompt>` (`pi`는 `--no-approve` 미지원).
+/// --no-session --no-extensions --no-mcp --no-skills --mode json -p <prompt>`
+/// (`pi`는 `--no-approve` 미지원, `--mode json` 스트리밍으로 무출력 stall 오탐 방지).
 fn verifier_inner_argv(state: &PipelineState, verdict_path: &Path) -> Vec<String> {
     let mut a = vec![
         roster::resolve_worker_bin(roster::WorkerCliKind::Pi, None),
@@ -490,9 +491,17 @@ fn verifier_inner_argv(state: &PipelineState, verdict_path: &Path) -> Vec<String
         a.push(state.verifier_model.clone());
     }
     a.extend(
-        ["--no-session", "--no-extensions", "--no-mcp", "-p"]
-            .iter()
-            .map(|s| s.to_string()),
+        [
+            "--no-session",
+            "--no-extensions",
+            "--no-mcp",
+            "--no-skills",
+            "--mode",
+            "json",
+            "-p",
+        ]
+        .iter()
+        .map(|s| s.to_string()),
     );
     a.push(verifier_prompt(state, verdict_path));
     a
@@ -802,10 +811,15 @@ fn hc_get(hc: &str, term: &str) -> Option<Value> {
     serde_json::from_slice(&out.stdout).ok()
 }
 
-/// `hc wait <t> --json` — 워커가 "일을 멈출 때"까지 블록한다(sleep·폴링 금지 계약).
+/// `hc wait <t> --timeout 300 --json` — 워커가 "일을 멈출 때"까지 블록한다(sleep·폴링 금지 계약).
+const HC_WAIT_TIMEOUT_SECS: &str = "300";
+/// `hc_run_to_exit` 대기 라운드 상한 — 6 × 300s = 1800s(30분) > `WRAP_MAX_MS`(1500s).
+/// 기본 3×180s(9분)에서 조기 exit 1되어 `die_with_parent`로 정상 워커를 SIGHUP 종료하는 사고 방지.
+const HC_WAIT_MAX_ROUNDS: usize = 6;
+
 fn hc_wait(hc: &str, term: &str) -> Result<Value, String> {
     let out = ProcCommand::new(hc)
-        .args(["wait", term, "--json"])
+        .args(["wait", term, "--timeout", HC_WAIT_TIMEOUT_SECS, "--json"])
         .output()
         .map_err(|e| format!("hc 실행 불가: {e}"))?;
     if !out.status.success() {
@@ -870,8 +884,9 @@ fn hc_run_to_exit(hc: &str, sess: &str, cwd: &Path, argv: &[String]) -> Result<V
             hc_spawn(hc, sess, cwd, argv)?;
         }
     }
-    // 비종료 사유(message·idle 등)로 wait가 조기 반환될 수 있어 유한 재시도로 완충한다.
-    for _ in 0..3 {
+    // 비종료 사유(message·idle·300s 창 만료 등)로 wait가 조기 반환될 수 있어
+    // `WRAP_MAX_MS`(1500s)를 충분히 덮는 상한(6×300s=1800s)까지 대기한다.
+    for _ in 0..HC_WAIT_MAX_ROUNDS {
         let _ = hc_wait(hc, sess)?;
         let after = hc_get(hc, sess);
         if hc_session_state(after.as_ref()) == Some("finished") {
@@ -1492,6 +1507,8 @@ mod run_tests {
         assert!(!joined.contains("--fork fk_r"));
         assert!(joined.contains("opencodex") && joined.contains("glm-5.3"));
         assert!(joined.contains("--no-session"));
+        assert!(joined.contains("--no-skills"));
+        assert!(joined.contains("--mode json") || joined.contains("--mode' 'json"));
         assert!(joined.contains("-p"));
         assert!(joined.contains("PI_CODING_AGENT_DIR="));
         assert!(!joined.contains("--no-approve"));
