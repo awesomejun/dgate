@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/dependencies-0_npm-2ea043?style=flat-square" alt="dependencies">
   <a href="#7-rust-v2-네이티브-cli--선택적-gpui-데스크톱-관제앱"><img src="https://img.shields.io/badge/Rust_v2_+_GPUI-~3.7ms_startup-dea584?style=flat-square" alt="Rust"></a>
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-0078d4?style=flat-square" alt="platform">
-  <a href="#7-rust-v2-네이티브-cli--선택적-gpui-데스크톱-관제앱"><img src="https://img.shields.io/badge/tests-439_Rust_%2B_10_installer-2ea043?style=flat-square" alt="tests"></a>
+  <a href="#7-rust-v2-네이티브-cli--선택적-gpui-데스크톱-관제앱"><img src="https://img.shields.io/badge/tests-453_Rust_%2B_10_installer-2ea043?style=flat-square" alt="tests"></a>
   <img src="https://img.shields.io/badge/node-%3E%3D22.6-339933?style=flat-square" alt="node">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-111827?style=flat-square" alt="license"></a>
 </p>
@@ -52,8 +52,8 @@
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <h3>🖥️ 실시간 관제 TUI &amp; GPUI 데스크톱 앱</h3>
-      Rust 네이티브 <code>dgate-tui</code>(ratatui 2열 토폴로지 · 10fps 모션)와 <code>dgate-gui</code>(GPUI 0.2.2 GPU 앱). <code>roster.json</code>이 아니라 실행 중 세션에서 직접 읽은 <code>cli · model · effort</code> 실측 텔레메트리와 <code>↳ sublead-*</code> 클러스터·오버플로 가로 팬을 제공한다.
+      <h3>🖥️ 실시간 TUI · SSE 웹 · GPUI 관제</h3>
+      Rust 네이티브 <code>dgate-tui</code>(ratatui) · <code>dg serve</code>(무의존성 localhost SSE 웹 토폴로지) · <code>dgate-gui</code>(GPUI 0.2.2). <code>hc</code> · <code>dg wrap</code> · <code>herdr agent list</code> · 단독 OS <code>ps</code> 프로세스를 실시간 매핑하고, <code>θ_sharp</code> 임계선과 <code>PASS/rework/fail</code> 요약을 표시한다.
     </td>
     <td width="50%" valign="top">
       <h3>🌐 크로스 플랫폼 &amp; ~3.7ms 네이티브 기동</h3>
@@ -72,11 +72,11 @@
 git clone https://github.com/insightflo/dgate.git && cd dgate
 npm run build            # cargo build --release --workspace
 npm run install:global   # ~/.local/bin에 dgate-tui · dgate-gui · dg · dgate 전역 설치
-dgate-tui                # 실시간 관제 TUI 시작 — 또는 dgate-gui(GPUI 앱) / dg(통계 CLI)
+dgate-tui                # 실시간 관제 TUI 시작 — 또는 dg serve(localhost SSE 웹) / dgate-gui(GPUI 앱)
 ```
 
 > [!TIP]
-> 첫 환경 설정은 `npm run setup`(모델 호출 0회 · 0토큰 대화형 위저드)으로 한 번에 끝낼 수 있습니다. 전역 설치 해제는 `npm run uninstall:global`.
+> **무침습 3모듈 독립 도입**: 전면 도입 없이 ① **모니터 단독**(`dgate-tui` · `dg serve` · `dgate-gui`, 레포 파일 수정 0건) ② **라우터 단독**(`dg route` · `dg suggest-session`) ③ **풀 오케스트레이터**(`dg dispatch` · `dg pipeline`) 중 필요한 모듈만 골라 쓸 수 있습니다. 레포 훅/계약 블록 설치는 명시 동의 opt-in이며, 첫 환경 설정은 `npm run setup`(0토큰 위저드)으로 끝납니다.
 
 ---
 
@@ -142,7 +142,7 @@ npm run setup:check      # 읽기전용 진단 리포트만 (파일 쓰기 0)
 # 1) 오케스트레이션 계획 리허설 (모델 호출 0회, 실기동 0회 — 무조건 안전)
 ./target/release/dg dispatch --task-kind multi_edit --repo . --dry-run
 
-# 2) 전체 테스트 449건 — Rust 워크스페이스 439 + 설치 스크립트 10
+# 2) 전체 테스트 463건 — Rust 워크스페이스 453 + 설치 스크립트 10
 npm test                 # = cargo test --workspace && node --test tests/*.test.ts
 
 # 3) 데모 TUI 스냅샷 (DB·hc 없이 관제 화면 정적 출력)
@@ -305,7 +305,7 @@ dg <command> [flags]
 `dg wrap`이 워커 자식을 `detached` 프로세스 그룹으로 띄워 종료 코드·신호·출력 tail을 함께 수집하고, 결과를 `commitWrapOutcome` 단일 트랜잭션으로 SSOT에 기록합니다(이중 표본·TOCTOU 차단). `--expected-gen`/`--expected-attempt` 펜스로 세대·시도 불일치의 stale 커밋을 거부하고, 디스패처는 `repo_scope` cooperative lease로 동일 저장소를 점유 중인 세션과의 중복 디스패치를 미룹니다.
 
 - **산출물·출력 계약** — `--require-artifact <path>`, `--require-nonempty`, `--require-stdout-nonempty`를 clean exit(0) 시 AND 게이트로 검사. stdout 첫 비공백 줄이 `rerouted`면 리드 승격 신호로 닫힘.
-- **워치독** — `--stall-ms`(기본 120s) 무출력 스톨 시 프로세스 그룹 SIGTERM→SIGKILL + 리덕션 20줄 tail 보존, `--max-ms`(기본 20분) 총 시간 상한, `--heartbeat-ms`(기본 60s) TTL 갱신.
+- **워치독** — `--stall-ms`(기본 300s, `DGATE_STALL_MS` 오버라이드) 무출력 스톨 시 `--stall-action kill`(기본, 프로세스 그룹 SIGTERM→SIGKILL + 리덕션 20줄 tail 보존) 또는 `--stall-action warn`(킬 없이 경고만 출력, `DGATE_STALL_ACTION`), `--max-ms`(기본 20분) 총 시간 상한, `--heartbeat-ms`(기본 60s) TTL 갱신.
 - **`FailureCause` 11종** — `ok_pass`·`transient_network`·`tool_error`·`max_turns`·`no_result`·`artifact_missing`·`gate_fail`·`stall`·`timeout`·`config_error`·`interrupted`. `config_error`·`interrupted`·환경류 오류는 EWMA 오염에서 격리되고 `ttl_orphan` 정산은 w=1.0 실패 표본을 강제합니다.
 
 </details>
@@ -355,7 +355,8 @@ dg <command> [flags]
 - **Sublead 클러스터 & 루트 PID 귀속** — 중첩 `hc run --bg -- dg wrap` 자식 워커도 루트 PID(`wrap_pid == terminal.pid`)까지 추적해 소유 sublead 클러스터(`↳ sublead-*` 배지)에 자동 귀속합니다.
 - **활성 코더 우선 노출 & 오버플로 스크롤** — Workers 그리드는 **활성 클러스터(코더) → 미소속 워커 → 빈 sublead** 순으로 정렬하고, `←/→` 가로 슬라이딩 창으로 `+N개 더` 오버플로 카드까지 탐색합니다.
 - **내장 서브에이전트 경고** — 리드가 내장 서브에이전트(`invoke_subagent`)를 호출하면 Lead 카드에 관측 불가 경고 배지를 띄웁니다.
-- **localhost SSE 웹 대시보드** — `dg serve [--port 4747] [--repo <dir>]`는 `http://127.0.0.1:4747`에서 OS `ps`/`hc` 프로세스와 `herdr agent list` 어댑터 좌석을 같은 실시간 토폴로지로 스트리밍합니다. `dg wrap --stall-action warn`은 장기 실행 워커를 죽이지 않고 무출력 경고만 남깁니다.
+- **localhost SSE 웹 대시보드 (`dg serve`)** — `dg serve [--port 4747] [--repo <dir>]`는 외부 크레이트 0개(`127.0.0.1` 전용)로 `GET /` · `/api/snapshot` · `/api/stream`(SSE)을 제공하며, `ps`/`hc`/`herdr agent list` 좌석과 단독 OS AI 프로세스(`os:<pid>`)를 곡선 베지어 팬아웃·우측 인스펙터 칩 그리드로 실시간 시각화합니다.
+- **시각 계층 & 임계선 마커** — TUI · Web · GPUI 공통으로 Decision Gate 바에 `θ_sharp`(0.70) 임계선 마커를 표시하고, 하단 `다시 Lead` 카드에 실측 `PASS · rework · fail · human` 요약, 활성/대기 노드 광도 분리, 중복 벤더 모델명 자동 축약을 적용했습니다.
 
 ```bash
 npm run dgate-tui                        # 기본 관제 TUI (현재 세션 · 기본 DB 자동 연결, 전체는 -- --all)
@@ -407,10 +408,10 @@ cargo run -p dgate-gui -- [--repo <dir>] [--db <path>] [--roster <path>] [--watc
 
 | 대상 | 테스트 수 | 실행 명령 |
 | :--- | :--- | :--- |
-| **Rust 워크스페이스** | **439건** (`core` 314 · `cli` 24 · `e2e` 11 · `gui` 45 · `tui` 45) | `cargo test --workspace` |
+| **Rust 워크스페이스** | **453건** (`core` 325 · `cli` 27 · `e2e` 11 · `gui` 45 · `tui` 45) | `cargo test --workspace` |
 | **전역 설치 스크립트** | **10건** (래퍼 생성 · 멱등 · win32 계약) | `node --test tests/install-global.test.ts` |
 
-`npm test`로 449건 전수를 한 번에 실행합니다.
+`npm test`로 463건 전수를 한 번에 실행합니다.
 
 ---
 
