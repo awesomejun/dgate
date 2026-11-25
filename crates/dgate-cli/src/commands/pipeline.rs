@@ -423,8 +423,9 @@ fn coder_prompt(
     verdict_path: Option<&str>,
 ) -> String {
     let mut p = format!(
-        "브리프 파일 {} 를 읽고 Standards/Spec/Merge Danger을 모두 준수해 구현하라. \
-         git commit/push는 금지. 완료 시 변경 요약을 최종 메시지로 출력하라",
+        "브리프 파일 {} 를 읽고 Standards/Spec/Merge Danger을 모두 준수해 구현한 뒤 \
+         이 워크트리 브랜치에 로컬 git commit까지 완료하라(git push·gh pr create·merge는 금지). \
+         완료 시 변경 요약을 최종 메시지로 출력하라",
         state.brief_path
     );
     if let Some(vp) = verdict_path {
@@ -952,6 +953,28 @@ fn parse_pr_number(text: &str) -> Option<u64> {
 
 // ---------- 실제 실행기 ----------
 
+/// 코더가 exit 0으로 종료했는데 로컬 커밋을 빠뜨린 경우 안전망으로 자동 스테이징·로컬 커밋해
+/// 다음 verifier 단계가 변경분이 포함된 실제 `HEAD`를 검증하도록 보장한다(clean이면 no-op).
+fn ensure_worktree_committed(cwd: &Path, fork_id: &str, attempt: u32) {
+    let cwd_s = cwd.display().to_string();
+    let Ok(status) = ProcCommand::new("git")
+        .args(["-C", &cwd_s, "status", "--porcelain"])
+        .output()
+    else {
+        return;
+    };
+    if !status.status.success() || String::from_utf8_lossy(&status.stdout).trim().is_empty() {
+        return;
+    }
+    let _ = ProcCommand::new("git")
+        .args(["-C", &cwd_s, "add", "-A"])
+        .output();
+    let msg = format!("chore(pipeline): auto-commit {fork_id} attempt {attempt}");
+    let _ = ProcCommand::new("git")
+        .args(["-C", &cwd_s, "commit", "-m", &msg])
+        .output();
+}
+
 /// 실제 실행기 — hc+`dg wrap` 워커 스폰·대기·결과 수집. 모든 외부 명령은
 /// `plan_commands`와 동일한 argv로 실행된다(dry-run 출력 = 실제 실행 명령).
 pub struct RealPipelineExecutor {
@@ -978,7 +1001,15 @@ impl RealPipelineExecutor {
         let argv = wrap_spawn_argv(&self.cfg, &sess, "coder", "file_edit", step_fork, None, &inner);
         let info = hc_run_to_exit(&self.cfg.hc_bin, &sess, &cwd, &argv)?;
         let mut event = coder_event_from_session(&self.cfg.hc_bin, &sess, &info);
-        if let PipelineEvent::CoderExited { ref mut head_sha, .. } = event {
+        if let PipelineEvent::CoderExited {
+            exit_code,
+            stalled,
+            ref mut head_sha,
+        } = event
+        {
+            if exit_code == 0 && !stalled {
+                ensure_worktree_committed(&cwd, &state.fork_id, attempt);
+            }
             *head_sha = verdict::resolve_git_head(&cwd);
         }
         hc_rm(&self.cfg.hc_bin, &sess);
@@ -1486,6 +1517,8 @@ mod run_tests {
         assert!(joined.contains("dg wrap") || joined.contains("dg\" wrap") || joined.contains(" wrap "));
         let stdin_redir = if cfg!(windows) { "< NUL" } else { "</dev/null" };
         assert!(joined.contains("devin") && joined.contains(stdin_redir));
+        assert!(joined.contains("로컬 git commit까지 완료하라"));
+        assert!(!joined.contains("git commit/push는 금지"));
         assert!(cmds.iter().any(|c| c[0] == "hc" && c[1] == "wait"));
         assert!(cmds.iter().any(|c| c[0] == "git" && c.join(" ").contains("rev-parse")));
 
