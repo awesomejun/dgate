@@ -81,9 +81,30 @@
 
   .subline {
     height: 38px; padding: 0 18px 9px;
-    display: flex; align-items: center; justify-content: space-between; gap: 14px;
+    display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    align-items: center; gap: 14px;
   }
   .status-strip, .provider-pills { display: flex; align-items: center; gap: 7px; min-width: 0; overflow: hidden; }
+  .status-strip { justify-self: start; }
+  .provider-pills { justify-self: end; }
+  .wire-switchers { display: flex; align-items: center; justify-content: center; gap: 10px; min-width: 0; }
+  .wire-control { display: flex; align-items: center; gap: 5px; min-width: 0; }
+  .wire-control-label { color: var(--muted); font-size: 9.8px; font-weight: 850; letter-spacing: .42px; white-space: nowrap; }
+  .wire-segmented {
+    display: inline-flex; align-items: center; gap: 2px; padding: 2px;
+    border: 1px solid rgba(148, 163, 184, 0.20); border-radius: 999px;
+    background: rgba(13, 18, 29, 0.76); box-shadow: inset 0 0 0 1px rgba(255,255,255,.018);
+  }
+  .wire-seg {
+    border: 0; border-radius: 999px; background: transparent; color: var(--soft);
+    padding: 3px 8px; font-size: 10px; font-weight: 800; line-height: 1.2;
+    cursor: pointer; white-space: nowrap; transition: color .14s, background .14s, box-shadow .14s;
+  }
+  .wire-seg:hover { color: var(--text); background: rgba(148, 163, 184, 0.09); }
+  .wire-seg.active {
+    color: var(--teal); background: rgba(45, 212, 191, 0.13);
+    box-shadow: inset 0 0 0 1px rgba(45, 212, 191, 0.28), 0 0 10px rgba(45, 212, 191, 0.07);
+  }
   .status-bit, .provider-pill {
     border: 1px solid rgba(148, 163, 184, 0.18); border-radius: 999px;
     background: rgba(17, 23, 36, 0.58); color: var(--soft);
@@ -131,21 +152,35 @@
     position: absolute; inset: 0; z-index: 1;
     width: 100%; height: 100%; overflow: visible; pointer-events: none;
   }
-  .wire-path { fill: none; stroke-width: 1.9; stroke-linecap: round; opacity: .48; }
+  .wire-casing {
+    fill: none; stroke: #090c12; stroke-width: 6; stroke-opacity: .88;
+    stroke-linecap: round; stroke-linejoin: round;
+  }
+  .wire-path { fill: none; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; opacity: .48; }
   .wire-path.active { opacity: .93; stroke-width: 2.35; filter: drop-shadow(0 0 4px currentColor); }
   .wire-path.dotted { stroke-dasharray: 4 6; opacity: .40; }
-  .wire-flow {
-    fill: none; stroke-width: 3.1; stroke-linecap: round;
-    stroke-dasharray: 1 18; opacity: .9;
-    animation: wireDash 1.45s linear infinite;
+  .wire-flow { fill: none; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
+  .wire-flow-packet-body {
+    stroke-width: 4; opacity: .42; stroke-dasharray: 16 25;
+    animation: packetBodyDash 1.45s linear infinite;
+  }
+  .wire-flow-packet-head {
+    stroke-width: 2.2; opacity: .96; stroke-dasharray: 6 35;
+    animation: packetHeadDash 1.45s linear infinite;
     filter: drop-shadow(0 0 5px currentColor);
   }
   .wire-orb { filter: url(#orbGlow); opacity: .95; }
-  .wire-label-bg { fill: rgba(13, 18, 29, 0.94); stroke-width: 1; }
+  .wire-chevron {
+    fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+    filter: drop-shadow(0 0 3px currentColor); pointer-events: none;
+  }
+  .wire-junction { stroke: #090c12; stroke-width: 1.4; }
+  .wire-label-bg { fill: #0e131f; stroke-width: 1; }
   .wire-label-txt { fill: #a9bad4; font-size: 10px; font-weight: 700; text-anchor: middle; dominant-baseline: middle; letter-spacing: .1px; }
-  .paused .wire-flow { animation-play-state: paused; opacity: .20; }
+  .paused .wire-flow-packet-body, .paused .wire-flow-packet-head { animation-play-state: paused; opacity: .18; }
   .paused .wire-orb { opacity: .20; }
-  @keyframes wireDash { to { stroke-dashoffset: -19; } }
+  @keyframes packetBodyDash { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -41; } }
+  @keyframes packetHeadDash { from { stroke-dashoffset: -10; } to { stroke-dashoffset: -51; } }
 
   /* Shared cards */
   .card {
@@ -373,8 +408,14 @@
     .top-row { gap: 28px; }
     .workers-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   }
+  @media (max-width: 1100px) {
+    .wire-control-label { display: none; }
+    .wire-seg { padding: 3px 6px; font-size: 9.7px; }
+  }
   @media (max-width: 940px) {
     .main { grid-template-columns: 1fr; }
+    .subline { grid-template-columns: 1fr; height: auto; row-gap: 6px; padding-bottom: 10px; }
+    .status-strip, .wire-switchers, .provider-pills { justify-self: center; }
     .inspector { display: none; }
     .stage { grid-template-columns: 1fr; row-gap: 26px; }
     .advisor-col { min-height: 420px; }
@@ -397,6 +438,25 @@
     <div class="subline">
       <div class="status-strip" id="statusStrip">
         <span class="status-bit">WATCH</span><span class="status-bit live">LIVE</span><span class="status-bit">forks 0</span><span class="status-bit">PASS/rework/fail 0/0/0</span>
+      </div>
+      <div class="wire-switchers" aria-label="연결선 표시 설정">
+        <div class="wire-control">
+          <span class="wire-control-label">선</span>
+          <div class="wire-segmented" id="shapeSwitcher" role="group" aria-label="연결선 라우팅">
+            <button class="wire-seg" type="button" data-shape="bezier">곡선</button>
+            <button class="wire-seg" type="button" data-shape="rounded">둥근 엘보</button>
+            <button class="wire-seg" type="button" data-shape="bus">버스</button>
+          </div>
+        </div>
+        <div class="wire-control">
+          <span class="wire-control-label">흐름</span>
+          <div class="wire-segmented" id="flowSwitcher" role="group" aria-label="연결선 흐름">
+            <button class="wire-seg" type="button" data-flow="packet">패킷</button>
+            <button class="wire-seg" type="button" data-flow="comet">혜성</button>
+            <button class="wire-seg" type="button" data-flow="particle">알갱이</button>
+            <button class="wire-seg" type="button" data-flow="chevron">셰브런</button>
+          </div>
+        </div>
       </div>
       <div class="provider-pills" id="providerPills"><span class="provider-pill empty">provider 없음</span></div>
     </div>
@@ -519,6 +579,21 @@
   let repoFilter = 'all';
   let paused = false;
   let sseLive = false;
+  const WIRE_SHAPES = ['bezier', 'rounded', 'bus'];
+  const WIRE_FLOWS = ['packet', 'comet', 'particle', 'chevron'];
+  function readWirePref(key, fallback, allowed) {
+    try {
+      const value = window.localStorage.getItem(key);
+      return allowed.includes(value) ? value : fallback;
+    } catch (_) {
+      return fallback;
+    }
+  }
+  function writeWirePref(key, value) {
+    try { window.localStorage.setItem(key, value); } catch (_) {}
+  }
+  let wireShape = readWirePref('dgate.wire.shape', 'bezier', WIRE_SHAPES);
+  let flowStyle = readWirePref('dgate.wire.flow', 'packet', WIRE_FLOWS);
 
   const $ = (id) => document.getElementById(id);
   const C = { amber: '#f59e0b', gold: '#facc15', teal: '#2dd4bf', cyan: '#38bdf8', violet: '#c084fc', rose: '#fb7185' };
@@ -580,6 +655,35 @@
   });
   $('tabDetail').addEventListener('click', () => { activeTab = 'detail'; syncTabs(); renderInspector(); });
   $('tabLogs').addEventListener('click', () => { activeTab = 'logs'; syncTabs(); renderInspector(); });
+  document.querySelectorAll('[data-shape]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      wireShape = btn.getAttribute('data-shape');
+      writeWirePref('dgate.wire.shape', wireShape);
+      syncWireSwitchers();
+      requestAnimationFrame(drawWires);
+    });
+  });
+  document.querySelectorAll('[data-flow]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      flowStyle = btn.getAttribute('data-flow');
+      writeWirePref('dgate.wire.flow', flowStyle);
+      syncWireSwitchers();
+      requestAnimationFrame(drawWires);
+    });
+  });
+  function syncWireSwitchers() {
+    document.querySelectorAll('[data-shape]').forEach(btn => {
+      const active = btn.getAttribute('data-shape') === wireShape;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+    document.querySelectorAll('[data-flow]').forEach(btn => {
+      const active = btn.getAttribute('data-flow') === flowStyle;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+  }
+  syncWireSwitchers();
   function syncTabs() {
     $('tabDetail').classList.toggle('active', activeTab === 'detail');
     $('tabLogs').classList.toggle('active', activeTab === 'logs');
@@ -899,8 +1003,138 @@
   function markerDefs() {
     return `<defs>
       <filter id="orbGlow" x="-120%" y="-120%" width="340%" height="340%"><feGaussianBlur stdDeviation="3.2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-      ${Object.entries(C).map(([name, color]) => `<marker id="arrow-${name}" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M 1 1.2 L 9 5 L 1 8.8 L 3 5 z" fill="${color}"/></marker><marker id="arrow-${name}-start" viewBox="0 0 10 10" refX="1.5" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M 1 1.2 L 9 5 L 1 8.8 L 3 5 z" fill="${color}"/></marker>`).join('')}
+      <marker id="wire-arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M 1 1.2 L 9 5 L 1 8.8 L 3 5 z" fill="context-stroke"/></marker>
+      <marker id="wire-arrow-start" viewBox="0 0 10 10" refX="1.5" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M 1 1.2 L 9 5 L 1 8.8 L 3 5 z" fill="context-stroke"/></marker>
     </defs>`;
+  }
+
+  function nf(v) {
+    return String(Math.round((Number(v) + Number.EPSILON) * 10) / 10);
+  }
+  function simplifyRoutePoints(points) {
+    const deduped = [];
+    points.forEach(pt => {
+      if (!pt) return;
+      const last = deduped[deduped.length - 1];
+      if (!last || Math.hypot(pt.x - last.x, pt.y - last.y) > 0.01) deduped.push(pt);
+    });
+    if (deduped.length < 3) return deduped;
+    const out = [deduped[0]];
+    for (let i = 1; i < deduped.length - 1; i++) {
+      const a = out[out.length - 1];
+      const b = deduped[i];
+      const c = deduped[i + 1];
+      const cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+      if (Math.abs(cross) > 0.01) out.push(b);
+    }
+    out.push(deduped[deduped.length - 1]);
+    return out;
+  }
+  function roundedPath(points, radius = 10) {
+    const pts = simplifyRoutePoints(points);
+    if (pts.length < 2) return '';
+    let d = `M ${nf(pts[0].x)} ${nf(pts[0].y)}`;
+    for (let i = 1; i < pts.length; i++) {
+      const p = pts[i];
+      if (i === pts.length - 1) {
+        d += ` L ${nf(p.x)} ${nf(p.y)}`;
+        break;
+      }
+      const prev = pts[i - 1];
+      const next = pts[i + 1];
+      const inX = p.x - prev.x;
+      const inY = p.y - prev.y;
+      const outX = next.x - p.x;
+      const outY = next.y - p.y;
+      const inLen = Math.hypot(inX, inY);
+      const outLen = Math.hypot(outX, outY);
+      const r = Math.min(radius, inLen / 2, outLen / 2);
+      if (!inLen || !outLen || r < 0.5) {
+        d += ` L ${nf(p.x)} ${nf(p.y)}`;
+      } else {
+        const before = { x: p.x - (inX / inLen) * r, y: p.y - (inY / inLen) * r };
+        const after = { x: p.x + (outX / outLen) * r, y: p.y + (outY / outLen) * r };
+        d += ` L ${nf(before.x)} ${nf(before.y)} Q ${nf(p.x)} ${nf(p.y)} ${nf(after.x)} ${nf(after.y)}`;
+      }
+    }
+    return d;
+  }
+  function bezierVerticalPath(sx, sy, ex, ey, landing = 12) {
+    const delta = ey - sy;
+    const dir = delta >= 0 ? 1 : -1;
+    const landY = Math.abs(delta) > landing + 8 ? ey - dir * landing : sy + delta * 0.72;
+    const midY = (sy + landY) / 2;
+    return `M ${nf(sx)} ${nf(sy)} C ${nf(sx)} ${nf(midY)}, ${nf(ex)} ${nf(midY)}, ${nf(ex)} ${nf(landY)} L ${nf(ex)} ${nf(ey)}`;
+  }
+  function routeVertical(sx, sy, ex, ey, opts = {}) {
+    if (wireShape === 'bezier') return bezierVerticalPath(sx, sy, ex, ey, opts.landing || 12);
+    const midY = opts.midY ?? (sy + ey) / 2;
+    return roundedPath([
+      { x: sx, y: sy },
+      { x: sx, y: midY },
+      { x: ex, y: midY },
+      { x: ex, y: ey }
+    ], opts.radius || (wireShape === 'bus' ? 9 : 10));
+  }
+  function bezierHorizontalPath(sx, sy, ex, ey) {
+    const control = (ex - sx) * 0.45;
+    return `M ${nf(sx)} ${nf(sy)} C ${nf(sx + control)} ${nf(sy)}, ${nf(ex - control)} ${nf(ey)}, ${nf(ex)} ${nf(ey)}`;
+  }
+  function routeHorizontal(sx, sy, ex, ey, opts = {}) {
+    if (Math.abs(ey - sy) < 0.5) return `M ${nf(sx)} ${nf(sy)} L ${nf(ex)} ${nf(ey)}`;
+    if (wireShape === 'bezier') return bezierHorizontalPath(sx, sy, ex, ey);
+    const midX = opts.midX ?? (sx + ex) / 2;
+    return roundedPath([
+      { x: sx, y: sy },
+      { x: midX, y: sy },
+      { x: midX, y: ey },
+      { x: ex, y: ey }
+    ], opts.radius || 10);
+  }
+  function spreadXPositions(box, count, margin = 16) {
+    if (count <= 1) return [box.cx];
+    const usable = Math.max(0, box.w - margin * 2);
+    const step = usable / (count - 1);
+    return Array.from({ length: count }, (_, i) => box.l + margin + step * i);
+  }
+  function busRailY(topY, bottomY) {
+    if (!Number.isFinite(topY) || !Number.isFinite(bottomY) || bottomY <= topY) return topY;
+    if (bottomY - topY < 40) return (topY + bottomY) / 2;
+    const mid = topY + (bottomY - topY) * 0.48;
+    return Math.min(bottomY - 22, Math.max(topY + 18, mid));
+  }
+  function orbMotion(pathId, color, r, opacity, begin = '0s', hiddenUntilBegin = false) {
+    const hidden = hiddenUntilBegin ? ' visibility="hidden"' : '';
+    const reveal = hiddenUntilBegin ? `<set attributeName="visibility" to="visible" begin="${begin}"/>` : '';
+    return `<circle class="wire-orb" r="${r}" fill="${color}" opacity="${opacity}"${hidden}>${reveal}<animateMotion dur="3.8s" repeatCount="indefinite" rotate="auto" begin="${begin}"><mpath href="#${pathId}"/></animateMotion></circle>`;
+  }
+  function mountChevrons(svg, sources) {
+    if (!sources.length) return;
+    const ns = 'http://www.w3.org/2000/svg';
+    const labelLayer = svg.querySelector('#wire-label-layer');
+    sources.forEach(source => {
+      const path = svg.querySelector(`#${source.id}`);
+      if (!path || !path.getTotalLength || !path.getPointAtLength) return;
+      const len = path.getTotalLength();
+      if (!Number.isFinite(len) || len < 44) return;
+      const positions = [];
+      for (let at = 30; at < len - 22; at += 68) positions.push(at);
+      if (!positions.length) positions.push(len / 2);
+      positions.forEach(at => {
+        const p = path.getPointAtLength(at);
+        const before = path.getPointAtLength(Math.max(0, at - 1.6));
+        const after = path.getPointAtLength(Math.min(len, at + 1.6));
+        const angle = Math.atan2(after.y - before.y, after.x - before.x) * 180 / Math.PI;
+        const chevron = document.createElementNS(ns, 'path');
+        chevron.setAttribute('class', 'wire-chevron');
+        chevron.setAttribute('d', 'M -2.8 -4 L 4.5 0 L -2.8 4');
+        chevron.setAttribute('transform', `translate(${nf(p.x)} ${nf(p.y)}) rotate(${nf(angle)})`);
+        chevron.setAttribute('stroke', source.color);
+        chevron.setAttribute('style', `color:${source.color};opacity:${source.active ? 0.92 : 0.36}`);
+        if (labelLayer) svg.insertBefore(chevron, labelLayer);
+        else svg.appendChild(chevron);
+      });
+    });
   }
 
   function drawWires() {
@@ -936,20 +1170,38 @@
 
     const parts = [markerDefs()];
     const labels = [];
+    const chevronSources = [];
+    const busJunctions = new Map();
     let wireIndex = 0;
     function addLabel(x, y, text, width, color) {
       labels.push(`<rect class="wire-label-bg" x="${x - width / 2}" y="${y - 10}" width="${width}" height="20" rx="10" stroke="${color}" stroke-opacity="0.32"/>`);
       labels.push(`<text class="wire-label-txt" x="${x}" y="${y + 0.5}">${esc(text)}</text>`);
     }
-    function addWire({ d, color, colorName, active = false, dotted = false, startArrow = false, label = null, labelX = 0, labelY = 0, labelW = 88 }) {
+    function addBusJunction(x, y) {
+      busJunctions.set(`${Math.round(x)}:${Math.round(y)}`, { x, y });
+    }
+    function appendFlow(pathId, d, color, active) {
+      if (!active) return;
+      if (flowStyle === 'packet') {
+        parts.push(`<path class="wire-flow wire-flow-packet-body" d="${d}" stroke="${color}" style="color:${color}"/>`);
+        parts.push(`<path class="wire-flow wire-flow-packet-head" d="${d}" stroke="${color}" style="color:${color}"/>`);
+      } else if (flowStyle === 'comet') {
+        parts.push(orbMotion(pathId, color, 3.4, 0.98));
+        parts.push(orbMotion(pathId, color, 2.5, 0.62, '0.14s', true));
+        parts.push(orbMotion(pathId, color, 1.8, 0.38, '0.28s', true));
+        parts.push(orbMotion(pathId, color, 1.2, 0.22, '0.42s', true));
+      } else if (flowStyle === 'particle') {
+        parts.push(orbMotion(pathId, color, 3.2, 0.96));
+      }
+    }
+    function addWire({ d, color, active = false, dotted = false, startArrow = false, arrow = true, label = null, labelX = 0, labelY = 0, labelW = 88 }) {
       const idx = wireIndex++;
       const pathId = `wire-path-${idx}`;
       const cls = `wire-path ${active ? 'active' : ''} ${dotted ? 'dotted' : ''}`;
-      parts.push(`<path id="${pathId}" class="${cls}" d="${d}" stroke="${color}" style="color:${color}" marker-end="url(#arrow-${colorName})" ${startArrow ? `marker-start="url(#arrow-${colorName}-start)"` : ''}/>`);
-      if (active) {
-        parts.push(`<path class="wire-flow" d="${d}" stroke="${color}" style="color:${color}"/>`);
-        parts.push(`<circle class="wire-orb" r="3.2" fill="${color}"><animateMotion dur="3.8s" repeatCount="indefinite" rotate="auto"><mpath href="#${pathId}"/></animateMotion></circle>`);
-      }
+      parts.push(`<path class="wire-casing" d="${d}"/>`);
+      parts.push(`<path id="${pathId}" class="${cls}" d="${d}" stroke="${color}" style="color:${color}" ${arrow ? 'marker-end="url(#wire-arrow)"' : ''} ${startArrow ? 'marker-start="url(#wire-arrow-start)"' : ''}/>`);
+      if (flowStyle === 'chevron') chevronSources.push({ id: pathId, color, active });
+      appendFlow(pathId, d, color, active);
       if (label) addLabel(labelX, labelY, label, labelW, color);
     }
 
@@ -959,57 +1211,63 @@
 
     // Advisor ↔ Lead / Workers / Return — 3 horizontal dotted violet gate wires.
     addWire({
-      d: `M ${adv.r + 2} ${lead.cy} L ${lead.l - 8} ${lead.cy}`,
-      color: C.violet, colorName: 'violet', active: advActive, dotted: true, startArrow: true,
+      d: routeHorizontal(adv.r + 2, lead.cy, lead.l - 8, lead.cy),
+      color: C.violet, active: advActive, dotted: true, startArrow: true,
       label: '◇ G1 계획', labelX: (adv.r + lead.l) / 2, labelY: lead.cy, labelW: 78
     });
     addWire({
-      d: `M ${adv.r + 2} ${wbox.cy} L ${wbox.l - 8} ${wbox.cy}`,
-      color: C.violet, colorName: 'violet', active: advActive, dotted: true, startArrow: true,
+      d: routeHorizontal(adv.r + 2, wbox.cy, wbox.l - 8, wbox.cy),
+      color: C.violet, active: advActive, dotted: true, startArrow: true,
       label: '◇ G2 오류·스톨', labelX: (adv.r + wbox.l) / 2, labelY: wbox.cy, labelW: 100
     });
     addWire({
-      d: `M ${adv.r + 2} ${back.cy} L ${back.l - 8} ${back.cy}`,
-      color: C.violet, colorName: 'violet', active: advActive, dotted: true, startArrow: true,
+      d: routeHorizontal(adv.r + 2, back.cy, back.l - 8, back.cy),
+      color: C.violet, active: advActive, dotted: true, startArrow: true,
       label: '◇ G3 완료', labelX: (adv.r + back.l) / 2, labelY: back.cy, labelW: 82
     });
 
     // Lead → Verifier.
     addWire({
-      d: `M ${lead.r + 3} ${lead.cy} C ${lead.r + 18} ${lead.cy}, ${ver.l - 18} ${ver.cy}, ${ver.l - 5} ${ver.cy}`,
-      color: C.gold, colorName: 'gold', active: verActive,
+      d: routeHorizontal(lead.r + 3, lead.cy, ver.l - 5, ver.cy),
+      color: C.gold, active: verActive,
       label: '읽기전용 격리', labelX: (lead.r + ver.l) / 2, labelY: lead.cy, labelW: 88
     });
 
     // Lead → Decision Gate (수직 랜딩 스텁으로 화살촉 정중앙에 90° 직입).
     const ldSy = lead.b + 3;
     const ldEy = dec.t - 4;
-    const ldLand = Math.max(ldSy + 10, ldEy - 12);
-    const ldMid = (ldSy + ldLand) / 2;
     addWire({
-      d: `M ${lead.cx} ${ldSy} C ${lead.cx} ${ldMid}, ${dec.cx} ${ldMid}, ${dec.cx} ${ldLand} L ${dec.cx} ${ldEy}`,
-      color: C.amber, colorName: 'amber', active: leadActive,
-      label: '분기 질의', labelX: (lead.cx + dec.cx) / 2, labelY: ldMid, labelW: 70
+      d: routeVertical(lead.cx, ldSy, dec.cx, ldEy, { landing: 12 }),
+      color: C.amber, active: leadActive,
+      label: '분기 질의', labelX: (lead.cx + dec.cx) / 2, labelY: (ldSy + ldEy) / 2, labelW: 70
     });
 
     // Decision Gate → each visible worker card.
-    const workerCards = Array.from(document.querySelectorAll('[data-worker]')).map((el, i, arr) => ({
+    const workerCards = Array.from(document.querySelectorAll('[data-worker]')).map((el) => ({
       el,
       active: el.getAttribute('data-active') === 'true',
-      r: rectOf(el),
-      ratio: arr.length <= 1 ? 0.5 : i / (arr.length - 1)
+      r: rectOf(el)
     })).filter(x => x.r);
+    const workerCount = workerCards.length;
+    const decisionPorts = spreadXPositions(dec, workerCount, 16);
+    const returnPorts = spreadXPositions(back, workerCount, 16);
+    const firstWorkerTop = workerCount ? Math.min(...workerCards.map(w => w.r.t)) : 0;
+    const lastWorkerBottom = workerCount ? Math.max(...workerCards.map(w => w.r.b)) : 0;
+    const fanoutBusY = workerCount ? busRailY(dec.b + 4, firstWorkerTop - 4) : 0;
+    const faninBusY = workerCount ? busRailY(lastWorkerBottom + 4, back.t - 4) : 0;
+
     workerCards.forEach((w, i) => {
-      const spread = (i - (workerCards.length - 1) / 2) * 14;
-      const sx = dec.cx + spread;
+      const sx = wireShape === 'bus' ? dec.cx : (decisionPorts[i] || dec.cx);
       const sy = dec.b + 4;
       const ex = w.r.cx;
       const ey = w.r.t - 4;
-      const landY = Math.max(sy + 16, ey - 10);
-      const midY = (sy + landY) / 2;
+      if (wireShape === 'bus') {
+        addBusJunction(sx, fanoutBusY);
+        addBusJunction(ex, fanoutBusY);
+      }
       addWire({
-        d: `M ${sx} ${sy} C ${sx} ${midY}, ${ex} ${midY}, ${ex} ${landY} L ${ex} ${ey}`,
-        color: C.cyan, colorName: 'cyan', active: w.active
+        d: routeVertical(sx, sy, ex, ey, wireShape === 'bus' ? { midY: fanoutBusY, radius: 9, landing: 10 } : { landing: 10 }),
+        color: C.cyan, active: w.active
       });
     });
 
@@ -1017,26 +1275,44 @@
     workerCards.forEach((w, i) => {
       const sx = w.r.cx;
       const sy = w.r.b + 4;
-      const ex = back.l + back.w * (workerCards.length <= 1 ? 0.5 : 0.16 + 0.68 * (i / (workerCards.length - 1)));
+      const ex = wireShape === 'bus' ? back.cx : (returnPorts[i] || back.cx);
       const ey = back.t - 4;
-      const landY = Math.max(sy + 12, ey - 12);
-      const midY = (sy + landY) / 2;
+      if (wireShape === 'bus') {
+        addBusJunction(sx, faninBusY);
+        addBusJunction(ex, faninBusY);
+      }
       addWire({
-        d: `M ${sx} ${sy} C ${sx} ${midY}, ${ex} ${midY}, ${ex} ${landY} L ${ex} ${ey}`,
-        color: C.cyan, colorName: 'cyan', active: w.active
+        d: routeVertical(sx, sy, ex, ey, wireShape === 'bus' ? { midY: faninBusY, radius: 9, landing: 12 } : { landing: 12 }),
+        color: C.cyan, active: w.active
       });
     });
 
     // Bottom Return → Verifier, sweeping up the right side with clean horizontal landing.
     const loopX = Math.min(width - 18, Math.max(ver.r, back.r) + 32);
     const verY = ver.cy + 10;
+    const loopD = wireShape === 'bezier'
+      ? `M ${nf(back.r + 4)} ${nf(back.cy)} C ${nf(loopX)} ${nf(back.cy)}, ${nf(loopX)} ${nf(verY)}, ${nf(ver.r + 18)} ${nf(verY)} L ${nf(ver.r + 4)} ${nf(verY)}`
+      : roundedPath([
+          { x: back.r + 4, y: back.cy },
+          { x: loopX, y: back.cy },
+          { x: loopX, y: verY },
+          { x: ver.r + 4, y: verY }
+        ], wireShape === 'bus' ? 9 : 10);
     addWire({
-      d: `M ${back.r + 4} ${back.cy} C ${loopX} ${back.cy}, ${loopX} ${verY}, ${ver.r + 18} ${verY} L ${ver.r + 4} ${verY}`,
-      color: C.gold, colorName: 'gold', active: verActive,
+      d: loopD,
+      color: C.gold, active: verActive,
       label: '교차검증 · 회귀루프', labelX: Math.max(76, loopX - 58), labelY: (back.cy + ver.cy) / 2, labelW: 116
     });
 
-    svg.innerHTML = parts.concat(labels).join('');
+    if (wireShape === 'bus' && busJunctions.size) {
+      parts.push(Array.from(busJunctions.values()).map(j =>
+        `<circle class="wire-junction" cx="${nf(j.x)}" cy="${nf(j.y)}" r="2.8" fill="${C.cyan}"/>`
+      ).join(''));
+    }
+
+    parts.push(`<g id="wire-label-layer">${labels.join('')}</g>`);
+    svg.innerHTML = parts.join('');
+    if (flowStyle === 'chevron') mountChevrons(svg, chevronSources);
     if (paused && svg.pauseAnimations) svg.pauseAnimations();
   }
 
