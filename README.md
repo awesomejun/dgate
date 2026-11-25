@@ -20,7 +20,7 @@
   <a href="#3-모델구독-가변-설정-rosterjson--환경변수">Roster 설정</a> ·
   <a href="#4-타-로컬-저장소-공용-실행---repo--dg-cli">Sublead 파이프라인 &amp; CLI</a> ·
   <a href="#5-보안격리-설계">보안·격리</a> ·
-  <a href="#6-dgate-tui-관제-화면">TUI / GPUI</a>
+  <a href="#6-dgate-tuiweb-관제-화면">TUI / Web / GPUI</a>
 </p>
 
 로컬 CLI 에이전트(`claude` · `codex` · `devin` · `pi` · `gemini` · `agy` · `custom`)를 5개 역할 슬롯(`lead` · `explore` · `coder` · `verifier` · `advisor`)에 자유 바인딩하고, SQLite 실측 통계가 안정된 태스크는 읽기전용 워커로 직행시켜 **리드 LLM 턴을 0으로** 만든다. 구독·쿼터가 바뀌면 `roster.json` 하나만 교체한다.
@@ -251,7 +251,7 @@ flowchart LR
 - **`--after <fork_id>`(fork 의존성 ready-frontier)** — 선행 fork가 살아 있으면(`open`·`waiting_human`) 발행을 미루고(`deferred:true`), 닫힌 뒤 정상 발행하며 `metadata_json.after_fork`에 기록합니다.
 
 <details>
-<summary><b><code>dg</code> 서브커맨드 25종 전체 참조</b></summary>
+<summary><b><code>dg</code> 서브커맨드 26종 전체 참조</b></summary>
 
 ```bash
 dg <command> [flags]
@@ -268,7 +268,8 @@ dg <command> [flags]
 | `attempt` | fork `generation`·`attempt` 펜스 조회·증가 (`--bump-gen`, DDL v2) |
 | `retro` | fork 회고 마크다운(상태·원인·실패 도구·권고)을 다음 워커 브리프용으로 생성 |
 | `settle-orphans` | TTL 만료 fork 일괄 정산 |
-| `wrap` | 워커 커맨드 래핑 — 워치독 감시·산출물 계약·원자 커밋으로 SSOT 기록 (§5) |
+| `wrap` | 워커 커맨드 래핑 — 워치독 감시·산출물 계약·원자 커밋으로 SSOT 기록 (§5). `--stall-action warn`은 무출력 임계 초과 시 킬 대신 경고만 출력 |
+| `serve` | `--port 4747` · `--repo <dir>` · `--poll-ms 1500` — localhost 전용 실시간 SSE 웹 토폴로지 대시보드 (§6) |
 | `stats` | 비용·실행/대기 시간 통계 (`--cost`·`--timing`·`--days`·`--db`) — 완전 읽기전용, 구간 합집합으로 병렬 중복 제거 |
 | `checkpoint` | 워크트리 체크포인트 `create\|verify\|restore` — git 패치+untracked 스냅숏, sha256 manifest 검증 |
 | `worktree` | `worktree remove` — 체크포인트 검증 통과 전 삭제 물리 차단 (`exit 4`, 우회 불가) |
@@ -347,17 +348,19 @@ dg <command> [flags]
 
 ---
 
-## 6. dgate TUI 관제 화면
+## 6. dgate TUI/Web 관제 화면
 
-읽기전용 라이브 관제 TUI입니다. `roster.json` 변경을 핫리로드로 반영하고, 실행 중인 `hc` 세션과 `dg wrap` 백그라운드 프로세스에서 직접 읽은 **`cli · model · effort` 실측 텔레메트리**를 실시간으로 표시합니다.
+읽기전용 라이브 관제 TUI/Web입니다. `roster.json` 변경을 핫리로드로 반영하고, 실행 중인 `hc` 세션·`dg wrap` 백그라운드 프로세스·독립 OS AI CLI 프로세스에서 직접 읽은 **`cli · model · effort` 실측 텔레메트리**를 실시간으로 표시합니다.
 
 - **Sublead 클러스터 & 루트 PID 귀속** — 중첩 `hc run --bg -- dg wrap` 자식 워커도 루트 PID(`wrap_pid == terminal.pid`)까지 추적해 소유 sublead 클러스터(`↳ sublead-*` 배지)에 자동 귀속합니다.
 - **활성 코더 우선 노출 & 오버플로 스크롤** — Workers 그리드는 **활성 클러스터(코더) → 미소속 워커 → 빈 sublead** 순으로 정렬하고, `←/→` 가로 슬라이딩 창으로 `+N개 더` 오버플로 카드까지 탐색합니다.
 - **내장 서브에이전트 경고** — 리드가 내장 서브에이전트(`invoke_subagent`)를 호출하면 Lead 카드에 관측 불가 경고 배지를 띄웁니다.
+- **localhost SSE 웹 대시보드** — `dg serve [--port 4747] [--repo <dir>]`는 `http://127.0.0.1:4747`에서 OS `ps`/`hc` 프로세스와 `herdr agent list` 어댑터 좌석을 같은 실시간 토폴로지로 스트리밍합니다. `dg wrap --stall-action warn`은 장기 실행 워커를 죽이지 않고 무출력 경고만 남깁니다.
 
 ```bash
 npm run dgate-tui                        # 기본 관제 TUI (현재 세션 · 기본 DB 자동 연결, 전체는 -- --all)
 npm run dgate-gui                        # GPUI 데스크톱 관제앱 (cargo run -p dgate-gui)
+dg serve --port 4747                     # localhost SSE 웹 대시보드 (--repo <dir>로 저장소 범위 제한 가능)
 dgate-tui --repo /path/to/your-project   # 저장소 단위 모니터 (--repo <dir>)
 dgate-tui --demo                         # 내장 데모 데이터 렌더 (DB·hc 없이)
 dgate-tui --snapshot                     # 현재 상태 정적 스냅샷 출력

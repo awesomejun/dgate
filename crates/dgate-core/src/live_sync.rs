@@ -1332,7 +1332,7 @@ fn token_base(token: &str) -> String {
 /// argv 앞단의 `env` + `KEY=VAL` 토큰 제거.
 fn strip_env_prefix(tokens: &[String]) -> &[String] {
     let mut i = 0;
-    if tokens.first().map(String::as_str) == Some("env") {
+    if tokens.first().is_some_and(|t| token_base(t) == "env") {
         i += 1;
     }
     while i < tokens.len() && re_env_assign_arg().is_match(&tokens[i]) {
@@ -1935,6 +1935,95 @@ pub fn find_wrap_processes(rows: &[PsRow]) -> Vec<WrapProc> {
             project_path,
             project,
             route: flag_value(&tokens, "--route"),
+        });
+    }
+    out
+}
+
+/// 독립 실행 AI CLI 5종 — `hc` 터미널·`dg wrap` 트리에 속하지 않는 OS 프로세스만 카드로 만든다.
+const STANDALONE_AI_CLIS: [&str; 5] = ["devin", "pi", "claude", "codex", "gemini"];
+
+/// 독립 프로세스 카드로 승격하면 안 되는 도움말·데몬·보조 서브커맨드 호출 판정.
+fn is_standalone_helper_invocation(cli: &str, tokens: &[String]) -> bool {
+    let first_arg = tokens.get(1).map(String::as_str);
+    if matches!(first_arg, Some("--help" | "-h" | "--version" | "-V")) {
+        return true;
+    }
+    cli == "devin" && matches!(first_arg, Some("acp" | "daemon"))
+}
+
+/// 대상 pid 자체 또는 조상 체인 중 하나라도 제외 집합에 있으면 true — hc/wrap 소유 프로세스의
+/// 이중 카드를 원천 차단한다.
+fn ps_row_has_excluded_pid_or_ancestor(
+    row: &PsRow,
+    by_pid: &HashMap<u64, &PsRow>,
+    excluded_pids: &HashSet<u64>,
+) -> bool {
+    if excluded_pids.contains(&row.pid) {
+        return true;
+    }
+    let mut cur = row.ppid;
+    for _ in 0..64 {
+        if excluded_pids.contains(&cur) {
+            return true;
+        }
+        if cur <= 1 {
+            return false;
+        }
+        let Some(parent) = by_pid.get(&cur) else {
+            return false;
+        };
+        if parent.ppid == cur {
+            return false;
+        }
+        cur = parent.ppid;
+    }
+    false
+}
+
+/// raw `ps` 행에서 `hc`/`dg wrap`에 속하지 않은 독립 AI CLI 프로세스를 찾는다.
+/// raw `ps` 행은 cwd를 싣지 않으므로 repo 스코프 판정은 호출자 책임이다.
+pub fn find_standalone_ai_processes(
+    rows: &[PsRow],
+    excluded_pids: &HashSet<u64>,
+) -> Vec<LiveWorkerInfo> {
+    let by_pid: HashMap<u64, &PsRow> = rows.iter().map(|r| (r.pid, r)).collect();
+    let mut out = Vec::new();
+    for row in rows {
+        let raw_tokens = split_tokens(&row.command);
+        let tokens = strip_env_prefix(&raw_tokens);
+        let Some(head) = tokens.first() else {
+            continue;
+        };
+        let cli = token_base(head);
+        if !STANDALONE_AI_CLIS.contains(&cli.as_str())
+            || is_standalone_helper_invocation(&cli, tokens)
+            || ps_row_has_excluded_pid_or_ancestor(row, &by_pid, excluded_pids)
+        {
+            continue;
+        }
+        let (_, model) = parse_worker_cli_and_model(tokens, None);
+        let effort = parse_worker_effort(tokens);
+        let short_model = format_role_badge(&cli, model.as_deref());
+        out.push(LiveWorkerInfo {
+            slot: LiveWorkerSlot::Coder,
+            badge: format!("{} (실행 중)", short_model),
+            short_model,
+            model_name: model.clone().unwrap_or_else(|| cli.clone()),
+            address: format!("os:{}", row.pid),
+            owner_address: None,
+            name: format!("{}-{}", cli, row.pid),
+            cwd: None,
+            repo_tag: "unknown".to_string(),
+            activity: "OS 프로세스 실행 중 (ps)".to_string(),
+            status: Some("working".to_string()),
+            turn: None,
+            cli,
+            model,
+            effort,
+            subagent_warning: None,
+            recent_io: Vec::new(),
+            recent_output: Vec::new(),
         });
     }
     out
@@ -2700,85 +2789,90 @@ impl LiveSyncSnapshotter {
             //      프로세스 트리에서만 보인다. 조상 pid가 hc 세션(pid/foreground.pid)과 맞으면
             //      그 세션 소속으로 Workers에 올린다.
             if let Some(ps_out) = (self.proc_lister)() {
-                let procs = find_wrap_processes(&parse_ps_rows(&ps_out));
-                if !procs.is_empty() {
-                    let terminals: &[HcTerminalSummary] =
-                        all_terminals.as_deref().unwrap_or(&[]);
-                    self.pid_cache
-                        .retain(|addr, _| terminals.iter().any(|t| &t.address == addr));
-                    let mut fetched = 0usize;
-                    let mut pid_owner: HashMap<u64, (&HcTerminalSummary, bool)> = HashMap::new();
-                    // parent 있는 서브-리드/워커 터미널을 먼저 캐싱해 다수의 유휴 셸 탭(20+)이
-                    // 있더라도 첫 틱부터 wrap 소유자 매핑이 누락되지 않게 한다.
-                    let mut live_terminals: Vec<&HcTerminalSummary> = terminals
-                        .iter()
-                        .filter(|t| t.state.as_deref() == Some("live"))
-                        .collect();
-                    live_terminals.sort_by_key(|t| t.parent.is_none());
-                    for t in live_terminals {
-                        if !self.pid_cache.contains_key(&t.address) && fetched < 32 {
-                            fetched += 1;
-                            if let Ok(raw) = self.runner.exec(
-                                &self.hc_bin,
-                                &["get", t.address.as_str(), "--json"],
-                                HC_LS_TIMEOUT_MS,
-                            ) {
-                                self.pid_cache.insert(
-                                    t.address.clone(),
-                                    parse_hc_get_process_info(&raw),
-                                );
-                            }
-                        }
-                        if let Some(info) = self.pid_cache.get(&t.address) {
-                            for pid in &info.pids {
-                                pid_owner.insert(*pid, (t, info.dedicated_wrap_host));
-                            }
+                let rows = parse_ps_rows(&ps_out);
+                let procs = find_wrap_processes(&rows);
+                let terminals: &[HcTerminalSummary] = all_terminals.as_deref().unwrap_or(&[]);
+                self.pid_cache
+                    .retain(|addr, _| terminals.iter().any(|t| &t.address == addr));
+                let mut fetched = 0usize;
+                let mut pid_owner: HashMap<u64, (&HcTerminalSummary, bool)> = HashMap::new();
+                // parent 있는 서브-리드/워커 터미널을 먼저 캐싱해 다수의 유휴 셸 탭(20+)이
+                // 있더라도 첫 틱부터 wrap 소유자 매핑이 누락되지 않게 한다.
+                let mut live_terminals: Vec<&HcTerminalSummary> = terminals
+                    .iter()
+                    .filter(|t| t.state.as_deref() == Some("live"))
+                    .collect();
+                live_terminals.sort_by_key(|t| t.parent.is_none());
+                for t in live_terminals {
+                    if !self.pid_cache.contains_key(&t.address) && fetched < 32 {
+                        fetched += 1;
+                        if let Ok(raw) = self.runner.exec(
+                            &self.hc_bin,
+                            &["get", t.address.as_str(), "--json"],
+                            HC_LS_TIMEOUT_MS,
+                        ) {
+                            self.pid_cache.insert(
+                                t.address.clone(),
+                                parse_hc_get_process_info(&raw),
+                            );
                         }
                     }
-                    let repo_scope = self.repo_filter_dir.as_deref().and_then(|p| p.to_str());
-                    for p in &procs {
-                        // `hc run --bg -- dg wrap …`는 중간 셸 없이 `dg` 자체가 터미널 루트 pid
-                        // (`t.pid == p.wrap_pid`)로 exec되므로 wrap_pid 자체를 먼저 조회하고,
-                        // 없으면 조상 pid 체인을 탐색한다.
-                        let owner = pid_owner
-                            .get(&p.wrap_pid)
-                            .copied()
-                            .or_else(|| p.ancestors.iter().find_map(|a| pid_owner.get(a).copied()));
-                        let Some((owner, owner_dedicated_wrap_host)) = owner else {
-                            // 고아 wrap(nohup & 등으로 PPID=1)도 미소속 카드로 표시 —
-                            // --project 있을 때만 레포 스코프 필터를 적용한다.
-                            let scope_ok = p
-                                .project_path
-                                .as_deref()
-                                .map(|pp| matches_repo_scope(Some(pp), repo_scope))
-                                .unwrap_or(true);
-                            if !scope_ok {
-                                continue;
-                            }
-                            workers.push(wrap_proc_to_unowned_worker(p));
-                            continue;
-                        };
-                        if !matches_repo_scope(owner.cwd.as_deref(), repo_scope) {
-                            continue;
+                    if let Some(info) = self.pid_cache.get(&t.address) {
+                        for pid in &info.pids {
+                            pid_owner.insert(*pid, (t, info.dedicated_wrap_host));
                         }
-                        let mut worker = wrap_proc_to_worker(p, owner);
-                        // `hc run --bg -- dg wrap` 전용 터미널은 카드가 억제되는
-                        // 실행 껍데기다. 비-sublead 자식 워커는 이 껍데기 주소가 아니라
-                        // hc parent(보통 해당 껍데기를 만든 sublead 터미널)에 귀속시켜
-                        // sublead 클러스터가 자식 수를 실제로 보이게 한다.
-                        // 반대로 일반 셸/CLI 안에서 동기 실행한 wrap은 기존처럼 실행
-                        // 터미널 자신을 소유자로 유지한다.
-                        if owner_dedicated_wrap_host && worker.slot != LiveWorkerSlot::Sublead {
-                            if let Some(parent_addr) = owner
-                                .parent
-                                .as_deref()
-                                .filter(|addr| !addr.trim().is_empty())
-                            {
-                                worker.owner_address = Some(parent_addr.to_string());
-                            }
-                        }
-                        workers.push(worker);
                     }
+                }
+                let repo_scope = self.repo_filter_dir.as_deref().and_then(|p| p.to_str());
+                for p in &procs {
+                    // `hc run --bg -- dg wrap …`는 중간 셸 없이 `dg` 자체가 터미널 루트 pid
+                    // (`t.pid == p.wrap_pid`)로 exec되므로 wrap_pid 자체를 먼저 조회하고,
+                    // 없으면 조상 pid 체인을 탐색한다.
+                    let owner = pid_owner
+                        .get(&p.wrap_pid)
+                        .copied()
+                        .or_else(|| p.ancestors.iter().find_map(|a| pid_owner.get(a).copied()));
+                    let Some((owner, owner_dedicated_wrap_host)) = owner else {
+                        // 고아 wrap(nohup & 등으로 PPID=1)도 미소속 카드로 표시 —
+                        // --project 있을 때만 레포 스코프 필터를 적용한다.
+                        let scope_ok = p
+                            .project_path
+                            .as_deref()
+                            .map(|pp| matches_repo_scope(Some(pp), repo_scope))
+                            .unwrap_or(true);
+                        if !scope_ok {
+                            continue;
+                        }
+                        workers.push(wrap_proc_to_unowned_worker(p));
+                        continue;
+                    };
+                    if !matches_repo_scope(owner.cwd.as_deref(), repo_scope) {
+                        continue;
+                    }
+                    let mut worker = wrap_proc_to_worker(p, owner);
+                    // `hc run --bg -- dg wrap` 전용 터미널은 카드가 억제되는
+                    // 실행 껍데기다. 비-sublead 자식 워커는 이 껍데기 주소가 아니라
+                    // hc parent(보통 해당 껍데기를 만든 sublead 터미널)에 귀속시켜
+                    // sublead 클러스터가 자식 수를 실제로 보이게 한다.
+                    // 반대로 일반 셸/CLI 안에서 동기 실행한 wrap은 기존처럼 실행
+                    // 터미널 자신을 소유자로 유지한다.
+                    if owner_dedicated_wrap_host && worker.slot != LiveWorkerSlot::Sublead {
+                        if let Some(parent_addr) = owner
+                            .parent
+                            .as_deref()
+                            .filter(|addr| !addr.trim().is_empty())
+                        {
+                            worker.owner_address = Some(parent_addr.to_string());
+                        }
+                    }
+                    workers.push(worker);
+                }
+                // raw ps 행은 cwd를 싣지 않으므로 repo 스코프가 있을 때는 독립 OS 프로세스를
+                // 합치지 않는다(다른 레포 프로세스 누출 방지). 전역 관측(None)에서만 허용한다.
+                if self.repo_filter_dir.is_none() {
+                    let mut excluded_pids: HashSet<u64> = pid_owner.keys().copied().collect();
+                    excluded_pids.extend(procs.iter().map(|p| p.wrap_pid));
+                    workers.extend(find_standalone_ai_processes(&rows, &excluded_pids));
                 }
             }
             // 3.6) `herdr agent list --json` 어댑터 — 상주 AI 좌석 병합(fail-open: 미설치·오류 시 무시).
@@ -3404,6 +3498,65 @@ mod tests {
         );
         assert_eq!(p2[0].effort.as_deref(), Some("medium"));
         assert_eq!(p2[0].project.as_deref(), Some("engine-rust-phase1-explore"));
+    }
+
+    #[test]
+    fn standalone_ai_processes_detect_direct_cli_with_model_and_effort() {
+        let ps = "  800     1 devin --model swe-2-1-high --effort high -p implement scanner\n\
+  801     1 claude --model sonnet\n\
+  802     1 env PI_API=1 pi --model glm-5.3 --thinking medium -p inspect\n";
+        let rows = parse_ps_rows(ps);
+        let workers = find_standalone_ai_processes(&rows, &HashSet::new());
+        assert_eq!(workers.len(), 3);
+
+        let devin = workers.iter().find(|w| w.address == "os:800").unwrap();
+        assert_eq!(devin.slot, LiveWorkerSlot::Coder);
+        assert_eq!(devin.name, "devin-800");
+        assert_eq!(devin.cli, "devin");
+        assert_eq!(devin.model.as_deref(), Some("swe-2-1-high"));
+        assert_eq!(devin.effort.as_deref(), Some("high"));
+        assert_eq!(devin.status.as_deref(), Some("working"));
+        assert_eq!(devin.activity, "OS 프로세스 실행 중 (ps)");
+        assert_eq!(devin.owner_address, None);
+
+        let claude = workers.iter().find(|w| w.address == "os:801").unwrap();
+        assert_eq!(claude.cli, "claude");
+        assert_eq!(claude.model.as_deref(), Some("sonnet"));
+
+        let pi = workers.iter().find(|w| w.address == "os:802").unwrap();
+        assert_eq!(pi.cli, "pi");
+        assert_eq!(pi.model.as_deref(), Some("glm-5.3"));
+        assert_eq!(pi.effort.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn standalone_ai_processes_ignore_helper_daemon_and_meta_invocations() {
+        let ps = "  810     1 devin acp --process-model=in-process\n\
+  811     1 devin daemon\n\
+  812     1 pi --help\n\
+  813     1 claude --version\n";
+        let rows = parse_ps_rows(ps);
+        assert!(find_standalone_ai_processes(&rows, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn standalone_ai_processes_skip_excluded_pid_and_ancestors() {
+        let ps = "  900     1 /bin/zsh -l\n\
+  901   900 devin --model swe-2-1-high -p owned by hc\n\
+  902   901 claude --model sonnet\n\
+  910     1 dg wrap --label owned-wrap -- pi --model glm-5.3\n\
+  911   910 pi --model glm-5.3\n\
+  920     1 codex --model gpt-5\n";
+        let rows = parse_ps_rows(ps);
+        let excluded = HashSet::from([900_u64, 910_u64]);
+        let workers = find_standalone_ai_processes(&rows, &excluded);
+        let addresses: Vec<&str> = workers.iter().map(|w| w.address.as_str()).collect();
+        assert_eq!(addresses, vec!["os:920"]);
+
+        let direct_excluded = HashSet::from([901_u64]);
+        let workers = find_standalone_ai_processes(&rows, &direct_excluded);
+        assert!(!workers.iter().any(|w| w.address == "os:901"));
+        assert!(!workers.iter().any(|w| w.address == "os:902"));
     }
 
     #[test]
@@ -4730,4 +4883,88 @@ mod tests {
         assert_eq!(coder.owner_address.as_deref(), Some("tSub"));
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    #[test]
+    fn snapshotter_adds_only_unowned_standalone_os_processes() {
+        let _g: MutexGuard<'_, ()> = env_lock();
+        let tmp = temp_dir("live-standalone-os");
+        std::fs::create_dir_all(&tmp).unwrap();
+        isolate_env(&tmp);
+        let ls = serde_json::json!({
+            "terminals": [
+                { "address": "tShell", "agent": "zsh", "name": "shell", "state": "live", "status": "working", "cwd": "/tmp/repo-a" }
+            ]
+        })
+        .to_string();
+        let details = HashMap::from([(
+            "tShell".to_string(),
+            serde_json::json!({
+                "address": "tShell", "agent": "zsh", "state": "live", "status": "working",
+                "cwd": "/tmp/repo-a", "pid": 900,
+                "foreground": { "pid": 901, "argv": ["devin", "--model", "swe-2-1-high", "-p", "owned"] }
+            })
+            .to_string(),
+        )]);
+        let mock = Arc::new(MockHc::new(vec![ls], details, HashMap::new()));
+        let ps = concat!(
+            " 900     1 /bin/zsh -l\n",
+            " 901   900 devin --model swe-2-1-high -p owned\n",
+            " 902   901 claude --model sonnet\n",
+            " 910     1 dg wrap --label owned-wrap -- pi --model glm-5.3\n",
+            " 911   910 pi --model glm-5.3\n",
+            " 920     1 codex --model gpt-5\n"
+        )
+        .to_string();
+        let mut snap = LiveSyncSnapshotter::new(LiveSyncOptions {
+            repo_dir: tmp.clone(),
+            repo_filter_dir: None,
+            hc_bin: "hc".to_string(),
+            exec_runner: mock,
+            get_watched_lead: None,
+            proc_lister: Arc::new(move || Some(ps.clone())),
+            on_update: None,
+        });
+        let merged = snap.tick_now();
+        let os_workers: Vec<&LiveWorkerInfo> = merged
+            .workers
+            .iter()
+            .filter(|w| w.address.starts_with("os:"))
+            .collect();
+        assert_eq!(os_workers.len(), 1, "duplicate os cards: {:?}", merged.workers);
+        assert_eq!(os_workers[0].address, "os:920");
+        assert_eq!(os_workers[0].cli, "codex");
+        assert!(
+            merged.workers.iter().any(|w| w.address == "pid:910"),
+            "wrap card itself must remain visible"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn snapshotter_skips_standalone_os_processes_when_repo_scoped() {
+        let _g: MutexGuard<'_, ()> = env_lock();
+        let tmp = temp_dir("live-standalone-scope");
+        std::fs::create_dir_all(&tmp).unwrap();
+        isolate_env(&tmp);
+        let ls = serde_json::json!({ "terminals": [] }).to_string();
+        let mock = Arc::new(MockHc::new(vec![ls], HashMap::new(), HashMap::new()));
+        let ps = "  930     1 devin --model swe-2-1-high -p unscoped only\n".to_string();
+        let mut snap = LiveSyncSnapshotter::new(LiveSyncOptions {
+            repo_dir: tmp.clone(),
+            repo_filter_dir: Some(tmp.clone()),
+            hc_bin: "hc".to_string(),
+            exec_runner: mock,
+            get_watched_lead: None,
+            proc_lister: Arc::new(move || Some(ps.clone())),
+            on_update: None,
+        });
+        let merged = snap.tick_now();
+        assert!(
+            !merged.workers.iter().any(|w| w.address.starts_with("os:")),
+            "raw ps rows have no cwd and must not leak into --repo scopes: {:?}",
+            merged.workers
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
 }
