@@ -2568,11 +2568,15 @@ impl LiveSyncSnapshotter {
                         .retain(|addr, _| terminals.iter().any(|t| &t.address == addr));
                     let mut fetched = 0usize;
                     let mut pid_owner: HashMap<u64, (&HcTerminalSummary, bool)> = HashMap::new();
-                    for t in terminals {
-                        if t.state.as_deref() != Some("live") {
-                            continue;
-                        }
-                        if !self.pid_cache.contains_key(&t.address) && fetched < 12 {
+                    // parent 있는 서브-리드/워커 터미널을 먼저 캐싱해 다수의 유휴 셸 탭(20+)이
+                    // 있더라도 첫 틱부터 wrap 소유자 매핑이 누락되지 않게 한다.
+                    let mut live_terminals: Vec<&HcTerminalSummary> = terminals
+                        .iter()
+                        .filter(|t| t.state.as_deref() == Some("live"))
+                        .collect();
+                    live_terminals.sort_by_key(|t| t.parent.is_none());
+                    for t in live_terminals {
+                        if !self.pid_cache.contains_key(&t.address) && fetched < 32 {
                             fetched += 1;
                             if let Ok(raw) = self.runner.exec(
                                 &self.hc_bin,
@@ -2593,7 +2597,13 @@ impl LiveSyncSnapshotter {
                     }
                     let repo_scope = self.repo_filter_dir.as_deref().and_then(|p| p.to_str());
                     for p in &procs {
-                        let owner = p.ancestors.iter().find_map(|a| pid_owner.get(a).copied());
+                        // `hc run --bg -- dg wrap …`는 중간 셸 없이 `dg` 자체가 터미널 루트 pid
+                        // (`t.pid == p.wrap_pid`)로 exec되므로 wrap_pid 자체를 먼저 조회하고,
+                        // 없으면 조상 pid 체인을 탐색한다.
+                        let owner = pid_owner
+                            .get(&p.wrap_pid)
+                            .copied()
+                            .or_else(|| p.ancestors.iter().find_map(|a| pid_owner.get(a).copied()));
                         let Some((owner, owner_dedicated_wrap_host)) = owner else {
                             // 고아 wrap(nohup & 등으로 PPID=1)도 미소속 카드로 표시 —
                             // --project 있을 때만 레포 스코프 필터를 적용한다.
@@ -4342,6 +4352,81 @@ mod tests {
             coder.owner_address.as_deref(),
             Some("tSub"),
             "hc run --bg child coder must attach to the parent sublead terminal, not its own wrap-host terminal"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn direct_exec_hc_run_bg_wrap_matches_root_pid_without_shell() {
+        let _g: MutexGuard<'_, ()> = env_lock();
+        let tmp = temp_dir("live-direct-exec-wrap");
+        std::fs::create_dir_all(&tmp).unwrap();
+        isolate_env(&tmp);
+        let ls = serde_json::json!({
+            "terminals": [
+                { "address": "tSub", "agent": "env", "name": "sublead-rust-p2r", "parent": "t155", "state": "live", "status": "working", "cwd": "/tmp/repo-a" },
+                { "address": "tChild", "agent": "dg", "name": "coder-p2r-w2", "parent": "tSub", "state": "live", "status": "working", "cwd": "/tmp/repo-a" }
+            ]
+        })
+        .to_string();
+        let details = HashMap::from([
+            (
+                "tSub".to_string(),
+                serde_json::json!({
+                    "address": "tSub", "agent": "env", "name": "sublead-rust-p2r", "parent": "t155", "state": "live",
+                    "status": "working", "cwd": "/tmp/repo-a", "pid": 6676,
+                    "argv": ["env", "HERDR_ROLE=sublead", "/usr/local/bin/dg", "wrap", "--role", "sublead", "--label", "sublead-rust-p2r", "--", "pi", "--model", "m-sub"],
+                    "foreground": { "pid": 6676, "argv": ["/usr/local/bin/dg", "wrap", "--role", "sublead", "--label", "sublead-rust-p2r", "--", "pi", "--model", "m-sub"] }
+                })
+                .to_string(),
+            ),
+            (
+                "tChild".to_string(),
+                serde_json::json!({
+                    "address": "tChild", "agent": "dg", "name": "coder-p2r-w2", "parent": "tSub", "state": "live",
+                    "status": "working", "cwd": "/tmp/repo-a", "pid": 29876,
+                    "argv": ["dg", "wrap", "--role", "coder", "--label", "coder-p2r-w2", "--", "/bin/sh", "-c", "devin --model swe-2-1-high -p task"],
+                    "foreground": { "pid": 29876, "argv": ["/usr/local/bin/dg", "wrap", "--role", "coder", "--label", "coder-p2r-w2", "--", "/bin/sh", "-c", "devin --model swe-2-1-high -p task"] }
+                })
+                .to_string(),
+            ),
+        ]);
+        let mock = Arc::new(MockHc::new(vec![ls], details, HashMap::new()));
+        // 실제 hc run --bg 처럼 중간 셸 없이 dg wrap 자체가 터미널 루트 pid로 실행된 ps 트리
+        let ps = concat!(
+            " 6676     1 /usr/local/bin/dg wrap --role sublead --label sublead-rust-p2r -- pi --model m-sub\n",
+            " 6686  6676 pi --model m-sub\n",
+            "29876     1 /usr/local/bin/dg wrap --role coder --label coder-p2r-w2 -- /bin/sh -c devin --model swe-2-1-high -p task\n",
+            "29887 29876 /bin/sh -c devin --model swe-2-1-high -p task\n"
+        )
+        .to_string();
+        let mut snap = LiveSyncSnapshotter::new(LiveSyncOptions {
+            repo_dir: tmp.clone(),
+            repo_filter_dir: None,
+            hc_bin: "hc".to_string(),
+            exec_runner: mock,
+            get_watched_lead: None,
+            proc_lister: Arc::new(move || Some(ps.clone())),
+            on_update: None,
+        });
+        let merged = snap.tick_now();
+        let sub = merged
+            .workers
+            .iter()
+            .find(|w| w.address == "pid:6676")
+            .unwrap_or_else(|| panic!("direct-exec sublead missing: {:?}", merged.workers));
+        assert_eq!(sub.slot, LiveWorkerSlot::Sublead);
+        assert_eq!(sub.owner_address.as_deref(), Some("tSub"));
+        let coder = merged
+            .workers
+            .iter()
+            .find(|w| w.address == "pid:29876")
+            .unwrap_or_else(|| panic!("direct-exec coder missing: {:?}", merged.workers));
+        assert_eq!(coder.slot, LiveWorkerSlot::Coder);
+        assert_eq!(
+            coder.owner_address.as_deref(),
+            Some("tSub"),
+            "direct-exec hc run --bg child coder (wrap_pid == terminal.pid) must attach to parent sublead"
         );
         let _ = std::fs::remove_dir_all(&tmp);
     }
